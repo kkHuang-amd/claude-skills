@@ -130,6 +130,8 @@ with ir.InsertionPoint(_if_row.then_block):
 
 > 模式記起來：建 `scf.IfOp(cond)` → `with ir.InsertionPoint(if_op.then_block):` → body → `scf.YieldOp([])`。這個「進 block 寫 IR」的寫法在工作區到處都是。
 
+> **補充（建議閱讀）**：`InsertionPoint` 是 **MLIR Python** 的通用機制（不是 FlyDSL 專用語法）；何時需要、如何判斷、巢狀 `scf.if` 範例與官方文件連結見 [`01b_mlir_python_insertion_point.md`](./01b_mlir_python_insertion_point.md)。
+
 ### (c) compile-time unroll 迴圈
 
 ```python
@@ -211,8 +213,8 @@ cf(x, y, out, n)   # 之後純 dispatch
 
 - [ ] 我理解 kernel body 是在 trace IR，不是直接運算
 - [ ] 我能分清 `range_constexpr`（unroll）vs `scf.ForOp`（runtime loop）
-- [ ] 我會用 `scf.IfOp` + `ir.InsertionPoint` 寫 runtime 分支
+- [ ] 我會用 `scf.IfOp` + `ir.InsertionPoint` 寫 runtime 分支（細節與判斷準則見 [`01b_mlir_python_insertion_point.md`](./01b_mlir_python_insertion_point.md)）
 - [ ] 我知道 `buffer_load` 的 offset 是 element index
 - [ ] 我能把 kernel 裡的 `//` `%` 對回某個 layout 的 crd2idx
 
-讀完進入 [`02_memory_layout.md`](./02_memory_layout.md)。
+讀完進入 [`02_memory_layout.md`](./02_memory_layout.md)。若仍對 `InsertionPoint` 與巢狀 `scf.if` 不熟，建議先讀 [`01b_mlir_python_insertion_point.md`](./01b_mlir_python_insertion_point.md)。

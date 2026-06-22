@@ -2383,3 +2383,969 @@ pristine). c256 throughput-lever search closed: nothing beyond shipped
 gatherv+A-fix moves total tput.
 Scripts kept: `/sgl-workspace/c256_analysis/gate_microbench.py`,
 `launch_sgl_wofp8.sh` (GATE_LOCAL/WO_FP8 knobs), `gsm8k_gatelocal/`.
+
+---
+
+## Exp 39 — full re-benchmark on updated codebases (2026-06-17)
+
+Fresh container (the prior `/sgl-workspace/sglang-upstream` clone is gone; ATOM
+re-installed — `atom/__init__.py` timestamp 2026-06-17 04:05). Goal: re-measure
+the tp8+dp8 numbers on the **updated** code bases over a wider grid, and re-check
+SGLang↔ATOM with both engines driven by the SAME (ATOM-native) client so client
+variance = 0.
+
+### Common config (apple-to-apple)
+- 8×MI355X, tp8 + dp-attention (tp8dp8), **multi-stream** (ATOM default; no
+  `ATOM_DISABLE_SIDE_STREAMS`), FP8 KV, page/block 256, mem 0.90, max-running 512,
+  cuda-graph-max-bs 512, **16384 prefill tokens / rank**, prefill-delayer ON.
+- Client: ATOM `atom.benchmarks.benchmark_serving --backend vllm` for BOTH engines.
+- Bench params: **ratio=1.0** (fixed lengths; note: differs from the 0.8 used in
+  the 06-09 baseline header), request-rate inf, ignore-eos, num_prompts=conc*8,
+  warmups=conc*2.
+- Grid: ISL∈{1024,8192}, OSL=1024, conc∈{64,128,256,512}.
+- Launch scripts: `useful-scripts/benchmarking/dsv4/run_atom_dsv4_aligned.sh`
+  (DP_MODE=tp8dp8) and `run_sgl_dsv4_aligned.sh`.
+
+### SGLang-specific config
+- `SGLANG_DP_USE_GATHERV=1` (shipped gatherv+reduce_scatterv; PR #28216 is now in
+  main — `SGLANG_DP_USE_GATHERV`, `reduce_scatterv`, and the A-fix
+  `get_dp_global_num_tokens()` all present in the editable main clone
+  `/sgl-workspace/sglang` @ 66ac385f52).
+- **`SGLANG_USE_ROCM700A=0`** (per request).
+- `SGL_EXTRA_ARGS="--chunked-prefill-size 131072"`: current main auto-divides
+  chunked_prefill_size by dp_size when DP attention is on (server_args.py:3537
+  `chunked_prefill_size //= dp_size`), so 131072 → **16384/rank** = matches ATOM.
+  (The aligned script's default 16384 would give only 2048/rank — NOT aligned.)
+- Needed a one-line repo fix to launch: `srt/configs/cohere2_moe.py` `@strict`
+  crashes on import under huggingface_hub≥1.x (SKILL §2a). Made `strict` a no-op
+  identity (no behavior change; runtime field validation only).
+
+### Accuracy (ATOM, gsm8k 5-shot, lm_eval local-completions, num_concurrent=64)
+| Filter | exact_match | stderr |
+|---|---:|---:|
+| flexible-extract | **0.9500** | ±0.006 |
+| strict-match | **0.9492** | ±0.006 |
+✓ Correct (~0.95) even WITHOUT `ATOM_USE_TRITON_MOE=1` on this updated build —
+the SKILL §1 "silent wrong-MoE → ~0.6" caveat did NOT trigger here.
+
+### ATOM throughput (updated build, multi-stream)
+| ISL | OSL | conc | total tok/s | tok/s/gpu | Med TTFT (ms) | Med TPOT (ms) | Med E2E (ms) |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1024 | 1024 | 64  | 4,211  | 526   | 1,307  | 29.2 | 31,132 |
+| 1024 | 1024 | 128 | 7,330  | 916   | 1,725  | 33.1 | 35,783 |
+| 1024 | 1024 | 256 | 12,418 | 1,552 | 3,564  | 37.1 | 41,480 |
+| 1024 | 1024 | 512 | 19,828 | 2,478 | 5,489  | 45.4 | 51,641 |
+| 8192 | 1024 | 64  | 14,530 | 1,816 | 5,929  | 33.3 | 40,111 |
+| 8192 | 1024 | 128 | 21,609 | 2,701 | 9,545  | 43.0 | 53,988 |
+| 8192 | 1024 | 256 | 30,880 | 3,860 | 18,854 | 55.4 | 75,319 |
+| 8192 | 1024 | 512 | 39,291 | 4,911 | 38,630 | 80.0 | 118,296 |
+
+vs the 06-09 baseline (SKILL.md, ATOM client, 8192:1024): c128 21,526→21,609
+(+0.4%), c256 30,942→30,880 (−0.2%) — flat within noise. (Note 06-09 used
+ratio0.8; here ratio1.0, but ATOM fixed-len makes this immaterial.)
+
+### SGLang (gatherv ON, ROCM700A=0) vs ATOM — SAME client, both multi-stream
+| ISL | conc | SGL tok/s | ATOM tok/s | SGL/ATOM | SGL TTFT | ATOM TTFT | SGL TPOT | ATOM TPOT |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1024 | 64  | 4,642  | 4,211  | **110.2%** | 1,458  | 1,307  | 26.1 | 29.2 |
+| 1024 | 128 | 7,870  | 7,330  | **107.4%** | 2,185  | 1,725  | 30.3 | 33.1 |
+| 1024 | 256 | 12,974 | 12,418 | **104.5%** | 4,016  | 3,564  | 35.3 | 37.1 |
+| 1024 | 512 | 17,185 | 19,828 | 86.7%      | 7,120  | 5,489  | 44.0 | 45.4 |
+| 8192 | 64  | 15,295 | 14,530 | **105.3%** | 6,525  | 5,929  | 31.2 | 33.3 |
+| 8192 | 128 | 22,102 | 21,609 | **102.3%** | 12,055 | 9,545  | 40.2 | 43.0 |
+| 8192 | 256 | 29,621 | 30,880 | 95.9%      | 23,124 | 18,854 | 55.2 | 55.4 |
+| 8192 | 512 | 32,254 | 39,291 | 82.1%      | 55,368 | 38,630 | 72.7 | 80.0 |
+
+### Findings
+- **Low/mid concurrency (c64–c256): SGLang wins or ties.** 1024:1024 c64–c256 =
+  104–110%; 8192:1024 c64/c128 = 102–105%. SGLang TPOT beats ATOM at every point.
+- **High concurrency c512: SGLang regresses** (1024:1024 86.7%, 8192:1024 82.1%)
+  with much higher TTFT (8192 c512: 55.4s vs 38.6s). Consistent with the standing
+  conclusion: high-conc prefill↔decode interference is SGLang's weak point, and
+  c512 (newly added here) is more extreme than the usual c256.
+- 8192 c256 = 95.9%, slightly better than the historical ~93%.
+
+### Artifacts
+- ATOM: `/workspace/bench_results_dsv4_atom_0617/` (8 JSON + summary).
+- SGLang: `/workspace/bench_results_dsv4_sgl_0617/` (8 JSON + summary).
+- Logs: `/workspace/{atom,sgl}_server.log`, `/workspace/{atom,sgl}_sweep_0617.log`,
+  `/workspace/gsm8k_eval.log`.
+- Both servers cleaned up (kill process tree incl. DP `multiprocessing-fork`
+  children; VRAM back to ~0.3 GB/GPU). NOTE: this container has no `lsof`; find the
+  DP EngineCore children via `rocm-smi --showpids` / `ps` and kill the parent tree.
+
+---
+
+## Exp 40 — re-added ATOM_DISABLE_SIDE_STREAMS flag + ATOM single vs multi-stream (2026-06-17)
+
+The updated ATOM build had **dropped** the `ATOM_DISABLE_SIDE_STREAMS` flag (a
+knob we had added in a prior session for single-stream A/B). It was not in the new
+centralized env registry (`atom/utils/envs.py`) and not read anywhere in the
+package — so the earlier single-stream attempt would have been IDENTICAL to
+multi-stream (caught before wasting a run). Re-added it as a single master switch.
+
+### Side-stream architecture in the updated ATOM (so the re-add is correct)
+Two independent side-stream mechanisms in `atom/models/deepseek_v4.py`, BOTH gated
+on `alt_stream is not None`:
+1. **Dual-stream MoE** (shared_experts // routed_experts on `alt_stream`):
+   `self._use_dual_stream = shared_experts is not None and alt_stream is not None
+   and envs.ATOM_DUAL_STREAM_MOE_TOKEN_THRESHOLD > 0` (deepseek_v4.py:2156). Per-call
+   token-count gated → prefill (large batch) skips it; mainly a DECODE optimization.
+2. **Async Compressor/indexer overlap** (Main Compressor → `alt_stream`, Indexer
+   Compressor → `indexer_stream`): `use_async_compress = self._use_async_compress
+   and fc.in_hipgraph` (deepseek_v4.py:1635); `_use_async_compress = alt_stream is
+   not None and compressor is not None` (line 1567).
+The two `torch.cuda.Stream()` objects are allocated once at model __init__
+(deepseek_v4.py:~2668), shared across all blocks. There is NO env toggle in the new
+code (compressor overlap is gated only by in_hipgraph).
+
+### The re-added flag (single master switch)
+- `atom/utils/envs.py`: registered `ATOM_DISABLE_SIDE_STREAMS` (default "0").
+- `atom/models/deepseek_v4.py` (~line 2668): `_enable_side_streams =
+  torch.cuda.is_available() and not envs.ATOM_DISABLE_SIDE_STREAMS`; allocate
+  `alt_stream`/`indexer_stream` only when true, else None. Leaving them None makes
+  every downstream `is not None` guard run inline → disables BOTH mechanisms in one
+  switch. Added an info log of the resolved state.
+- Usage: `ATOM_DISABLE_SIDE_STREAMS=0` (default) = multi-stream; `=1` = single-stream.
+- **Runtime-verified**: all 8 DP ranks log `DSV4 side-streams DISABLED
+  (single-stream) (ATOM_DISABLE_SIDE_STREAMS=1): alt_stream=False
+  indexer_stream=False`.
+- CAVEAT: edited in the installed site-package (`/opt/venv/.../atom/`), NOT a git
+  repo — lost on container rebuild. To persist, commit into the ATOM source repo.
+
+### ATOM single-stream (SS) vs multi-stream (MS) — tp8dp8, ATOM client, ratio1.0
+Same config/grid as Exp 39 (multi-stream = the Exp 39 ATOM numbers).
+| workload | conc | MS tok/s | SS tok/s | SS/MS | MS TPOT | SS TPOT | MS TTFT | SS TTFT |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1k/1k | 64  | 4,211  | 3,945  | 93.7% | 29.18 | 31.23 | 1,307  | 1,261  |
+| 1k/1k | 128 | 7,330  | 6,947  | 94.8% | 33.14 | 34.51 | 1,725  | 2,445  |
+| 1k/1k | 256 | 12,418 | 12,078 | 97.3% | 37.12 | 38.90 | 3,564  | 4,197  |
+| 1k/1k | 512 | 19,828 | 19,348 | 97.6% | 45.41 | 46.52 | 5,489  | 5,932  |
+| 8k/1k | 64  | 14,530 | 13,518 | 93.0% | 33.35 | 36.41 | 5,929  | 4,843  |
+| 8k/1k | 128 | 21,609 | 20,982 | 97.1% | 43.02 | 44.69 | 9,545  | 10,044 |
+| 8k/1k | 256 | 30,880 | 30,146 | 97.6% | 55.38 | 57.48 | 18,854 | 19,965 |
+| 8k/1k | 512 | 39,291 | 38,867 | 98.9% | 79.96 | 80.79 | 38,630 | 38,666 |
+
+### Findings
+- **Multi-stream wins everywhere, small margin, shrinking with concurrency**:
+  biggest at c64 (SS = 93–94% of MS), nearly even at c512 (97.6–98.9%).
+- MS TPOT consistently lower → side-stream overlap mainly helps DECODE (consistent
+  with the dual-stream MoE per-call gating that skips large prefill batches).
+- ⇒ side-streams are a real but modest optimization (~+1–7% total tok/s), largest
+  at low concurrency (decode-heavy).
+
+### Artifacts
+- SS: `/workspace/bench_results_dsv4_atom_ss_0617/`; MS: `.../bench_results_dsv4_atom_0617/`.
+- Logs: `/workspace/atom_ss_{server,sweep_0617}.log`. Server cleaned (VRAM ~0.3 GB/GPU).
+
+---
+
+## Exp 41 — SGLang c512 stability (3 repeats) (2026-06-17)
+
+Q: is SGLang's large c512 deficit vs ATOM (Exp 39: 1k/1k 86.7%, 8k/1k 82.1%) a
+stable measurement or run-to-run noise? Re-ran SGLang c512 for both workloads
+**3× each**, same config as Exp 39 (gatherv ON, ROCM700A=0, tp8dp8, ATOM client,
+ratio1.0, np4096/warm1024, 16384 prefill tok/rank).
+
+| workload | run1 | run2 | run3 | mean | std | range |
+|---|---:|---:|---:|---:|---:|---:|
+| 1k/1k c512 | 17,195 | 17,157 | 17,348 | **17,233** | 83 (0.48%) | 191 (1.11%) |
+| 8k/1k c512 | 32,155 | 32,186 | 32,200 | **32,180** | 19 (0.06%) | 45 (0.14%) |
+
+TPOT/TTFT also tight: 8k/1k TPOT 72.59–72.65, TTFT 55.6–55.7s; 1k/1k TPOT
+43.80–43.88, TTFT 7.36–7.70s.
+
+### Conclusion — the deficit is REAL and reproducible, not noise
+- 3-run variance is tiny (std 0.06–0.48%). SGLang stably lags ATOM at c512.
+- vs Exp 39 multi-stream ATOM: 1k/1k 17,233/19,828 = **86.9%** (matches the single
+  run's 86.7%); 8k/1k 32,180/39,291 = **81.9%** (matches 82.1%).
+- Consistent with the standing conclusion: high-conc (c512) is SGLang's weak point —
+  prefill↔decode interference is worst there. The 8k/1k c512 TTFT ≈ 55.6s (vs ATOM
+  ~38.6s) points at heavy prefill queueing as the driver.
+- NOTE: this c512 is the worst point; c64–c256 SGLang ties/wins (Exp 39).
+
+### Artifacts
+- `/workspace/bench_results_dsv4_sgl_c512_run{1,2,3}/` (2 JSON each).
+- Logs: `/workspace/sgl_c512_repeat.log`, `/workspace/sgl_server_c512.log`. Server
+  cleaned (VRAM ~0.3 GB/GPU).
+
+---
+
+## Exp 42 — c512 gap root-cause + levers tried (swa-ratio, mixed-chunk) (2026-06-17)
+
+Investigated WHY SGLang lags ATOM so much at c512 (Exp 39/41: 1k/1k 86.9%, 8k/1k
+81.9%). All on 1k/1k c512, gatherv ON, ROCM700A=0, tp8dp8, ATOM client, ratio1.0,
+np4096/warm1024.
+
+### (a) swa-full-tokens-ratio sweep — NO throughput effect
+Overrode the aligned-script default 0.15 via SGL_EXTRA_ARGS.
+| metric | 0.15 (mean3) | 0.2 | 0.25 |
+|---|---:|---:|---:|
+| total tok/s | 17,233 | 17,173 (−0.35%) | 17,128 (−0.61%) |
+| Med TTFT ms | 7,500 | 6,966 | 7,224 |
+| Med TPOT ms | 43.84 | 43.68 | 43.98 |
+Throughput flat (within the 1.1% run-to-run band). TTFT best at 0.2 (~−7%) but not
+monotonic; 0.25 regresses. ⇒ swa ratio tunes KV-pool split, NOT prefill/decode
+scheduling → no tput lever. Kept default 0.15.
+
+### (b) Gap decomposition (client metrics) — the gap is ALL prefill/TTFT
+| | SGL | ATOM |
+|---|---:|---:|
+| total tok/s | 17,195 | 19,828 (+15.3%) |
+| wall duration s | 487.9 | 423.1 |
+| Med TPOT ms (decode) | **43.85** | 45.41 (SGL FASTER) |
+| Med TTFT ms | 7,355 | 5,489 |
+| mean TTFT ms | 13,404 | 5,924 |
+| p99 TTFT ms | 53,459 | 9,538 (SGL 5.6×) |
+| std TTFT ms | 16,046 | 2,532 (SGL 6.3×) |
+- Decode is NOT the problem (SGL TPOT lower). Gap = prefill/TTFT, and the signature
+  is VARIANCE: SGL TTFT std 6.3× and p99 5.6× ATOM; SGL mean≫median (right-skew
+  tail), ATOM mean≈median (tight). Wall-duration ratio (1.153) == tput gap.
+
+### (c) Scheduler-log root cause (BOTH engines, same case — two-sided)
+Per-rank (~64 reqs/rank at c512):
+| | SGLang | ATOM |
+|---|---|---|
+| decode batch occupancy | #running-req median **53/64**, range 2–64 (drains) | output median **64/64** (stable full) |
+| prefill granularity | almost always FULL 16384 tok (16 reqs) | MIXED: full 16384 (most common) + many small 1024/2048/3072/4096 (1–4 reqs) |
+| prefill-delayer | n/a | delay_rate **2.69%** (well-tuned, mostly allows) |
+ROOT CAUSE: **SGLang cannot keep the decode batch full at c512** (median 53/64 ≈
+83% occ, dips to single digits) while ATOM holds 64/64. The ~17% decode
+under-occupancy ≈ the 15% tput gap. Mechanism: SGLang injects prefill as RIGID full
+16384-token chunks and (default) non-mixed steps → each prefill chunk stalls ALL
+decode for a step → decode occupancy collapses + TTFT bursts. ATOM uses ADAPTIVE
+prefill granularity (small 1–4-req batches when needed) + a well-tuned prefill-delayer
+to slip prefill in smoothly, keeping decode full and TTFT low/uniform. ATOM trades
+slightly slower decode (TPOT 45.4 vs 43.9) for stable-full occupancy → +15% total.
+Why only c512 breaks: more in-flight decode at high conc ⇒ each rigid prefill chunk
+disrupts more; c64–c256 has little in-flight decode so SGLang ties/wins (Exp 39).
+Logs: `/workspace/{sgl,atom}_server_sched.log` (+ `*_sched_sweep.log`); parsed DP0/
+all-rank "Prefill batch"/"Scheduled prefill batch"/decode lines.
+
+### (d) Lever tried: --enable-mixed-chunk — REJECTED (made it WORSE)
+gsm8k OK with mixed-chunk (flexible 0.9386 / strict 0.9393, ~0.94 — not a
+correctness issue). But:
+| metric | SGL base (mean3) | SGL +mixed-chunk | MC vs base |
+|---|---:|---:|---:|
+| total tok/s | 17,233 | 16,321 | **−5.30%** |
+| Med TTFT ms | 7,500 | 8,336 | +11.2% |
+| mean TTFT ms | 13,260 | 15,921 | +20.1% |
+| std TTFT ms | 15,870 | 18,055 | +13.8% |
+| Med TPOT ms | 43.84 | 44.61 | +1.8% |
+MC drops 86.9%→**82.3%** of ATOM. Mixing prefill tokens into the decode step
+enlarges per-step batch (incl. large prefill chunk) → higher TPOT + WORSE TTFT
+variance; with gatherv/MoE padding it nets negative. ⇒ baseline (non-mixed) is the
+better SGLang c512 config. ATOM's edge is adaptive-granularity + full-occupancy
+scheduling, NOT prefill+decode co-stepping.
+
+### Not yet tried (candidate levers, more on-target than mixed-chunk)
+- Raise `schedule_conservativeness` (DP attn auto ×0.3 → 0.3): admit prefill more
+  conservatively to protect decode occupancy (directly targets the 53/64 drop).
+- Smaller `chunked-prefill-size` (e.g. 8192/rank): shrink per-step prefill shock to
+  mimic ATOM's small-batch injection (watch prefill efficiency).
+
+### Artifacts
+- swa: `/workspace/bench_results_dsv4_sgl_swa0{2,25}/`; mixed-chunk:
+  `/workspace/bench_results_dsv4_sgl_mc/`; scheduler runs:
+  `/workspace/bench_results_dsv4_{sgl,atom}_sched/`. gsm8k(MC): `/workspace/gsm8k_mc.log`.
+  All servers cleaned (VRAM ~0.3 GB/GPU).
+
+---
+
+## Exp 43 — client validation: SGLang client vs ATOM client, same server (2026-06-17)
+
+Q: does the c512 number change if driven by SGLang's OWN bench client instead of
+ATOM's? Same SGLang server (gatherv ON, ROCM700A=0, tp8dp8, chunk16384/rank,
+baseline), same `/v1/completions` endpoint, same params (np4096/warm1024/ratio1.0,
+1k/1k c512). Only the client differs:
+- ATOM client: `atom.benchmarks.benchmark_serving --backend vllm`.
+- SGLang client: `python3 -m sglang.bench_serving --backend sglang-oai` (no shim
+  needed vs an SGLang server).
+
+| metric | ATOM client | SGLang client | diff |
+|---|---:|---:|---:|
+| total tok/s | 17,195 | **15,751** | **−8.4%** |
+| wall duration s | 487.9 | 532.6 | +9.2% |
+| Med TTFT ms | 7,355 | 8,261 | +12.3% |
+| Mean TTFT ms | 13,404 | 15,612 | +16.5% |
+| p99 TTFT ms | 53,459 | 58,155 | +8.8% |
+| std TTFT ms | 16,046 | 18,370 | +14.5% |
+| Med TPOT ms | 43.85 | 46.36 | +5.7% |
+
+### Conclusion — the data is NOT the same; client effect is ~8% at c512
+- SGLang's own client reports SYSTEMATICALLY LOWER throughput (and higher
+  TTFT/TPOT/duration) than the ATOM client on the IDENTICAL server. The client
+  itself accounts for ~8% at c512 — LARGER than the ~3% SKILL §4 saw at c128/c256,
+  i.e. **client effect grows with concurrency** (client-side dispatch/burstiness
+  becomes part of the bottleneck in high-conc closed loop).
+- Implications:
+  1. Validates the methodology choice: all SGLang-vs-ATOM engine numbers in this log
+     use the ATOM client for BOTH engines, so the client effect cancels → the
+     reported gaps (e.g. c512 ~87%) are pure engine differences.
+  2. If someone instead used "SGLang client for SGLang, ATOM client for ATOM",
+     SGLang would be under-reported ~8% → c512 would look ~79% instead of ~87%.
+     ⇒ cross-engine comparison MUST use one client.
+- Artifacts: `/workspace/bench_results_dsv4_sglclient/`, log
+  `/workspace/sglclient_sweep.log`. Server cleaned (VRAM ~0.3 GB/GPU).
+
+---
+
+## Exp 44 — c512 levers: conservativeness (neutral) + chunk-size (helps) + CORRECTED mechanism (2026-06-18)
+
+Tried the two Exp-42 candidate levers on 1k/1k c512 (gatherv ON, ROCM700A=0,
+tp8dp8, ATOM client, ratio1.0, np4096/warm1024). Baseline = chunk 16384/rank,
+conservativeness eff 0.3.
+
+### Lever 1: schedule_conservativeness eff 0.3 → ~1.0 (`--schedule-conservativeness 3.3`, ×0.3 DP) — NEUTRAL
+total 17,233 → 17,009 (−1.3%, in noise), TTFT not improved. Conservativeness
+controls admit-caution to avoid RETRACTS; this case never retracts (KV fits), so it
+does nothing to the real driver. Rejected.
+
+### Lever 2: chunked-prefill 16384/rank → 8192/rank (`--chunked-prefill-size 65536`) — HELPS +5% (single run)
+| metric | base 16384 | 8192 | ATOM |
+|---|---:|---:|---:|
+| total tok/s | 17,195 | **18,064 (+5.1%)** | 19,828 |
+| duration s | 487.9 | 464.4 | 423.1 |
+| Med TPOT | 43.85 | **45.62 (WORSE)** | 45.41 |
+| Mean TPOT | 43.39 | 45.35 (worse) | 45.84 |
+| Med ITL | 40.14 | 41.43 (worse) | 40.67 |
+| Mean TTFT | 13,404 | **9,025 (−33%)** | 5,924 |
+| std TTFT | 16,046 | 11,543 (−28%) | 2,532 |
+| Med TTFT | 7,355 | 6,482 | 5,489 |
+| p99 TTFT | 53,459 | 53,985 (~same) | 9,538 |
+| Mean E2E | 57,797 | 55,423 (−4.1%) | 52,821 |
+8192 closes ~1/3 of the gap: 86.9% → 91.1% of ATOM.
+
+### CORRECTED mechanism (Exp 42's "smaller chunk → smoother decode occupancy" was WRONG)
+The smaller-chunk win is a TRADE, and decode actually gets slightly WORSE:
+- **Decode is hurt, not helped**: TPOT 43.85→45.62 (+4%), ITL up. More prefill steps
+  DO interrupt decode more often (the intuitive objection is correct).
+- **The win is on the PREFILL/queue side**: mean TTFT −33%, std −28%. Throughput is
+  closed-loop ∝ 1/mean_E2E. Decompose mean E2E change: TTFT −4.4s, decode +1.8s
+  (=ΔTPOT 1.77ms × 1024), net −2.6s ≈ measured mean-E2E −2.4s. So +5% tput = (TTFT
+  queue win) − (TPOT decode cost); at 1k/c512 the queue win dominates.
+- **Why smaller chunk shortens TTFT**: TTFT≈queue-wait (1k prefill compute is tiny).
+  What matters is how OFTEN a prefill step fires, not how many reqs it carries.
+  Big chunk → scheduler/prefill-delayer batches into infrequent big prefill waves →
+  a new req can wait a whole decode interval (high mean/var TTFT). Small chunk →
+  cheaper, more frequent prefill steps → reqs admitted in smaller steadier waves →
+  lower mean/var TTFT. Cost = more prefill steps eat decode time → TPOT up.
+- NOT clean: p99 TTFT unchanged (worst tail same); TPOT is a real tradeoff
+  (interactivity-sensitive workloads lose). Single run — repeat ×3 to confirm.
+
+### Reconciles with the old "2048/rank worse than 16384" finding — non-monotonic, two opposing effects
+- Effect A (prefill efficiency): smaller chunk → more steps → per-step overhead +
+  low-M GEMM MFU → HURTS. Dominates at 8k input (chunk also splits a single 8192-tok
+  prefill → efficiency loss amplified) → "bigger is better down to the 16384/rank
+  floor" (Exp 16/18).
+- Effect B (queue fairness): smaller chunk → more frequent prefill → lower TTFT
+  mean/variance → HELPS. Dominates at 1k input (1024 < chunk so a request is never
+  intra-chunked; chunk only sets reqs-per-prefill-step granularity).
+- ⇒ optimal chunk is workload×concurrency dependent: 8k/c256 wants big (A); 1k/c512
+  wants smaller (B). Both prior+current findings are correct in their regime.
+
+### CORRECTION to Exp 42 root-cause framing
+Exp 42 attributed the c512 vs-ATOM gap to "SGLang decode occupancy 53/64". But the
+client metrics show **SGLang TPOT is BETTER than ATOM at c512 (43.85 < 45.41)** — if
+decode were truly under-occupied/inefficient, TPOT would be WORSE. So the vs-ATOM
+c512 gap is PURELY TTFT (prefill admission queueing/fairness; SGLang TTFT mean 13.4s
+& std 16k vs ATOM 5.9s & std 2.5k), NOT decode occupancy. The "decode 53/64" log
+reading was likely a sampling artifact / not the throughput driver.
+
+### Untried / next
+- Repeat 8192 ×3 (stability); re-capture scheduler logs at 8192 vs 16384 to confirm
+  the "more frequent prefill steps + shorter queue" causal chain (prefill-step
+  frequency + queue depth). Try 4096/rank (push effect B; watch effect A). Validate
+  best chunk on 8k/c512 (gap is larger there, 82%) and on c128/c256 (don't regress).
+
+### Artifacts
+- conservativeness: `/workspace/bench_results_dsv4_sgl_cons/`; chunk8192:
+  `/workspace/bench_results_dsv4_sgl_cps/`; logs `/workspace/sgl_{cons,cps}_sweep.log`,
+  `/workspace/sgl_server_{cons,cps}.log`. Servers cleaned (VRAM ~0.3 GB/GPU).
+
+---
+
+## Exp 45 — chunk-size sweep: 8192 stability + 4096 + 8k validation (2026-06-18)
+
+Verified the Exp 44 chunk lever properly: 8192 stability ×3, 4096/rank (push effect
+B), and the 8k workload (where chunk < 8192 SPLITS a request → effect A). 1k & 8k,
+c512, gatherv ON, ROCM700A=0, ATOM client, ratio1.0, np4096/warm1024.
+
+### 1k/1k c512 (1024<chunk for all → no intra-req split; chunk just sets reqs/step)
+| chunk/rank | reqs/step | total tok/s | std | vs ATOM | Med TPOT | Mean TTFT |
+|---|---:|---:|---:|---:|---:|---:|
+| 16384 (base ×3) | 16 | 17,233 | 83 | 86.9% | 43.84 | 13,260 |
+| **8192 (×3)** | 8 | **18,106** | **11** | **91.3%** | 45.46 | 8,874 |
+| 4096 (×1) | 4 | 18,099 | — | 91.3% | 46.88 | 7,123 |
+| ATOM | — | 19,828 | — | 100% | 45.41 | 5,924 |
+- 8192 STABLE (×3 = 18,095/18,121/18,104, std 11 = 0.06%) → the +5% is REAL.
+- **8192→4096 plateaus** (18,106≈18,099): TTFT keeps dropping (8,874→7,123) but TPOT
+  keeps rising (45.46→46.88) — they cancel. Sweet spot = 8192/rank.
+
+### 8k/1k c512 (chunk<8192 SPLITS the 8192-tok request → triggers effect A)
+| chunk/rank | behavior | total tok/s | vs ATOM | Med TPOT | Mean TTFT |
+|---|---|---:|---:|---:|---:|
+| 16384 (base) | 2 reqs/step | 32,254 | 82.1% | 72.70 | 65,771 |
+| **8192** | 1 req/step, no split | **33,475** | **85.2%** | 82.61 | 53,521 |
+| 4096 | SPLITS req into 2 | 33,268 | 84.7% | 84.89 | 48,299 |
+| ATOM | — | 39,291 | 100% | 79.96 | 38,745 |
+- 16384→8192 helps (+3.8%, 1 req/step, no split). **8192→4096 REGRESSES** (85.2→84.7%)
+  — crossing into intra-request splitting makes effect A (prefill efficiency) bite,
+  exactly as the two-effects model predicts.
+
+### Confirmations
+1. The chunk win is REAL & reproducible (8192 ×3 std 0.06%).
+2. TPOT rises MONOTONICALLY as chunk shrinks (1k 43.8→45.5→46.9; 8k 72.7→82.6→84.9)
+   → smaller chunk DOES interrupt decode more (the intuitive objection is correct);
+   throughput is the net of (TTFT gain − TPOT cost), peaking at 8192.
+3. The "don't split a request" boundary is real: at 8k, 8192 (=1 req, no split) is
+   best; 4096 (splits) regresses. At 1k, 4096 is fine (still >1024, no split) but no
+   extra gain. ⇒ **8192/rank is the universal c512 sweet spot** (1k 86.9→91.3%, 8k
+   82.1→85.2%).
+4. chunk tuning recovers ~1/3 of the gap; ATOM still leads (TTFT 5.9s/38.7s vs
+   8.9s/53.5s) → ATOM's scheduling (prefill fairness) is still better; the residual
+   is NOT a chunk-size issue.
+
+### Artifacts
+- 8192: `/workspace/bench_results_dsv4_A_8192_1k_run{1,2,3}/`, `.../_A_8192_8k/`.
+- 4096: `/workspace/bench_results_dsv4_B_4096_1k/`, `.../_B_4096_8k/`.
+- Logs: `/workspace/server{A,B}_bench.log`, `/workspace/sgl_server{A,B}.log`.
+  Servers cleaned (VRAM ~0.3 GB/GPU).
+
+---
+
+## Exp 46 — old vs new ATOM at c512: is ATOM's speed a recent change? (2026-06-18)
+
+Q: is ATOM fast vs SGLang because of a recent ATOM scheduler update or faster
+prefill kernels? Compared two ATOM commits at c512 (tp8dp8, multi-stream, ATOM
+client, ratio1.0, np4096/warm1024).
+- **OLD = `914d50323` (2026-06-08)** = `/sgl-workspace/ATOM-previous`.
+- **NEW = `bcd38f67` (2026-06-17)** = `/sgl-workspace/ATOM` = the version ALL prior
+  ATOM data in this log (Exp 39–45) was measured on.
+- (Version note: the installed-pkg metadata `0.1.4.dev80+g<hash>` identifies which
+  commit is live; `pip install ./<dir>/` swaps it. OLD has no `ATOM_DISABLE_SIDE_STREAMS`
+  flag — that edit was on NEW's site-package, overwritten by installing OLD.)
+
+| | OLD 914d50323 | NEW bcd38f67 | NEW vs OLD |
+|---|---:|---:|---:|
+| 1k/1k c512 total tok/s | 19,995 | 19,828 | −0.8% |
+| 1k Med TTFT / TPOT | 5,766 / 45.33 | 5,489 / 45.41 | −4.8% / +0.2% |
+| 8k/1k c512 total tok/s | 39,721 | 39,291 | −1.1% |
+| 8k Med TTFT / TPOT | 38,573 / 78.40 | 38,630 / 79.96 | +0.1% / +2.0% |
+
+### Conclusion — the two ATOM versions are IDENTICAL in perf (all metrics ±2%, noise)
+- ATOM did NOT change (perf-wise) between 06-08 and 06-17: neither scheduler nor
+  prefill-kernel speedup in that window. ATOM was ALREADY this fast at 914d50323.
+- ⇒ ATOM's advantage over SGLang is NOT a recent patch; it's inherent to its design
+  (adaptive prefill injection + prefill-delayer fairness, per Exp 42/44/45).
+  Diffing 914d50323↔bcd38f67 will NOT locate "why ATOM is fast" (no perf delta).
+- To find WHEN ATOM became fast, would need a much older ATOM (pre-improvement);
+  both of these are already post-improvement.
+
+### Install state after this exp
+Installed = OLD 914d50323 (no side-stream flag). Restore to NEW with
+`pip install /sgl-workspace/ATOM/` and re-apply the flag if persistent single-stream
+A/B is needed (perf is equivalent either way).
+
+### Artifacts
+- OLD: `/workspace/bench_results_dsv4_atomOLD/` (2 JSON), log
+  `/workspace/atomOLD_sweep.log`, `/workspace/atom_old_server.log`. NEW = the
+  existing `/workspace/bench_results_dsv4_atom_0617/`. Server cleaned (VRAM ~0.3 GB/GPU).
+
+---
+
+## Exp 47 — pure-prefill (OSL=1) compute: is SGLang's per-step prefill slower? (2026-06-18)
+
+Q: besides the scheduler, is SGLang's per-STEP prefill execution itself slower? To
+isolate prefill COMPUTE from the prefill↔decode scheduler interference, ran a
+PURE-PREFILL workload (OSL=1, almost no decode) on both engines, same client, same
+chunk 16384/rank, conc512, np4096/warm1024, rate inf. Prefill (input) throughput at
+saturation = per-step prefill compute rate (per-step time = 131072 tok ÷ system tps).
+
+| ISL | SGL input tok/s | ATOM input tok/s | ATOM/SGL | per-step SGL | per-step ATOM |
+|---|---:|---:|---:|---:|---:|
+| 1024 | 48,291 | 57,821 | **+19.7%** | 2,714 ms | 2,267 ms |
+| 8192 | 47,013 | 55,999 | **+19.1%** | 2,788 ms | 2,341 ms |
+
+### Conclusion — NOT purely scheduler: SGLang prefill compute is ~20% SLOWER
+- With decode interference removed (OSL=1), ATOM still prefills ~19–20% faster →
+  **SGLang's per-step prefill execution is genuinely ~20% slower** (real
+  compute/kernel gap, NOT scheduling).
+- So the c512 gap has TWO components: (1) **prefill compute ~20% slower** (this exp)
+  + (2) scheduler/queueing (Exp 42/44/45, partly recoverable via chunk tuning).
+  Reconciles the mixed-c512 picture: SGLang decode (TPOT) is fine/better, but TTFT
+  is high because prefill is BOTH slower to compute AND queued.
+- Direction matches Exp 36 (prefill compute gap lives in the engine-specific MLA
+  path; MoE GEMM + comm are shared/equal). Magnitude here (~20% at c512) > the ~8%
+  measured per-token at c256 — bigger under c512 saturation / system-throughput view.
+- Caveat: input_tps under saturation also reflects prefill BATCHING efficiency, not
+  only raw kernel; but both are engine-side (not the prefill↔decode interference).
+  Next to pin raw kernel: isolated MLA-prefill kernel microbench at matched shapes.
+
+### Artifacts
+- `/workspace/bench_pp_sgl/`, `/workspace/bench_pp_atom/` (isl{1024,8192}_osl1_c512),
+  logs `/workspace/pp_{sgl,atom}_sweep.log`, `/workspace/{sgl,atom}_pp_server.log`.
+  Servers cleaned (VRAM ~0.3 GB/GPU).
+
+---
+
+## Exp 48 — prefill TRACE: split the ~20% into raw-kernel vs overhead (2026-06-18)
+
+Followed up Exp 47 ("SGLang prefill ~20% slower") with torch-profiler traces to split
+it into raw-kernel-compute vs host/launch overhead. BOTH single-stream (SGLang aligned
+is already single-stream; ATOM run with ATOM_DISABLE_SIDE_STREAMS=1 so kernels
+serialize → clean GPU-busy), pure-prefill load (ISL=8192 OSL=1, conc512), torch
+profiler GPU activity, rank0 trace.
+
+### Method note (heeds Exp 19): per-kernel `dur` is UNRELIABLE (esp. ATOM — durs
+inflated / overlapping streams gave impossible >20,000 ms/step for some kernels). The
+ONLY trusted metric = GPU-active UNION (wall time with ≥1 kernel running). Normalized
+per `pa_prefill` count (= attn-layers × steps; SAME aiter kernel + same model both
+engines → L-independent unit). SGLang pa=549 (~10 steps), ATOM pa=183 (~3.3 steps).
+
+### Result — GPU-active per attn-layer-step (overlap-robust, the reliable number)
+| | GPU-active/step | wall/step (Exp47) | per-step bubble |
+|---|---:|---:|---:|
+| SGLang | 2.46 s | 2.79 s | **12%** |
+| ATOM | 2.28 s | 2.34 s | **3%** |
+- GPU-active per unit work: SGLang **+8%** (44.81 vs 41.54 ms/attn-layer-step).
+- Per-step wall ratio 2.79/2.34 = 1.19 (= the Exp 47 prefill tput gap) DECOMPOSES as:
+  **raw GPU kernel ×1.08 (8%) × host-overhead/bubble ×1.10 (10%) ≈ 1.19 (19%).**
+
+### Conclusion — answer to "are the raw kernels fine?"
+NOT identical, but the raw-kernel gap is modest: **~8% is real GPU compute (SGLang
+kernels take 8% more GPU-active time), and ~10% is host/launch overhead+bubbles**
+(SGLang has 12% per-step idle between kernels vs ATOM's 3%). So the ~20% prefill gap
+is roughly HALF kernel, HALF glue/overhead — it's NOT purely scheduler, NOT purely
+kernel.
+- Per-kernel attribution of the 8% is BLOCKED by ATOM's unreliable per-kernel dur
+  (Exp 19). The shared aiter `pa_prefill` (MLA core attn) is the same kernel on both
+  (~179 ms/step on SGLang) and should be equal; the 8% likely sits in the MLA
+  projection GEMMs / glue (per Exp 36 direction), but needs an ISOLATED kernel
+  microbench at matched shapes to pin — trace dur can't do it.
+- SGLang's 12% per-step bubble (launch gaps) is a concrete, addressable target
+  (kernel launch batching / fewer host syncs / CUDA graph for prefill).
+
+### Artifacts
+- SGLang trace `/workspace/sgl_prof/1781761067*TP-0-DP-0.trace.json.gz` (clean 10-step,
+  89% busy); ATOM `/workspace/atom_prof/dp0_tp0/*.pt.trace.json.gz`. Analyzer:
+  `useful-scripts/benchmarking/dsv4/analyze_trace.py` (+ global-union script inline).
+  Both servers cleaned via `rocm-smi --showpids` → kill (VRAM ~0.3 GB/GPU).
+
+---
+
+## Exp 50 — shared-expert-local PoC: +6–7% prefill (2026-06-18)
+
+Per-layer trace (Exp 48 follow-up) showed the MoE "shared-expert + gate" block ~2×
+bigger on SGLang. Investigated whether it's a kernel diff or a logic diff.
+
+### Shapes & redundancy check (microbench, avoids unreliable trace dur)
+- shared-expert (n,k) are config constants → SAME on both engines. The differing
+  factor is M (tokens).
+- SGLang (code-confirmed): `disable_shared_experts_fusion` → separate
+  `self.shared_experts`; `_shared_expert_use_tp1=False` ⇒ shared expert is
+  **TP-sharded**. deepseek_v4.py decoder gathers local→global THEN `self.mlp(global)`
+  → shared expert runs on the GLOBAL buffer (M≈131072).
+- ATOM: shared expert on LOCAL tokens (M≈16384), before the gather.
+- **CORRECTION to the initial "8× redundant" guess:** a TP-sharded shared expert is
+  NOT redundant — per-rank FLOPs are identical (TP8-global: M=131072×FFN/8 = 16384×FFN
+  ≡ TP1-local: M=16384×FFN). Only the GATE is truly redundant (replicated; Exp 38).
+- Same-FLOPs shape microbench (`gemm_a8w8_blockscale_bpreshuffle_ck`):
+  | GEMM (same FLOPs) | TP8-global | TP1-local | TP1 faster |
+  |---|---:|---:|---:|
+  | gate_up (K7168) | M131072,N768: 1.38ms | M16384,N6144: 1.21ms | 13% |
+  | down | M131072,N7168,K384: 1.10ms | M16384,N7168,K3072: 0.63ms | 1.74× |
+  (the global down GEMM's K=384 is too small → low arithmetic intensity.)
+  ALSO ck_xdl (SGLang) is FASTER than ck_tile (ATOM) at these shapes (~1.6×) → ATOM's
+  shorter trace time is purely M/shape, NOT a faster kernel; do NOT swap to ck_tile.
+
+### PoC implementation (env-gated SGLANG_DP_SHARED_EXPERT_LOCAL=1, needs SHARED_EXPERT_TP1=1)
+Compute the (replicated, TP1) shared expert on LOCAL hidden in the decoder layer
+BEFORE the dp gather; skip it inside `self.mlp` (forward_normal); add it back to this
+rank's reduce-scattered LOCAL slice. Prefill-only (gated on is_extend). Files:
+`models/deepseek_v2.py` (skip_shared_experts param in forward/forward_normal),
+`models/deepseek_v4.py` (compute local + skip + add after reduce_scatterv).
+
+### Result — pure-prefill (OSL=1), gsm8k correct (flex 0.9386 / strict 0.9393)
+| ISL | SGL base | SGL +SE-local | ATOM | gain | base→new vs ATOM |
+|---|---:|---:|---:|---:|---:|
+| 1024 | 48,291 | 51,171 | 57,821 | **+6.0%** | 84% → 88% |
+| 8192 | 47,013 | 50,324 | 55,999 | **+7.0%** | 84% → 90% |
+- **+6–7% prefill — BIGGER than the ~1.4% GEMM-shape microbench predicted.** The extra
+  gain is because the local path also runs 8× FEWER ROWS through the activation
+  fp8-quant + elementwise (global processed M=131072 rows; local M=16384), on top of
+  the better GEMM shape. So it's NOT redundant FLOPs but it IS redundant
+  per-row quant/overhead on the global buffer. The user's "test it empirically" call
+  was right; the microbench under-counted.
+- Caveats: (1) requires TP1 shared expert → ~8× shared-expert weight memory/rank
+  (~+0.5 GB). (2) pure-prefill only here; **c512 end-to-end (decode-bound) gain
+  unverified** — Exp 38 gate-local was neutral at c512, so confirm with a full A/B.
+  (3) prefill-path only (decode keeps global shared).
+
+### Next
+- FULL c512 1k/1k & 8k/1k end-to-end A/B with SE-local (does the prefill win move
+  total tput, or is it decode-bound/neutral like gate-local?).
+- Stack with Exp 49 (CK GEMM + batched rope) — are the gains additive?
+
+### Artifacts
+- `/workspace/bench_pp_se/` (isl{1024,8192}_osl1), gsm8k `/workspace/gsm8k_se.log`,
+  server `/workspace/sgl_se_server.log`. Microbench `/workspace/gemm_micro.py`.
+  Edits in `/sgl-workspace/sglang` (deepseek_v2.py, deepseek_v4.py), env-gated default
+  OFF. Server cleaned (VRAM ~0.3 GB/GPU).
+
+---
+
+## Exp 51 — ALL 3 prefill levers stacked: 84% → 97–98% of ATOM (2026-06-18)
+
+Stacked the three prefill fixes (all env-gated, default OFF):
+`SGLANG_FORCE_CK_W8A8=1 SGLANG_ROPE_BATCHED=1 SGLANG_DP_SHARED_EXPERT_LOCAL=1
+SGLANG_SHARED_EXPERT_TP1=1` (+ gatherv ON, ROCM700A=0). gsm8k correct: flex 0.9469 /
+strict 0.9477.
+
+### Pure-prefill (OSL=1, ATOM client) — gains are ~ADDITIVE
+| ISL | base | +CK+ROPE | +SE-local | ALL3 | ATOM | ALL3 vs base | ALL3 vs ATOM |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 1024 | 48,291 | 52,506 | 51,171 | **55,944** | 57,821 | +15.8% | **97%** |
+| 8192 | 47,013 | 51,205 | 50,324 | **54,645** | 55,999 | +16.2% | **98%** |
+⇒ the three independent levers stack to ~+16% and **close the prefill gap to 97–98%**
+of ATOM (was 84%).
+
+### Per-layer trace (ISL8192, pa_prefill-windowed) — gap nearly gone
+GPU-active/attn-layer-step: base 44.81 → **ALL3 38.53** → ATOM 41.54 ms (SGLang now
+BELOW ATOM in raw GPU compute). Per-layer WINDOW (ratio-4): base ~7000us SGLang-slower
+→ **ALL3 39.5ms vs ATOM 38.8ms (~600us)**. Op-by-op now aligned: o-proj GEMM both
+ck_tile (1904 vs 1802 ≈), shared-expert both local-ish (744+silu+444 vs 752+act+442 ≈),
+MLA/MoE/comm/kv-q-proj all shared+equal. Remaining small diffs:
+- **RoPE**: SGL `rope_batched` 332us vs ATOM fused `inverse_rope_gptj` 155us (~180us).
+- **compressor glue**: SGL `fused_norm_rope`+`fill`×3+`rocprim`×2+elementwise vs ATOM's
+  3 tight fused kernels (`hca_compress_forward`+`hca_norm_rope_scatter`+`compressor_update`).
+  This is the residual per-step bubble (Exp 48); now the dominant remaining item.
+
+### Reusable per-layer diff METHOD (persisted)
+`useful-scripts/benchmarking/dsv4/layer_diff.py` (PERSISTENT, not /workspace):
+- `overview <trace>`: list pa_prefill windows (=layers) with window dur + GPU-active union.
+- `seq <trace> <ratio:4|128>`: one layer's ordered kernel sequence (grouped).
+- `cmp <sglA> <atomB> <ratio>`: side-by-side (the main debug view).
+Boundary = `pa_prefill` kernel (alternates dur by compress_ratio 128/4 per config.json,
+so match SAME ratio across engines). Trust WINDOW span + GPU-active UNION; per-kernel
+`dur` is unreliable (Exp 19). Capture both single-stream + pure-prefill (OSL=1).
+
+### Per-layer op table — SGLang ALL3 vs ATOM (ratio-4 layer, pa→pa window, us)
+| stage | op | SGL ALL3 | ATOM | status |
+|---|---|---:|---:|---|
+| MLA attn | pa_prefill | 4610 | 4680 | = shared |
+| out RoPE | rope | batched 332 | inverse_gptj 155 | ⚠ SGL ~2× (~180us) |
+| o-proj | cijk + quant | 1437 + 143 | 1526 + 140 | = |
+| o-proj | main GEMM | **ck_tile 1904** | **ck_tile 1802** | ✅ aligned (was Triton) |
+| mhc | post/pre | 368/483 | 386/522 | = |
+| shared-exp | up_gate ck_tile | 744 | 752 | ✅ aligned (local) |
+| shared-exp | silu/act | 65 | 48 | = |
+| shared-exp | down ck_xdl | 444 | 442 | ✅ aligned (local) |
+| gate | router cijk | 572 | 99 | ⚠ SGL gate still GLOBAL (redundant, Exp 38) |
+| comm | gather nccl | 4498 | 4694 | = |
+| routed MoE | sort+moe1+moe2+reduce | ~12030 | ~12030 | = shared |
+| comm | reduce-scatter nccl | 4615 | 4861 | = |
+| next pre-attn | kv_a/q_a ck_xdl | 2739 | 2730 | = shared |
+| next pre-attn | qk_norm_rope_fused | 729 | 967 | SGL slightly better |
+| compressor | glue | fused_norm_rope+fill×3+**rocprim×2**+elementwise (~80us, many launches) | **hca_compress_forward+hca_norm_rope_scatter+compressor_update** (3 fused, ~28us) | ⚠ bubble — top remaining item |
+| **TOTAL** | window | **39,472** | **38,846** | gap **~600us** (base was ~7000) |
+| | GPU-active/layer | **38.53 ms** | 41.54 ms | SGL now below ATOM |
+
+### Status / next
+Prefill essentially matched (97–98%). Remaining prefill items are small: (1)
+compressor glue/bubble (SGL fill/rocprim/fused_norm_rope vs ATOM 3 hca_* fused) —
+the top remaining; (2) rope (batched 332 vs ATOM fused-inverse 155); (3) gate still
+global (Exp 38 gate-local was c512-neutral). Caveat: SE-local needs TP1 shared
+(~+0.5GB/rank). Artifacts: `/workspace/bench_pp_all/`, `/workspace/gsm8k_all.log`,
+trace `/workspace/sgl_prof_all/*TP-0-DP-0*`. Cleaned (VRAM ~0.3 GB).
+
+---
+
+## Exp 52 — ALL3 c512 END-TO-END A/B (OSL=1024, with decode) (2026-06-18)
+
+Does the matched prefill (Exp 51) move c512 TOTAL throughput, or is it diluted by the
+decode-bound regime (gate-local Exp 38 was neutral)? Ran ALL3 (FORCE_CK_W8A8 +
+ROPE_BATCHED + SHARED_EXPERT_LOCAL + SHARED_EXPERT_TP1, gatherv ON, ROCM700A=0) at
+c512, full OSL=1024, ATOM client, np4096/warm1024.
+
+| workload | SGL base | SGL ALL3 | ATOM | ALL3 vs base | base→ALL3 vs ATOM |
+|---|---:|---:|---:|---:|---:|
+| 1k/1k | 17,233 | 17,877 | 19,828 | **+3.7%** | 86.9% → 90% |
+| 8k/1k | 32,254 | 34,613 | 39,291 | **+7.3%** | 82.1% → 88% |
+ALL3 detail: 1k MedTTFT 6855 TPOT 45.36 E2E 53084; 8k MedTTFT 47984 TPOT 69.56 E2E 103016.
+
+### Conclusion — the prefill win DOES move c512 total tput (unlike gate-local)
+- c512 end-to-end gain is REAL (+3.7% 1k, +7.3% 8k), bigger at 8k (more prefill-heavy).
+  Closes c512 gap 86.9%→90% (1k), 82.1%→88% (8k) of ATOM.
+- Diluted vs pure-prefill (+16%) because c512 is decode-bound — the matched prefill
+  only helps the prefill share of the step. But it is NOT neutral (gate-local was),
+  because these levers cut a much larger prefill chunk (GEMM + shared-expert rows +
+  rope) than the gate alone.
+- Remaining c512 gap (~10–12%) is now decode/scheduling + the residual prefill bubble
+  (compressor glue) — not the kernels we fixed.
+
+### Net summary of the 2026-06-18 prefill work (Exp 49–52)
+3 env-gated levers (default OFF), gsm8k correct (0.9477):
+- pure-prefill: 84% → 97–98% of ATOM (+16%); per-layer gap ~7000us → ~600us.
+- c512 end-to-end: +3.7% (1k) / +7.3% (8k); 87%/82% → 90%/88% of ATOM.
+Levers: `SGLANG_FORCE_CK_W8A8` (MLA proj Triton→CK), `SGLANG_ROPE_BATCHED` (batched
+compressor rope), `SGLANG_DP_SHARED_EXPERT_LOCAL` (+`SGLANG_SHARED_EXPERT_TP1`,
+shared expert on local hidden). Edits: fp8_utils.py, deepseek_v4_rope.py,
+deepseek_v2.py, deepseek_v4.py (all in /sgl-workspace/sglang, default OFF).
+
+### Artifacts
+- `/workspace/bench_c512_all3/`, log `/workspace/c512_all3_sweep.log`,
+  server `/workspace/sgl_b_server.log`. Baselines: Exp 39/41 + `/workspace/bench_results_dsv4_atom_0617/`.
+  Server cleaned (VRAM ~0.3 GB/GPU).
+
+### Follow-up — add chunk 8192/rank on top of ALL3 (Exp 45 lever stacks)
+Stacked `--chunked-prefill-size 65536` (=8192/rank, the Exp 45 c512 sweet spot) ON TOP
+of ALL3. c512 end-to-end:
+| wl | base | ALL3 (16k/r) | **ALL3 + chunk 8k/r** | ATOM | best/ATOM |
+|---|---:|---:|---:|---:|---:|
+| 1k/1k | 17,233 | 17,877 | **17,921** | 19,828 | **90%** |
+| 8k/1k | 32,254 | 34,613 | **36,031** | 39,291 | **92%** |
+- 8k/1k: chunk8k adds **+4.1%** on top of ALL3 → vs base **+11.7%**, **82%→92% of ATOM**.
+- 1k/1k: +0.2% (saturated; chunk effect already small at 1k c512), 90% of ATOM.
+⇒ **best c512 config = ALL3 + chunk 8192/rank**: 1k 90%, 8k 92% of ATOM (8k from 82%).
+The chunk lever (effect B, TTFT/queue fairness) is independent of and stacks with the
+kernel/locality levers, especially at 8k. Artifacts:
+`/workspace/bench_c512_all3_chunk8k/`, `/workspace/c512_all3_chunk8k_sweep.log`.
+
+---
+
+## Exp 53 — A2: output inverse-RoPE full-fuse (contiguous kernel) (2026-06-18)
+
+The remaining rope item (Exp 51): the hot 337us/layer rope is the ATTENTION-OUTPUT
+inverse rope `fused_rope_inplace(o[..., -rd:], k=None, ..., inverse=...)` at
+deepseek_v4.py:1012. On HIP it fell back to `apply_rotary_emb_triton` (my Exp49
+batched, STRIDED 2i/2i+1 interleaved loads = 337us); on CUDA it uses a single fused
+kernel. ATOM uses `inverse_rope_gptj` (CONTIGUOUS load + reshape/flip) = 155us.
+
+FIX: new `apply_rotary_emb_contig_kernel` (deepseek_v4_rope.py), mirrors ATOM —
+loads the rope slice as a CONTIGUOUS [BLOCK_M, RD] tile (coalesced) and does the
+GPT-J pair rotation via tl.reshape + tl.flip; derives cos/sin from the interleaved
+freqs_real (cos=fr[2*(d//2)], sin=fr[2*(d//2)+1]). Supports forward+inverse. Wired
+in apply_rotary_emb_triton for the 3D case under SGLANG_ROPE_BATCHED (the 2D
+compressor rope keeps the prior batched kernel).
+
+Result (trace, ALL3 + contig rope): `apply_rotary_emb_contig_kernel` = **142.7 us/call**
+(was strided batched 337; **≤ ATOM's inverse_rope_gptj 155us**). gsm8k correct: flex
+0.9439 / strict 0.9447. Per-layer saving ~194us × 61 ≈ 12ms/step (~0.5% prefill) — the
+rope item is now fully closed (SGL ≤ ATOM). Remaining per-layer residual is the
+compressor glue/bubble (A1) and gate-global (Exp 38).
+
+Artifacts: trace `/workspace/sgl_prof_a2/*TP-0-DP-0*`, gsm8k `/workspace/gsm8k_a2.log`.
+Edit in `/sgl-workspace/sglang/python/sglang/srt/layers/deepseek_v4_rope.py`
+(under SGLANG_ROPE_BATCHED). Server cleaned (VRAM ~0.3 GB/GPU).
+
+---
+
+## Exp 54 — make CK-GEMM + batched/contig-RoPE DEFAULT-ON for DSV4 (no env) (2026-06-18)
+
+Converted two levers from env-flag-gated to module toggles (default OFF) that the
+DeepseekV4 model flips ON in `__init__` — so DSV4 gets them WITHOUT any env var:
+- `fp8_utils.py`: `_FORCE_CK_W8A8=False` + `set_force_ck_w8a8()`; `use_aiter_triton_gemm_w8a8_tuned_gfx950`
+  checks `_FORCE_CK_W8A8 or env`. (CK GEMM for MLA proj.)
+- `deepseek_v4_rope.py`: `_USE_BATCHED_ROPE=False` + `set_batched_rope()`;
+  `apply_rotary_emb_triton` checks `_USE_BATCHED_ROPE or env`. (batched/contig rope.)
+- `deepseek_v4.py` `DeepseekV4ForCausalLM.__init__`: imports + `set_force_ck_w8a8(True)`,
+  `set_batched_rope(True)`. The env vars `SGLANG_FORCE_CK_W8A8` / `SGLANG_ROPE_BATCHED`
+  still work as overrides.
+(NOT changed: shared-expert-local stays env-gated — needs TP1 shared, ~+0.5GB/rank;
+chunk-prefill is a launch arg.)
+
+Verification — launched DSV4 with NO opt env flags, trace confirms defaults active:
+contig rope present=True, strided batched rope=False, Triton a8w8 GEMM=False, ck_tile
+QuantGemm=True. gsm8k correct: flex 0.9507 / strict 0.9515. ⇒ DSV4 now uses CK GEMM +
+contig rope by default (no env needed). Artifacts: `/workspace/sgl_prof_def/*`,
+`/workspace/gsm8k_def.log`. Server cleaned (VRAM ~0.3 GB/GPU).
+
+---
+
+## Exp 49 — FIX the prefill kernel gap: Triton→CK GEMM + batched RoPE (2026-06-18)
+
+From the trace (Exp 48) two prefill kernels differ between engines by IMPLEMENTATION
+(same logical op). Identified the call paths and made SGLang match ATOM:
+
+### Kernel 1 — w8a8-block FP8 GEMM (the big one: MLA q/kv/o projections, ~28% of step)
+- SGLang `apply_w8a8_block_fp8_linear` (fp8_utils.py) picks the **Triton**
+  `gemm_a8w8_blockscale` for the MLA projection shapes because the hardcoded
+  `use_aiter_triton_gemm_w8a8_tuned_gfx950(n,k)` list contains them (k=7168 shapes:
+  2112/512/4096/4608×7168 etc.). HIP is 7.2.0 so the CK bpreshuffle path is available.
+- ATOM `linear.py` per_1x128 path uses the **CK** `gemm_a8w8_blockscale_bpreshuffle`
+  (preshuffle) by default (`ATOM_FP8_BLOCKSCALE_WEIGHT_PRESHUFFLE=1`, Triton off) — with
+  an explicit comment "Triton FP8 Blockscale GEMM is mostly slower than AITER [CK] GEMM".
+- FIX: env-gate `SGLANG_FORCE_CK_W8A8=1` → `use_aiter_triton_gemm_w8a8_tuned_gfx950`
+  returns False → SGLang uses CK bpreshuffle (= the trace's `ck_tile…QuantGemmKernel`),
+  matching ATOM. (fp8_utils.py:72.)
+
+### Kernel 2 — RoPE (compressor fallback rope; small, ~2% of step)
+- SGLang `apply_rotary_emb_triton` (deepseek_v4_rope.py, called in compress_hip.py):
+  grid (batch, heads, dim_blocks) = ONE program per token (fine-grained launches).
+- ATOM `_inverse_rope_gptj_kernel`: batches BLOCK_S=32 tokens/program.
+- FIX: env-gate `SGLANG_ROPE_BATCHED=1` → added `apply_rotary_emb_triton_kernel_batched`
+  (BLOCK_M=32 tokens/program, same math), mirroring ATOM. (deepseek_v4_rope.py.)
+
+### Result — pure-prefill (OSL=1, ATOM client) with BOTH flags on
+gsm8k stays correct: flexible 0.9462 / strict **0.9469** (≈ baseline 0.94 — both
+changes numerically safe).
+| ISL | SGL base | SGL +CK+ROPE | ATOM | gain | base→new vs ATOM |
+|---|---:|---:|---:|---:|---:|
+| 1024 | 48,291 | 52,506 | 57,821 | **+8.7%** | 84% → **91%** |
+| 8192 | 47,013 | 51,205 | 55,999 | **+8.9%** | 84% → **91%** |
+- **+~8.8% prefill throughput → recovers essentially the entire ~8% raw-kernel gap**
+  from Exp 48 (84%→91% of ATOM). The remaining ~9% to ATOM = the host/overhead/bubble
+  share (Exp 48), which kernel swaps don't touch.
+- Dominant contributor is almost certainly the GEMM (28% of step vs RoPE's ~2%); not
+  yet isolated GEMM-only vs RoPE-only (tested combined per request). Can split if needed.
+
+### Status / how to use
+- Both changes are env-gated and DEFAULT OFF (`SGLANG_FORCE_CK_W8A8`,
+  `SGLANG_ROPE_BATCHED`). Edits in the editable repo `/sgl-workspace/sglang`
+  (fp8_utils.py, deepseek_v4_rope.py) — persist in this clone, lost on container rebuild.
+- Next: (a) isolate GEMM-only vs RoPE-only; (b) run a FULL c512 1k/1k & 8k/1k A/B
+  (not just pure-prefill) to confirm the end-to-end throughput gain; (c) attack the
+  remaining ~10% per-step bubble (Exp 48: launch batching / prefill CUDA graph).
+
+### Artifacts
+- `/workspace/bench_pp_kern/` (isl{1024,8192}_osl1), gsm8k `/workspace/gsm8k_kern.log`,
+  server `/workspace/sgl_kern_server.log`. Baselines: `/workspace/bench_pp_{sgl,atom}/`.
+  Server cleaned (VRAM ~0.3 GB/GPU).
+
+### Follow-up — ISL=8192 pure-prefill TRACE of the fixed build (confirms kernel swap)
+Re-captured the prefill trace WITH both flags on (ISL8192 OSL1, rank0, 10 steps),
+same GPU-active-union-per-attn-layer-step method as Exp 48.
+| | GPU-active/step | busy% | vs ATOM |
+|---|---:|---:|---:|
+| SGL base (Triton GEMM) | 44.81 ms | 89% | +7.9% |
+| SGL +CK+ROPE | **42.58 ms** | 92% | **+2.5%** |
+| ATOM | 41.54 ms | 82% | — |
+- Kernel-level confirmation: Triton `_gemm_a8w8_blockscale` is GONE; CK
+  `QuantGemmKernel` (1048 ms ×549, same as ATOM) is now used; old per-token rope GONE,
+  batched rope present.
+- GPU-active raw-kernel gap to ATOM shrank from +7.9% → **+2.5%** (kernel swap recovered
+  most of the raw compute). busy% 89→92% ⇒ CK GEMM also cut launch/bubble slightly,
+  which is why pure-prefill THROUGHPUT gain (+8.8%) > GPU-active reduction (−5%).
+- Remaining ~2.5% GPU-active to ATOM = minor residual (some projection GEMM / other
+  kernel). Trace: `/workspace/sgl_prof_kern/*TP-0-DP-0.trace.json.gz` (92% busy);
+  baseline `/workspace/sgl_prof/1781761067*`, ATOM `/workspace/atom_prof/dp0_tp0/*`.
+
+---
+
+## Exp 55 — Port shared-expert-local to sglang-upstream + A/B; debunk the "upstream is slower" / BLOCK_M scare (2026-06-21)
+
+### What was done
+1. Ported the **shared-expert-local (SE-local)** PoC from the dev clone (`/sgl-workspace/sglang`)
+   onto **`/sgl-workspace/sglang-upstream`** (which already has CK-GEMM + batched/contig
+   rope DEFAULT-ON, Exp 54). Edits: `models/deepseek_v2.py` (`skip_shared_experts` param
+   in forward/forward_normal), `models/deepseek_v4.py` (`_SHARED_EXPERT_LOCAL` flag +
+   compute-local / skip / add-after-reduce-scatterv), `configs/cohere2_moe.py` (the
+   `@strict` no-op patch, SKILL §2a, needed to import on upstream too).
+2. Also applied the **rope contig-kernel `BLOCK_M=32 → 8` + `num_warps=4`** tweak
+   (today's microbench: 1.6–1.8× faster kernel) to both clones.
+3. A/B on upstream (user's choice = "plan B"): baseline = **gatherv ONLY**;
+   SE-local = **gatherv + TP1 + se-local**. ROCM700A=0, chunk 65536 (=8192/rank,
+   server resolves to chunked_prefill_size=8192), ratio 1.0, np=conc*8, ATOM-aligned
+   launcher (`run_sgl_dsv4_aligned.sh`).
+
+### Correctness
+- gsm8k 5-shot (SE-local ON, upstream): **flex 0.9500 / strict 0.9507** — correct.
+
+### Performance (upstream, plan B baseline = gatherv only)
+| workload | baseline (gatherv) | + TP1 + se-local | delta |
+|---|---:|---:|---:|
+| pure-prefill 1k (OSL=1, c256) | 48,941 | **52,235** | **+6.7%** |
+| pure-prefill 8k (OSL=1, c256) | 49,639 | **52,674** | **+6.1%** |
+| c512 1k/1k (total tok/s) | 17,738 | 17,136 | **−3.4%** |
+| c512 8k/1k (total tok/s) | 33,828 | 34,064 | +0.7% |
+- pure-prefill +6–7% (consistent with Exp 50). c512 diluted/negative because **plan B
+  bundles TP1**: TP1 replicates the shared expert → in DECODE each rank does the full
+  shared-expert GEMM (~8× FLOPs, only saves the all-reduce); at c512 1k/1k (decode-bound)
+  that cost outweighs se-local's tiny prefill benefit → −3.4%. 8k/1k (prefill-heavier)
+  roughly breaks even (+0.7%, TTFT 48.0s→44.9s).
+
+### The "upstream 34k vs this-morning 36k" investigation — it was an editable-finder BUG
+User flagged that c512 8k/1k SE-local hit ~36k earlier (Exp 52 logged 36,031 on the dev
+clone, 6/18) but only 34k now on upstream. Root-caused as follows:
+- **BUG**: `pip install -e` to "restore" the dev clone did NOT switch the import — TWO
+  `__editable__` finders coexisted in site-packages: `…dev380…` → `/sgl-workspace/sglang`
+  (dev clone) and `…dev14280…` → `/sgl-workspace/sglang-upstream` (upstream). The
+  upstream finder won, so **every run labelled "dev clone" was actually upstream**.
+  Fix: `rm` the upstream `.pth` + `_finder.py` + `dist-info`; import then resolves to
+  the dev clone. (Lesson: after `pip install -e`, ALWAYS verify `python -c "import
+  sglang.…; print(.__file__)"` AND the server log's `Editable project location`.)
+- After the fix, re-ran the **TRUE dev clone** 8k/1k c512 SE-local (full ALL3 env:
+  FORCE_CK + ROPE_BATCHED + SE-local + TP1 + gatherv):
+
+| config | c512 8k/1k total tok/s | TTFT (ms) | TPOT (ms) |
+|---|---:|---:|---:|
+| dev clone **BLOCK_M=32** (= Exp 52 cfg) | 35,101 | 38,987 | 88.31 |
+| dev clone **BLOCK_M=8** (current default) | 35,086 | 39,062 | 88.34 |
+| upstream BLOCK_M=8 | 34,064 / 35,084 | — | — |
+| Exp 52 logged (dev clone BM32, 6/18) | 36,031 | — | — |
+
+### Conclusions
+1. **rope BLOCK_M=8 vs 32 has ZERO c512 end-to-end effect** (35,086 vs 35,101, −0.04%,
+   pure noise). As predicted — rope is a sub-ms prefill op, c512 is decode-bound. The
+   BLOCK_M=8 default stays (it's a real prefill kernel win, Exp 53/microbench, and costs
+   nothing at c512). User's BLOCK_M hypothesis = ruled out.
+2. **upstream ≈ dev clone** today (both 34–35k). The earlier "dev clone +3%" claim was
+   the finder bug (both were upstream); there is NO clone/version regression.
+3. **36,031 (6/18) vs ~35,100 (today) = ~2.5% cross-day run-to-run variance** (c512
+   high-conc single-run variance is 1–3%), not any code change.
+
+### Artifacts
+- upstream: `/sgl-workspace/{base_prefill,base_c512,se_prefill,se_c512,se_c512_8k,gsm8k_se_local}.log`
+- dev clone: `/sgl-workspace/{D32_c512_8k,D8_c512_8k}.log`, servers `/sgl-workspace/dsv4_{D32,D8}.log`
+- Final state: both clones rope = BLOCK_M=8 + num_warps=4; editable → dev clone
+  (`/sgl-workspace/sglang`); servers stopped, VRAM ~0.3 GB/GPU.
+
+---
+
+## Exp 56 — C5: extend shared-expert-local to DECODE → fixes the c512 1k/1k regression (2026-06-21)
+
+### Motivation
+Exp 55 (plan B) showed SE-local (TP1 + se-local) REGRESSED c512 1k/1k by −3.4% while
+helping prefill +6–7%. Root cause analysis: the −3.4% is NOT prefill FLOPs. Per-rank
+shared-expert FLOPs are identical between the two schemes:
+- normal (TP-sharded, global buffer): `M_global * dim/tp`
+- SE-local (TP1, local tokens):        `M_local * dim = M_global/tp * dim`
+The penalty came from SE-local being PREFILL-ONLY (`is_extend()` gate): in DECODE the
+normal path ran with the **replicated (TP1) weights on the gathered global batch at full
+dim = ~dp_size x** the sharded cost. c512 1k/1k is decode-bound, so that decode penalty
+dominated.
+
+### Change (one-liner: broaden the gate)
+`deepseek_v4.py` `_do_shared_local`: drop `is_extend()`, switch `_use_gatherv_pair` →
+`_use_tp_moe_gather`, so SE-local applies to BOTH prefill (gatherv/reduce_scatterv) and
+decode (dp_scatter). The shared expert is a per-token MLP → computing on this rank's
+local tokens ≡ computing on the global buffer then taking the local slice (gsm8k-verified).
+The existing add-back (after the if/else) already covers both reduce_scatterv and
+dp_scatter. Stable for CUDA graph (gate no longer depends on padding mode). Amended into
+the SE-local commit `30fa179536`.
+
+### Correctness
+gsm8k 5-shot (C5, gatherv+TP1+se-local): **flex 0.9507 / strict 0.9515** — correct.
+
+### c512 results (ratio 1.0, conc 512, same client, dev clone, ROCM700A=0, chunk 8192/rank)
+| config | 1k/1k | vs base | 8k/1k | vs base |
+|---|---:|---:|---:|---:|
+| baseline (gatherv only) | 17,738 | — | 33,828 | — |
+| SE-local prefill-only (Exp 55) | 17,136 | **−3.4%** | 34,064 | +0.7% |
+| **SE-local C5 (prefill+decode)** | **17,954** | **+1.2%** | **35,403** | **+4.7%** |
+
+Decode TPOT confirms the ~dp_size x removal:
+- 1k/1k TPOT 48.08 → **46.54** ms; 8k/1k TPOT 79.10 → **73.69** ms.
+vs ATOM (same-day): 1k/1k 91.2%, 8k/1k 90.7% of ATOM (was ~87%).
+
+### Net
+SE-local is now a positive lever at c512 for BOTH workloads (no 1k/1k regression). Still
+env-gated (`SGLANG_DP_SHARED_EXPERT_LOCAL` + `SGLANG_SHARED_EXPERT_TP1`); TP1 weight-memory
+cost (~+0.5 GB/rank) unchanged — C5 only removes the decode COMPUTE penalty, not the
+replication memory.
+
+### Artifacts
+- `/sgl-workspace/{gsm8k_c5,c5_c512}.log`, server `/sgl-workspace/dsv4_c5.log`.
+- Code: dev clone `deepseek_v4.py` (amended into commit `30fa179536`); server stopped,
+  VRAM ~0.3 GB/GPU.

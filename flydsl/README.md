@@ -52,12 +52,13 @@ from flydsl.autotune import Config, autotune
 
 ## 2. 學習路線圖
 
-建議**按順序**讀，每份文件結尾都有「自我檢核問題」與對應練習題。
+建議**按順序**讀，每份文件結尾都有「自我檢核問題」與對應練習題。讀完階段 1 若對 `scf.IfOp` + `ir.InsertionPoint` 仍覺得抽象，可接讀 **1b**（同一資料夾的補充篇）。
 
 | 階段 | 文件 | 主題 | 對應難點 |
 |------|------|------|----------|
 | 0 | [`00_layout_fundamentals.md`](./00_layout_fundamentals.md) | CuTe 風格 layout 代數：shape/stride、idx2crd/crd2idx、logical_divide、partition | 難點 1 |
 | 1 | [`01_flydsl_basics.md`](./01_flydsl_basics.md) | `@flyc.kernel`/`@flyc.jit`、expr/arith/vector、`T` 型別、第一個 elementwise kernel | 基礎 |
+| 1b | [`01b_mlir_python_insertion_point.md`](./01b_mlir_python_insertion_point.md) | MLIR Python：`mlir.ir.InsertionPoint`、region/block、何時要手動切插入點（含巢狀 `scf.if` 範例） | 基礎銜接 |
 | 2 | [`02_memory_layout.md`](./02_memory_layout.md) | global / LDS / register layout、向量化 load/store、swizzle、async copy | 難點 3 |
 | 3 | [`03_mfma_layout.md`](./03_mfma_layout.md) | AMD MFMA/WMMA fragment layout、thread↔element 對應、rocdl intrinsics | 難點 2 |
 | 4 | [`04_kernel_design_and_opt.md`](./04_kernel_design_and_opt.md) | 完整 HGEMM 拆解、software pipeline、scheduler hints、autotune | 整合 + 優化 |

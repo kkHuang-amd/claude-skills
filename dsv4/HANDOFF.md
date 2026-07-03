@@ -4,6 +4,91 @@ Read this first to pick up the investigation in a new session. Full detail is in
 `EXPERIMENT_LOG.md` (index → dated `EXPERIMENT_LOG_<date>.md` files) + topic docs
 `TBO_RESEARCH.md`, `TRACE_PROFILING.md`; methods/scripts in `SKILL.md`.
 
+> **Latest 2026-06-25 (PM) — DSV4 EP+TBO IMPLEMENTED & numerically CORRECT
+> (prefill two-batch-overlap on the mori EP path); stability bug open.** Wired
+> `DeepseekV4DecoderLayer` into sglang's TBO op-engine so `--enable-two-batch-
+> overlap` now overlaps one ubatch's mori a2a dispatch/combine with the other's
+> attn+expert GEMM (prefill only). **gsm8k EP+TBO = 0.9600/0.9567** (limit 300;
+> correct band, vs no-TBO mori 0.9431/0.9522). Approach: TBO disables DSV4's
+> cross-layer fused-mHC so each layer is self-contained → maps to ops; the MoE
+> ops (`op_gate`/`op_dispatch_a/b`/`op_combine_a/b`/`op_experts`/`op_shared_experts`/
+> `op_output`) are REUSED from `self.mlp` (DeepseekV2MoE, decompose `forward_deepep`);
+> DSV4 adds layer-level `op_mhc_prepare_attn`/`op_mhc_post_attn_pre_mlp`/
+> `op_mhc_postprocess` (wrap hc_pre/hc_post) + `MQALayer.op_attn`. **No scheduler
+> changes** — TBO batch-prep is model-agnostic (mori `normal` deepep-mode permits
+> prefill TBO). Files changed (all `/sgl-workspace/sglang-upstream`): `models/
+> deepseek_v4.py` (ops + `_can_run_tbo`/`_forward_layers_tbo` driver, reuses generic
+> `execute_overlapped_operations`+filter/merge), `models/deepseek_v2.py`
+> (`op_select_experts` passes `input_ids` for hash MoE — DSV4 is hash; no-op else),
+> `batch_overlap/operations_strategy.py` (DSV4 branch + prefill strategy),
+> `layers/attention/tbo_backend.py` (`__getattr__`→primary so DSV4 backend methods
+> like `get_unified_swa_loc` resolve through the wrapper). Bugs fixed en route:
+> TboAttnBackend missing `get_unified_swa_loc`; decode cuda-graph OOM (→ mem-frac
+> 0.72, cuda-graph-max-bs 64); HashTopK missing input_ids; merge missing `residual`
+> key. **OPEN: intermittent `HSA_STATUS_ERROR_OUT_OF_RESOURCES`** ("spawn threads/
+> create OS events") under sustained TBO load — **DSV4-SPECIFIC** (control:
+> R1-0528-MXFP4 + mori + TBO ran a FULL gsm8k with NO crash, 0.9484/0.9439; DSV4+
+> mori WITHOUT TBO is stable → it's the DSV4×TBO combo). Ruled out: VRAM
+> (expandable_segments no help), aiter JIT (76 loads =no-TBO), fd limit (1M), and
+> **mori per-call events (R1+TBO uses them and is stable)**. DSV4 multi-stream
+> record_event paths are OFF in our config. Locus = DSV4 attn/compressor/indexer
+> under TBO (init_forward_metadata 3× on TboAttnBackend primary+2 children, attn 2×
+> per ubatch); prime suspect = a DSV4-only aiter kernel creating HSA queues/signals
+> per call. **ROOT-CAUSED 2026-06-25 PM (round 3): it's a 3-way interaction
+> DSV4 × TBO × decode-cuda-graph.** Instrumentation (`_resmon_maybe_log`, file gate
+> `/workspace/RESMON_ON`) showed NO Python Event/Stream/mem leak (flat to the crash)
+> + flat /proc fd/threads → HSA resource is C++/ROCr-internal. Decisive bisect:
+> **`--disable-cuda-graph` → DSV4+TBO runs FULL gsm8k with NO crash (0.9447/0.9454)**
+> (cuda-graph ON crashes by ~150 prefill forwards). Matrix: DSV4+TBO+cg=CRASH,
+> DSV4+TBO+no-cg=STABLE, DSV4-no-TBO+cg=STABLE, R1+TBO+cg=STABLE. Mechanism: TBO
+> wraps attn in TboAttnBackend (primary+2 children, init_cuda_graph_state on all 3);
+> the DSV4 decode cuda-graph + this wrapper leaks HSA (R1's aiter backend doesn't).
+> **Workaround today: DSV4 EP+TBO is stable+correct with `--disable-cuda-graph`.**
+> Proper fix (next): skip child-backend decode cuda-graph for DSV4+TBO (DSV4 TBO is
+> prefill-only; children likely don't need decode graphs) → re-test with cg ON.
+> **UPDATE (rounds 4–8): child-skip INSUFFICIENT; blind kernel swaps all still crash
+> (attention unified_kv_triton↔triton, aiter indexer on↔off, mori async on↔off, HSA
+> scratch on↔off). hipEvent/hipStream interposer = FLAT (not leaking); hipGraph/HSA
+> interposers blocked by ROCm symbol versioning. DECISIVE round-8 isolation: crash
+> needs BOTH (a) executing prefill-TBO ops AND (b) decode cuda-graph — TBO infra
+> present-but-not-executed (gate `/workspace/TBO_NOEXEC`) ran full gsm8k clean
+> (0.9477), and prefill-TBO-exec + `--disable-cuda-graph` is clean (round 2); only
+> exec×graph crashes. Leading mechanism: executing prefill-TBO is the ONLY thing that
+> uses the 2nd mori inner dispatcher (`MaybeTboDeepEPDispatcher` builds 2
+> `MoriEPDispatcher`s; subbatch1→inner[1]); inner[1]'s mori HSA queues/signals + decode-
+> graph HSA reservations + DSV4's heavier per-layer HSA baseline exceed the ROCm HSA
+> ceiling (R1 lighter → survives). Next: confirm via `HSA_TOOLS_LIB` HSA-queue/signal
+> count (version-agnostic, env inherited by schedulers) diffing exec-vs-noexec; fix
+> candidates = mori runtime env tuning the aligned script omits (see
+> run_sgl_dsv4_mori-ep.sh MORI_*), share/bound the 2 dispatchers' HSA queues, or
+> smaller cuda-graph-max-bs. Workaround today: DSV4 EP+TBO stable+correct w/
+> `--disable-cuda-graph`.**
+> **FIXED 2026-06-26 (rounds 11-14): root cause is NOT a specific subsystem — op-stub
+> bisection showed mHC-only crashes AND attn+MoE-without-mHC crashes, only pure
+> passthrough (no real kernels) is stable. ⇒ ANY real prefill-TBO kernel on the
+> continuously-varying ubatch shapes (tbo_padded_len pads only to attn_tp_size=1 → no
+> bucketing) → per-shape kernel JIT/autotune accumulates ROCm HSA resources →
+> OUT_OF_RESOURCES (decode-graph reduces headroom). ATOM avoids this: it pads decode
+> TBO ubatches to fixed graph_bs//N buckets + keys graphs by (graph_bs,max_q_len).
+> FIX: round tbo_padded_len up to next pow2 (≥256) in filter_batch → bounded ubatch
+> shapes → DSV4 EP+TBO + cuda-graph ON ran FULL gsm8k NO crash, 0.9507/0.9500. (Gated
+> by file /workspace/TBO_BUCKET; TODO: make env/registered flag, scope/tune, bench
+> overhead, then commit on top of e299a3385.)**
+> **SUPERSEDED 2026-06-26 (round 17, from ATOM InferenceX PR #1717): the REAL fix is
+> `GPU_MAX_HW_QUEUES=5`** (caps ROCm HW queues = the resource HSA OUT_OF_RESOURCES
+> exhausts). DSV4 EP+TBO + GPU_MAX_HW_QUEUES=5, **no bucketing, conc 256** ran a full
+> 8k/1k bench NO crash → fixes the crash AND scales to high conc (bucketing was a
+> low-conc-only workaround; finer bucket mult512 even crashed). **But proper A/B @conc
+> 256: EP 12,255 vs EP+TBO 10,626 tok/s (TBO −13%, TTFT 25→40s) → my prefill-TBO
+> op-decomposition is correct+stable but does NOT deliver the overlap benefit (regresses
+> −3%@c64, −13%@c256). TBO not a perf win for DSV4 as implemented.** Recommended:
+> `GPU_MAX_HW_QUEUES=5` for stability; don't enable TBO for throughput yet (investigate
+> why overlap doesn't materialize). bucket commit 0b4fc8bc is now optional/superseded.**
+> Launch: aligned `EP_MODE=mori` +
+> `SGL_EXTRA_ARGS="--enable-two-batch-overlap --mem-fraction-static 0.72
+> --cuda-graph-max-bs 64 --max-running-requests 64"` + PYTHONPATH pin. Details +
+> next steps: `EXPERIMENT_LOG_2026-06-25.md` (TBO section).
+
 > **Latest 2026-06-25 — NEW regime: 70k input / 300 output, low concurrency (2–32),
 > SGLang-only config sweep.** Long-context prefill-dominated profile. Best-of (total
 > tok/s): c2 13,937 / c4 17,655 (**TP8**); c8 29,194 / c16 36,779 / c32 42,140

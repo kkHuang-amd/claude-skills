@@ -98,3 +98,27 @@ python3 -m sglang.bench_serving \
 - Raw bench outputs: `/dockerx/home/wunhuang/useful-scripts/benchmarking/dsv4/bench_results/laneA_c*_np*.jsonl`
 - Agentic lane (aiperf inferencex-agentx-mvp) driver + results:
   `run_agentic_replay.sh`, `agentic_results/` (see `agentic_results/FINDINGS.md`)
+
+## Multi-stream A/B: SGLANG_ROCM_USE_MULTI_STREAM (Lane A, same settings)
+
+NOTE: `SGLANG_ROCM_USE_MULTI_STREAM` is a ROCm/AMD-only flag; this is an NVIDIA
+B200/CUDA box, so it is expected to be a no-op. Confirmed on the server process
+env. Run 2026-07-06 ~20:55–21:20.
+
+| conc | metric        | multi-stream ON (default) | SGLANG_ROCM_USE_MULTI_STREAM=0 |
+|------|---------------|---------------------------|--------------------------------|
+| 128  | total tok/s   | 29,860                    | 29,974                         |
+| 128  | out tok/s     | 3,318                     | 3,330                          |
+| 128  | Med TPOT (ms) | 31.89                     | 31.85                          |
+| 128  | Med TTFT (ms) | 6,976                     | 6,732                          |
+| 128  | Med E2E (ms)  | 39,444                    | 39,316                         |
+| 256  | total tok/s   | 41,858                    | 39,922                         |
+| 256  | out tok/s     | 4,651                     | 4,436                          |
+| 256  | Med TPOT (ms) | 48.17                     | 50.45                          |
+| 256  | Med TTFT (ms) | 6,898                     | 6,873                          |
+| 256  | Med E2E (ms)  | 56,306                    | 58,796                         |
+
+Conclusion: no meaningful difference. conc128 identical (~30k tok/s); conc256
+delta (~5%) is within run-to-run variance (conc256 is throughput-saturated).
+As expected, the ROCm multi-stream flag has no effect on the CUDA path.
+Raw: bench_results/laneA_noms_c128_np1024_*.jsonl, laneA_noms_c256_np2048_*.jsonl

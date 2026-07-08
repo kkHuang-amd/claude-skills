@@ -129,3 +129,61 @@ sed 's/  --page-size 64/  --page-size 64 --disable-cuda-graph/' run_ds-r1.sh > /
 AMD_SERIALIZE_KERNEL=3 bash /tmp/run_diag.sh 2>&1 | tee /tmp/run_diag.log
 # if disk-clean issues recur: rm -f /sgl-workspace/*/gpucore.*.gpu
 ```
+
+---
+
+## 2026-07-08 session edits (newer docker: sglang 000a61a2, aiter 8815f4b5)
+
+Model path is now `/dockerx/data/models/DeepSeek-R1-0528-MXFP4`. This docker already
+has the §6 swiglu stage1 fix and `split_k1=1` default baked in, and already B-scale
+n32k4-preshuffles for gfx1250 — but the three edits below were still missing.
+See EXPERIMENT_LOG E17-E20. (NOTE: none of these close the accuracy gap; the gap is
+NOT the MoE — E20. They are kept because each is independently correct/required.)
+
+### A. aiter FlyDSL contiguous-M bisect off-by-one (MODIFIED)
+File `aiter/aiter/ops/flydsl/kernels/gemm_mxscale_gfx1250.py` (~L3010):
+```python
+-  _bisect_iters = max(1, math.ceil(math.log2(batch_count)))
++  _bisect_iters = max(1, int(batch_count).bit_length())
+```
+Real bug for power-of-two expert counts (R1 = 256). op-test contiguous 3.2e-3 ->
+3.4e-6. End-to-end neutral (does not change GSM8K).
+
+### B. sglang quark MoE weight shuffle on gfx1250 (MODIFIED — MANDATORY)
+File `python/sglang/srt/layers/quantization/quark/schemes/quark_w4a4_mxfp4_moe.py`.
+Add after `_is_gfx1250 = _detect_is_gfx1250()`:
+```python
+_use_aiter_a8w4 = get_bool_env_var("AITER_FORCE_A8W4", "false")
+_shuffle_moe_gfx1250 = (
+    _is_gfx1250 and _use_aiter_a8w4
+    and get_bool_env_var("SGLANG_MOE_SHUFFLE_GFX1250", "true")
+)
+```
+Change the weight-shuffle gate:
+```python
+-  if _is_shuffle_moe_mxfp4:
++  if _is_shuffle_moe_mxfp4 or _shuffle_moe_gfx1250:
+       layer.w13_weight.data = shuffle_weight(layer.w13_weight.contiguous(), (16, 16))
+       ...
+```
+Mirrors the DSv4 `fp8.py` commit. On this docker the B-scale is already
+n32k4-shuffled for gfx1250, so an UNshuffled weight mismatches it -> GSM8K 0.000
+garbage. This shuffle is REQUIRED (SGLANG_MOE_SHUFFLE_GFX1250=false only for A/B).
+
+### C. aiter AITER_GROUPED_FORCE_SPLIT_K1 env + AITER_GROUPED_FORCE_TILE_M (MODIFIED)
+File `aiter/aiter/ops/flydsl/grouped_moe_gfx1250.py`, after the CSV-override block:
+```python
+if os.environ.get("AITER_GROUPED_FORCE_SPLIT_K1", "0") in _TRUTHY_ENV:
+    split_k1 = 1; split_k2 = 1
+_force_tile_m = _as_int(os.environ.get("AITER_GROUPED_FORCE_TILE_M"), 0)
+if _force_tile_m > 0:
+    tile_m = _force_tile_m
+```
+This aiter did NOT implement `AITER_GROUPED_FORCE_SPLIT_K1` (§7) even though the run
+script set it; the tuned CSV picks split_k1=2 for the token=1 R1 decode dims (E12
+illegal-address path), so the env is required to force the fused path.
+
+### run_ds-r1.sh
+`--model-path /dockerx/data/models/DeepSeek-R1-0528-MXFP4`; add
+`SGLANG_MOE_SHUFFLE_GFX1250=1`. Remember to `rm -rf /root/.flydsl/cache` after the
+bisect edit so FlyDSL recompiles.

@@ -278,10 +278,10 @@ Corrections/notes:
 
 ---
 
-## Next steps
+## Next steps (as of 2026-07-07; SUPERSEDED — see 2026-07-08 session below)
 
-1. Close the ~8% accuracy gap: improve gfx1250 a8w4 grouped MoE kernel numerics
-   (FlyDSL kernel-level; the token/max_m-dependent logits_diff growth in E16).
+1. ~~Close the ~8% accuracy gap: improve gfx1250 a8w4 grouped MoE kernel numerics~~
+   **DISPROVEN 2026-07-08 (E20): the a8w4 MoE is NOT the gap.**
 2. Perf: tune the bf16 gemms (populate `bf16_tuned_gemm.csv`) to beat `torch solution:0`.
 3. Fix fp8-KV decode read (triton MLA decode) on gfx1250 to halve KV memory (E13).
 4. Fix the split_k>1 (token=1) raw+finalize MoE path (E12) instead of forcing split_k=1.
@@ -289,3 +289,171 @@ Corrections/notes:
    the earlier parked wrapper (gemm_a8w4_gfx1250.py + its test) was **removed on
    2026-07-07** (faulty, never on any code path; linear uses bf16 dequant). Recreate
    from git history / SKILL §5 if pursued.
+
+---
+
+# 2026-07-08 session — new docker, MoE exoneration (root-cause overturned)
+
+Environment differs from the 2026-07-07 log:
+- Model path moved to `/dockerx/data/models/DeepSeek-R1-0528-MXFP4` (Quark W4A4,
+  fp4/fp4 confirmed; **n_routed_experts=256**, topk=8, model_dim=7168, inter=2048).
+- `sglang` HEAD `000a61a2` ("Enable DSv4 a8w4 MoE: shuffle FP4 expert weights and
+  bring-up env") — newer than the 8d30387 base. Already carries the gfx1250 MoE
+  **B-scale n32k4 preshuffle** (`quark_w4a4_mxfp4_moe.py` `moe_shuffle_scale`,
+  unconditional for gfx1250) but the **weight** shuffle was still gated to gfx95.
+- `aiter` fork `8815f4b5` already has the §4.5 stage1 `_swiglu_lim_rt` fix baked in
+  and defaults `split_k1=1`; but it does NOT implement `AITER_GROUPED_FORCE_SPLIT_K1`.
+
+## E17. Re-applied the (lost) morning edits + brought the recipe up on this docker
+Three code changes (the morning window's work was never synced here; kernel was
+still the buggy version, no env switches, no E18):
+1. **aiter bisect off-by-one** (`kernels/gemm_mxscale_gfx1250.py` ~L3010):
+   `_bisect_iters = max(1, math.ceil(math.log2(batch_count)))`
+   -> `max(1, int(batch_count).bit_length())`. The upper_bound over `m_tile_map`
+   has answer space `[0, batch_count]` (needs `bit_length()` iters); `ceil(log2)`
+   under-counts by one for **power-of-two** batch_count — R1 has **256 experts =
+   2^8**, so it triggers; expert 1's tile resolved to expert 0's weights.
+2. **sglang quark MoE weight shuffle on gfx1250** (`quark_w4a4_mxfp4_moe.py`),
+   mirroring the DSv4 `fp8.py` commit (`is_shuffled = _is_shuffle_moe_mxfp4 or
+   _use_aiter_a8w4`, gu-interleave off for a8w4 == plain `shuffle_weight(w,(16,16))`,
+   matches op_tests/test_flydsl_grouped_gemm_gfx1250.py). New flag
+   `_shuffle_moe_gfx1250 = _is_gfx1250 and AITER_FORCE_A8W4 and
+   SGLANG_MOE_SHUFFLE_GFX1250(default true)`.
+3. **aiter `AITER_GROUPED_FORCE_SPLIT_K1` env re-added** (`grouped_moe_gfx1250.py`):
+   the tuned CSV row for the token=1 R1 decode dims sets split_k1=split_k2=2 (the
+   E12 raw+finalize illegal-address path); force split_k=1 -> fused path. Also added
+   `AITER_GROUPED_FORCE_TILE_M` investigation knob (default off).
+Cleared `/root/.flydsl/cache` to force recompile with the bisect fix. Server boots,
+cuda-graph capture clean, decode coherent (" Paris. Paris is located ...").
+
+## E18. bisect fix WORKS at kernel level, but is END-TO-END NEUTRAL
+- op-test (`--scenario verify --data-format a8w4 --experts 256 --model-dim 7168
+  --inter-dim 2048 --no-check-aot-cache`), tokens 8 / 128 / 256:
+  logits_diff = **3.40e-6 / 3.40e-6 / 3.42e-6** (contiguous now == non-contiguous;
+  was 3.2e-3 on the 128/256 contiguous rows before the fix). Kernel bug is real & fixed.
+- GSM8K on the server (5-shot, greedy, bf16 KV, cuda-graph, shuffle on, bisect fixed):
+  | harness | Q | Accuracy | Invalid |
+  |---|---|---|---|
+  | few_shot_gsm8k | 200 | 0.835 | 0.000 |
+  | few_shot_gsm8k | 1319 | **0.811** | 0.001 |
+  | bench_sglang.py | 100 | 0.850 | 0.000 |
+  0.811 (1319Q) ~= the 2026-07-07 baseline 0.822 (E15) => **the bisect fix does not
+  move end-to-end accuracy.** The morning's "contiguous-M bug causes the ~11% gap"
+  conclusion is WRONG: the bug is real, but its accuracy impact is ~0.
+
+## E19. Phase 0 — cheap bounds
+- **shuffle OFF** (`SGLANG_MOE_SHUFFLE_GFX1250=0`, bisect still fixed): GSM8K 100Q =
+  **0.000 / invalid 1.000** (garbage). => on THIS code the weight shuffle is
+  **mandatory** (B-scale is already n32k4-shuffled for gfx1250; an unshuffled weight
+  mismatches it -> garbage). shuffle on = 0.85. Keep shuffle ON.
+- **eager** (`--disable-cuda-graph`): 100Q = 0.840 ~= cuda-graph 0.850. cuda-graph
+  capture branch is NOT the gap.
+
+## E20. Phase 1 — MoE is DECISIVELY EXONERATED (root-cause overturned)
+Pure-numeric probe on REAL layer-3 expert weights (`/tmp/moe_quant_probe.py`):
+weights are natively fp4 in the checkpoint, so the *weight* is identical on both
+paths; the ONLY difference between a4w4 (gfx950) and a8w4 (gfx1250) is the
+**activation** quant (fp4 vs fp8). Using aiter `dynamic_mxfp4_quant` /
+`dynamic_mxfp8_quant`, FFN output vs bf16 (fp4-weight, full-precision-act) ref:
+
+| path | activation | FFN rel_l2 vs bf16 |
+|---|---|---|
+| a4w4 (gfx950) | fp4 | **0.151 (~15%)** |
+| a8w4 (gfx1250) | fp8 | **0.036 (~3.6%)** |
+| ratio a8w4/a4w4 | | **0.24** |
+
+=> a8w4 (gfx1250) activation quant is **4x more accurate** than a4w4 (gfx950), as
+basic fp8-vs-fp4 mantissa math demands. Combined with E18 (a8w4 kernel == its quant
+ref at 3e-6) and E19 (unshuffled = garbage, so the layout is correct, not subtly
+wrong), the a8w4 MoE **cannot** be the source of gfx1250's lower GSM8K — if anything
+it should make gfx1250 *better*.
+
+Corollary: gfx950 reaches 0.932 while running a4w4 (~15% per-layer FFN activation
+error), so the network is **robust to MoE FFN error** (residual paths absorb it).
+Chasing MoE numerics further is pointless.
+
+## E21. More cheap probes (all negative)
+- **`--triton-attention-reduce-in-fp32`**: 100Q = 0.850 (unchanged). This flag is
+  not wired into the MLA decode kernel path anyway; no effect.
+- **`SGLANG_ROCM_FUSED_DECODE_MLA=1`** (fused decode MLA): server **crashes** at
+  cuda-graph capture — `TypeError: cannot unpack non-iterable ForwardMetadata object`
+  (fused-rope decode MLA incompatible with this triton backend/version). This is why
+  the recipe keeps it =0; it cannot be used for an A/B.
+- **`--disable-radix-cache`**: 100Q = 0.830 ~= 0.850 (radix on). The few-shot GSM8K
+  prefix-reuse (MLA extend-with-prefix path) is NOT the gap; forcing cold prefill
+  every request does not help.
+- **Failure-mode inspection** (greedy, per-token top-k logprobs on a degenerate case):
+  the `%?%?%?...` repetition loop is a **high-confidence greedy loop** (chosen-token
+  logprob ~= 0.0, i.e. prob ~= 1.0), i.e. generic greedy degeneration, NOT a numerical
+  collapse (which would show flat/uniform logits). Other errors are ordinary arithmetic
+  slips. So the failure modes do NOT indicate a decode numerical bug.
+
+## E22. Phase 2b / Option A — attention kernels are ALSO numerically clean
+Monkeypatched `TritonAttnBackend.forward_decode` and `forward_extend` (via a
+`sitecustomize.py` on `PYTHONPATH`, env-gated `SGLANG_ATTN_PROBE=1`, eager server so
+the Python hook actually runs — cuda-graph replay bypasses it). For each layer,
+recomputed attention in **torch fp32** from the same q + paged KV and compared to the
+triton kernel output `o` (rel_l2):
+- **decode (MLA-absorb)**: all 61 layers rel_l2 **0.0015-0.0019** (overall 0.00175),
+  no outlier layer (worst L35 = 0.0019).
+- **prefill (MHA cold-prefill)**: all 61 layers rel_l2 **0.0013-0.0020**, no outlier.
+Both are pure bf16-rounding noise => the **gfx1250 triton MLA decode AND MHA prefill
+kernels are numerically correct**. Attention is exonerated.
+- Also: the bf16 GEMMs (attention q/k/v/o projections, lm_head, dense-MLP) log
+  `using torch solution:0` — they are literally torch gemm => correct by construction.
+
+**Net after Option A:** on gfx1250, EVERY component checked in isolation is numerically
+correct to bf16-noise level (MoE a8w4 is *more* accurate than a4w4; attention decode +
+prefill match torch fp32; bf16 gemm == torch). No single-kernel bug found.
+
+## E23. D — reference baseline validated as comparable (gap is REAL)
+User confirmed: gfx950 0.93 is **stably reproducible** (not noisy/optimistic), and
+both nodes pull the **same HF checkpoint** `amd/DeepSeek-R1-0528-MXFP4`.
+- Checkpoint fingerprint on this node matches the HF card: `w_mxfp4_a_mxfp4` group32,
+  82 shards / 376G, 256 experts / 61 layers, exclude list = all `self_attn.*` proj +
+  `mlp.gate` + `lm_head` + layer 61 (so **attention projections are bf16 on both nodes**).
+- Code: `git diff 7aa6082(gfx950) .. 000a61a2(gfx1250)` = only **3 commits**, touching
+  `fp8.py` / `fp8_kernel.py` / run script / a new test — **model / attention / MoE /
+  quark code identical** between the two nodes.
+- Eval: both completion 5-shot greedy GSM8K (confirmed same on two harnesses:
+  few_shot_gsm8k and benchmark/gsm8k/bench_sglang.py, both ~0.81-0.85).
+=> checkpoint, model code, and eval are all comparable. The 0.85(gfx1250-a8w4) vs
+0.93(gfx950-a4w4) gap is **real and reproducible**, and the ONLY forced difference is
+a8w4-vs-a4w4 MoE + gfx1250-vs-gfx950 hardware/triton-codegen. Since a8w4 is *more*
+accurate and every gfx1250 kernel is clean in isolation, the remaining explanation is
+either (a) a cross-layer interaction not visible in per-op probes, or (b) the
+a8w4-vs-a4w4 *scheme* interacting with the calibrated weights. Requires cross-node
+per-layer comparison to localize.
+
+## E24. Cross-node hidden-state dump (handover) + TP2 note
+- Wrote `HANDOVER_crossnode_dump.md` + a validated dump hook (`/tmp/hsdump/
+  sitecustomize.py`, env `HS_DUMP=1`): monkeypatches `DeepseekV2DecoderLayer.forward`,
+  records per-layer input & post-layer residual-stream (norm + 64-dim slice) for
+  exactly the first prefill pass (61 layers) on a **fixed prompt** (the "Natalia" GSM8K
+  Q), then dumps JSON and stops. Must launch **eager + `--disable-radix-cache` +
+  `--skip-server-warmup`** (else the warmup prefill captures the wrong prompt).
+- gfx1250 (TP1) dump produced & validated: `hs_dump_gfx1250.json` (61 unique layers,
+  norms grow 2.3 -> 30 -> 319, no errors) — saved in this skill dir.
+- **TP2 vs TP1 for the comparison**: the residual stream is **replicated** (all-reduced)
+  under TP, so layer input/output hidden states are mathematically identical on TP1 vs
+  TP2; slice[:64] is global coords (hidden=7168 not sharded). Only caveat: all-reduce /
+  GEMM reduction-order differs => a ~1e-3 bf16 floor. Look for divergence that GROWS
+  well beyond that floor at a specific layer. To remove the confound entirely, plan was
+  to re-dump gfx1250 in **TP2** (this box has 4x gfx1250) so it's TP2-vs-TP2.
+  **STATUS: TP2 dump run was launched (GPU 2,3) but the machine shut down before it
+  completed; not captured.** NOTE (2026-07-09): user says this machine cannot run TP2
+  reliably — so either dump gfx1250 in TP1 and tolerate the ~1e-3 TP floor, or use a
+  box that supports TP2 on both sides.
+
+## Next steps (updated 2026-07-09)
+1. **Cross-node per-layer diff is the only remaining localizer.** Run the
+   `HANDOVER_crossnode_dump.md` hook on gfx950 (TP2) for the fixed prompt, diff vs
+   `hs_dump_gfx1250.json`. First layer whose **post-layer** residual diverges beyond the
+   TP/bf16 floor (~1e-2) and keeps growing = the smoking gun. If divergence is confined
+   to MoE-sublayer deltas (expected a4w4 vs a8w4), the gap is the scheme, not a bug.
+2. If TP2-vs-TP2 is wanted and this box can't do TP2, get a gfx1250 box that can, or
+   compare TP1(gfx1250) vs TP2(gfx950) accepting the ~1e-3 floor.
+3. Keep all E17 code changes (bisect / shuffle / split_k1) — correct & required, just
+   not the accuracy gap.
+4. Everything else (MoE, attention decode+prefill, bf16 gemm, cuda-graph, radix,
+   fp32-reduce) is already ruled out — do NOT re-chase them.

@@ -339,7 +339,34 @@ The full working recipe (env + args): `AITER_FORCE_A8W4=1`,
 `AITER_GROUPED_FORCE_SPLIT_K1=1`, `--kv-cache-dtype auto`, `--attention-backend triton`,
 cuda-graph ON, on a healthy GPU. See CHANGES.md for the exact code diffs.
 
+**UPDATE 2026-07-08 (EXPERIMENT_LOG E17-E20): the accuracy-gap root-cause below is
+OVERTURNED.** On a newer docker (model at `/dockerx/data/models/DeepSeek-R1-0528-MXFP4`,
+sglang `000a61a2`, aiter `8815f4b5`) the a8w4 MoE was **decisively exonerated**:
+- a real FlyDSL contiguous-M bisect off-by-one bug was found+fixed (power-of-two
+  expert count; R1=256 experts) — op-test contiguous 3.2e-3 -> 3.4e-6 — but it is
+  **end-to-end neutral** (GSM8K 1319Q 0.811 ~= the 0.822 baseline).
+- pure-numeric probe on real weights: a8w4 (fp8 act) FFN error 3.6% is **4x smaller**
+  than a4w4 (fp4 act, gfx950) 15%; so a8w4 cannot be why gfx1250 (0.85) < gfx950 (0.93).
+- weight shuffle on gfx1250 is now **mandatory** (unshuffled = GSM8K 0.000 garbage,
+  because the B-scale is already n32k4-shuffled); mirror the DSv4 `fp8.py` shuffle.
+The gap is now attributed to a **non-MoE gfx1250 path**, not the MoE kernel numerics.
+See EXPERIMENT_LOG "2026-07-08 session".
+
+**FURTHER UPDATE 2026-07-08/09 (EXPERIMENT_LOG E21-E24): attention is ALSO exonerated.**
+A torch-fp32 hook on `TritonAttnBackend.forward_decode`/`forward_extend` shows both the
+MLA decode and MHA prefill kernels match to ~0.16-0.18% (bf16 noise) across all 61
+layers; bf16 gemms are literally torch. Cheap A/B knobs all negative
+(reduce-in-fp32 no-op, fused-decode-MLA crashes, disable-radix-cache 0.83, cuda-graph
+== eager). D validated the baseline is comparable (same HF checkpoint, model/attn/MoE
+code identical between the gfx950 commit 7aa6082 and gfx1250 000a61a2, same eval) and
+the 0.85-vs-0.93 gap is **real & reproducible**. On gfx1250 **every component is
+numerically correct in isolation**, so localizing the gap now requires a **cross-node
+per-layer residual-stream diff** — see `HANDOVER_crossnode_dump.md` + the produced
+`hs_dump_gfx1250.json`. Run the same hook on gfx950 and diff.
+
 Open / next:
+- **Cross-node per-layer diff** (gfx950 vs gfx1250, fixed prompt) — the only remaining
+  localizer. See `HANDOVER_crossnode_dump.md`. Everything on-node is already ruled out.
 - **Perf**: the bf16 gemms fall back to `torch solution:0` ("not found tuned config
   in bf16_tuned_gemm.csv") — tune/replace for higher throughput.
 - **fp8 KV cache** decode read is broken on gfx1250 (§4.7) — would halve KV memory

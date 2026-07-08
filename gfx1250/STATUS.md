@@ -51,19 +51,23 @@ nodes' **per-layer residual stream** on the SAME fixed prompt.
 - **HANDOVER_crossnode_dump.md** — give to the gfx950 node's agent. Contains the
   validated dump hook + launch flags (eager, `--disable-radix-cache`,
   `--skip-server-warmup`) + the byte-identical fixed prompt.
-- **hs_dump_gfx1250.json** — my gfx1250 (TP1) dump, already produced & validated
-  (61 layers, fixed "Natalia" prompt).
-- Diff logic: first layer whose **post-layer** residual diverges beyond the ~1e-2
-  TP/bf16 floor and keeps growing = smoking gun. Divergence confined to MoE-sublayer
-  deltas (a4w4 vs a8w4) = scheme, not a bug.
+- **scripts/hsdump_sitecustomize.py** — canonical dump hook (post-attention split:
+  records per layer `input`, `post_attn` (pre-MoE), `post_layer` (post-MoE)).
+- **hs_dump_gfx1250.json** — gfx1250 (TP1) dump, **STALE**: made with the OLD hook (no
+  `post_attn` field). Must re-dump gfx1250 with the new hook when a machine is available.
+- Diff logic: clean signals are the **dense layers 0-2 (no MoE)** and **`post_attn`** —
+  they should match cross-node to the ~1e-2 TP/bf16 floor; a jump = non-MoE bug.
+  `post_layer` at MoE layers 3-60 diverges by construction (a4w4 vs a8w4) = control.
 
-### TP2 caveat (open)
-gfx950 is TP2, gfx1250 was dumped TP1. Residual stream is replicated under TP so it's
-comparable, but TP introduces a ~1e-3 reduction-order floor. Plan was to re-dump
-gfx1250 in TP2 (this box has 4x gfx1250) for TP2-vs-TP2 — **launched on GPU 2,3 but the
-machine shut down before completion; NOT captured**. 2026-07-09: user says this box
-can't run TP2 reliably. Options: (a) accept the ~1e-3 floor and diff TP1-vs-TP2, or
-(b) use a gfx1250 box that supports TP2.
+### Confounds to remember
+1. **MoE differs by construction** (a4w4 vs a8w4) → residual diverges from layer 3 and
+   **propagates** downstream. Not a bug. (Why the hook splits `post_attn`.)
+2. **expert-routing flips**: top-k argmax on gate logits can select different experts
+   from tiny FP diffs → large localized residual change (not a bug).
+3. **TP2(gfx950) vs TP1(gfx1250)**: residual replicated so comparable, but adds a ~1e-3
+   reduction-order floor compounding to ~1e-2. gfx1250 currently **cannot run TP2**
+   (user, 2026-07-09), so this floor is unavoidable — look for divergence clearly above it.
+   (A TP2 dump on GPU 2,3 was launched 2026-07-08 but the machine shut down first.)
 
 ## Artifacts in this skill dir
 - `SKILL.md`, `EXPERIMENT_LOG.md` (E0-E24), `CHANGES.md`, `gfx1250.md` — the playbook.
@@ -71,6 +75,7 @@ can't run TP2 reliably. Options: (a) accept the ~1e-3 floor and diff TP1-vs-TP2,
 - `hs_dump_gfx1250.json` — gfx1250 TP1 per-layer dump (fixed prompt).
 - `scripts/moe_quant_probe.py` — MoE a4w4-vs-a8w4 quant-error probe (E20).
 - `scripts/attn_probe_sitecustomize.py` — attention decode/prefill torch-fp32 hook (E22).
+- `scripts/hsdump_sitecustomize.py` — cross-node per-layer dump hook (post-attn split).
 
 ## Machine-switch checklist
 1. Confirm GPUs: `ls /dev/kfd /dev/dri && python3 -c "import torch;print(torch.cuda.device_count())"`.

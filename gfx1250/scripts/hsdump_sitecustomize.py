@@ -92,8 +92,18 @@ if os.environ.get("HS_DUMP", "0") in ("1", "true", "True"):
                                        "post_attn": post_attn,
                                        "post_layer": slice_stats(post)})
                     if len(rec_layers) >= N:
-                        json.dump({"layers": rec_layers}, open(OUT, "w"), indent=2)
-                        print(f"[hs_dump] wrote {OUT} layers={len(rec_layers)} "
+                        # Under TP the residual stream is replicated across ranks, so
+                        # every rank would dump — writing the SAME file concurrently
+                        # corrupts the JSON. Only rank 0 writes the canonical file;
+                        # other ranks write a rank-suffixed copy (harmless, for debug).
+                        try:
+                            import torch.distributed as _dist
+                            _rank = _dist.get_rank() if _dist.is_initialized() else 0
+                        except Exception:
+                            _rank = 0
+                        out_path = OUT if _rank == 0 else f"{OUT}.rank{_rank}"
+                        json.dump({"layers": rec_layers}, open(out_path, "w"), indent=2)
+                        print(f"[hs_dump] rank={_rank} wrote {out_path} layers={len(rec_layers)} "
                               f"(post_attn captured={sum(1 for r in rec_layers if r['post_attn'])})",
                               flush=True)
                         STATE["done"] = True

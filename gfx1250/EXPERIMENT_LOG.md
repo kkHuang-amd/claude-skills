@@ -504,3 +504,150 @@ Ablate gfx950 to gfx1250's MORE-precise absorb path and re-measure:
     precise than gfx950's fp4 act, so if the effect is pure quant-matching, a8w4 absorb may
     only PARTIALLY close the gap, not fully.
 - See `HANDOVER_gfx950_ablation.md`.
+
+## E26. gfx950 absorb-BMM ablation DONE — absorb precision is NOT the gap (2026-07-09)
+Ran the E25 decisive single-node A/B on gfx950 (8x MI355X, 309 GB). Same recipe on
+both, only the absorb weight prep differs; two servers in parallel (TP2 each):
+- **baseline** (GPU0,1 :8000): normal gfx950 = **fp4 absorb** (`quark_post_load_weights`
+  mxfp4 w_kc/w_vc).
+- **ablation** (GPU2,3 :8001): `PYTHONPATH=/tmp/abl SGLANG_DISABLE_QUARK_ABSORB_FP4=1`
+  -> `scripts/gfx950_disable_absorb_fp4_sitecustomize.py` monkeypatches
+  `quark_post_load_weights` to return **bf16** w_kc/w_vc (mimics gfx1250). Confirmed the
+  hook fired on every TP rank (`[gfx950_abl] quark_post_load_weights -> bf16 absorb`).
+  MoE stays a4w4 on both (only the absorb changes).
+
+Both run the modified tree at `/sgl-workspace/sglang_gfx-1250` (via PYTHONPATH; the
+pip-editable `/sgl-workspace/sglang` is the OLD tree and must NOT be used). Model
+`/dockerx/data/amd/DeepSeek-R1-0528-MXFP4`. No source edits — the ablation is a pure
+runtime monkeypatch.
+
+| absorb path            | GSM8K 200Q | GSM8K 1319Q | Invalid |
+|------------------------|------------|-------------|---------|
+| fp4 (gfx950 native)    | 0.950      | **0.944**   | 0.000   |
+| bf16 (mimic gfx1250)   | 0.950      | **0.942**   | 0.000   |
+
+**Result: 0.944 vs 0.942 (1319Q) = ~2-3 questions = pure noise; 200Q identical (0.950).**
+Forcing the absorb to gfx1250's more-precise bf16 does **NOT** drop accuracy toward 0.85.
+=> The **MLA absorb BMM precision (fp4 vs bf16) is NOT the gfx1250 gap.** The E25
+quantization-matching thesis is FALSE for the absorb path. (Both baselines also confirm
+the gfx950 reference ~0.94 reproduces on the modified tree, consistent with gfx1250.md.)
+
+Remaining suspects (unchanged from E23/E24): the **a8w4-vs-a4w4 MoE scheme interaction**
+with the calibrated weights, and/or a cross-layer interaction only visible via the
+**cross-node per-layer dump** (`HANDOVER_crossnode_dump.md`) — now the single remaining
+localizer. Note: E20 already showed a8w4 MoE is *more* accurate than a4w4 per-op, so the
+scheme effect (if any) is a distribution/quant-matching interaction, not a kernel bug.
+
+Do NOT re-run the gfx1250 absorb-quant EMULATION for the WEIGHT side expecting a big
+swing: the gfx950 ablation shows absorb weight precision (fp4 vs bf16) is accuracy-
+neutral, so `SGLANG_ABSORB_QUANT_EMUL=w_fp4` on gfx1250 is expected neutral too. The
+activation-side a8w4/a4w4 emulation is the only part of that handover still worth doing,
+and only if the cross-node dump points back at the absorb.
+
+## E27. gfx950 cross-node per-layer dump PRODUCED (2026-07-09)
+Produced the gfx950 side of the cross-node residual-stream diff (HANDOVER_crossnode_dump.md).
+- **Config = the ablation, not the baseline** (user request): `SGLANG_DISABLE_QUARK_ABSORB_FP4=1`
+  (bf16 absorb, mimic gfx1250) so the non-MoE numerics are as close to gfx1250 as possible.
+  The only remaining forced non-MoE divergence is the MLA KV-buffer store/load layout
+  (`_is_cuda or _use_aiter_gfx95`, forward_mha L488/L513) — numerically equivalent (same
+  bf16 kv_a/k_pe values), plus per-arch triton codegen (~1e-3 bf16 floor). MoE stays a4w4.
+- Launch: eager (`--disable-cuda-graph`) + `--disable-radix-cache` + `--skip-server-warmup`,
+  TP2 (model 353 GB > single 309 GB card, so TP1 impossible), fixed "Natalia" GSM8K prompt,
+  greedy 1 tok (-> " First"). Both hooks combined in one `/tmp/dump/sitecustomize.py`
+  (`import _abl; import _hsdump`) since Python auto-imports only one sitecustomize.
+- **Hook bug found & fixed**: with TP2 both ranks wrote the same `$HS_DUMP_OUT` -> corrupted
+  JSON (parse error). Fixed `scripts/hsdump_sitecustomize.py` to be **rank-gated** (rank 0 ->
+  canonical file, others -> `.rank{N}`). Re-ran clean.
+- **Result: `hs_dump_gfx950.json`** (saved in skill dir): 61 layers, post_attn all 61
+  captured, norms input 2.3->78 / post_layer 2.4->358, rank0==rank1 (post_layer norm diff
+  0.0 -> residual fully replicated under TP, rank0 representative).
+- **BLOCKER for the actual diff:** `hs_dump_gfx1250.json` is STALE (old hook, no post_attn).
+  Must re-dump gfx1250 with the updated rank-gated hook on a gfx1250 box, then diff dense
+  layers 0-2 + post_attn (clean signals) vs post_layer at MoE layers 3-60 (a4w4-vs-a8w4
+  control). gfx950 side is DONE and ready.
+
+Op notes (traps hit): (1) `pkill -f "sglang"` also matches the shell running it -> kills
+your own command; use `pkill -9 -f "[l]aunch_server"` (regex bracket) so the pattern
+doesn't match itself. (2) The two sitecustomize hooks can't both be named sitecustomize.py
+on PYTHONPATH — combine via a single importer.
+
+## E28. PARTIAL cross-node diff (gfx950 new dump vs gfx1250 STALE dump) — divergence is 100% MoE
+Compared `hs_dump_gfx950.json` (E27, a4w4 MoE, bf16 absorb) vs `hs_dump_gfx1250.json`
+(a8w4 MoE, bf16 absorb, STALE — only `input`/`post_layer`, no `post_attn`). Both 61 layers,
+same layer ids, slice64[64] of the last token, same "Natalia" prompt. Metric: rel_l2 of the
+slice64 (`||g950 - g1250|| / ||g1250||`). Chart: `crossnode_dump_compare.png` (script
+`scripts/plot_crossnode_dump.py`).
+
+| layer | zone  | input rel_l2 | post_layer rel_l2 |
+|-------|-------|--------------|-------------------|
+| 0     | dense | 0.0000       | 0.0025            |
+| 1     | dense | 0.0031       | 0.0038            |
+| 2     | dense | 0.0066       | 0.0057            |
+| **3** | moe   | **0.0096**   | **0.2100**        |
+| 4     | moe   | 1.38         | 0.28              |
+| 10    | moe   | 2.37         | 0.64              |
+| 30    | moe   | 1.30         | 0.87              |
+| 60    | moe   | 0.69         | 0.71              |
+
+**Findings:**
+1. **Dense layers 0-2 (no MoE) match to the bf16 floor** (rel_l2 0.003-0.007, below the
+   ~1e-2 TP floor). => the non-MoE residual path (attention, rmsnorm, rope, dense-MLP, and
+   the now-bf16-on-both absorb) is **cross-node consistent** — end-to-end residual-level
+   confirmation of E22's per-op result. No non-MoE bug.
+2. **Divergence starts EXACTLY at layer 3** (the first MoE layer): its `input` is still
+   matched (0.0096) but `post_layer` jumps to **0.21**, i.e. the divergence is injected by
+   the MoE sublayer, then propagates (layer 4+ `input` inherits it, rel_l2 > 1) and compounds
+   through depth. This is the expected a4w4-vs-a8w4 control, localized to its origin.
+3. **Systematic magnitude difference:** gfx950 (a4w4) residual norm grows LARGER at depth
+   (L50 input 20.5 vs 9.75; L60 post_layer 358 vs 319) — a4w4's bigger activation-quant error
+   (E20: 15% vs a8w4 3.6%) injects more energy — yet a4w4 scores HIGHER (0.93 vs 0.85).
+   Consistent with the quantization-matching thesis (the PTQ net's residual dynamics expect
+   the a4w4 perturbation it was calibrated under).
+
+**Conclusion:** the ONLY cross-node numerical divergence is the MoE, and it originates
+strictly at the first MoE layer; everything non-MoE is consistent. This does NOT by itself
+prove the MoE *scheme* causes the accuracy gap (E20 shows a8w4 is per-op *more* accurate) —
+it proves the MoE is the only thing that makes the two nodes' states differ, and the gap must
+therefore be a property of the a4w4-vs-a8w4 *scheme x calibrated-weights* interaction, not a
+non-MoE bug.
+
+**Limitation:** the gfx1250 dump is STALE (no `post_attn`), so at MoE layers 3-60 we cannot
+check whether the attention sublayer diverges *independently* of the inherited MoE drift. The
+dense-layer match strongly implies attention is clean, but a strict deep-layer check needs a
+gfx1250 **re-dump with the updated rank-gated hook** (`scripts/hsdump_sitecustomize.py`), then
+re-run `scripts/plot_crossnode_dump.py`.
+
+## E29. Tried to run higher-precision-activation MoE on gfx950 — BLOCKED (no compatible kernel)
+Goal: test the quant-matching thesis end-to-end by running the MoE with **higher activation
+precision than a4w4** on gfx950 (a16w4 = bf16 act x fp4 weight, and/or a8w4 = fp8 act) and
+comparing GSM8K vs the a4w4 0.93. Idea: a4w4 vs a8w4 differ ONLY in activation precision; the
+fp4 weight matmul is the same.
+- **Why not a pure-bf16 emulation:** dequantizing all 256 experts to bf16 = the full bf16
+  model (~1.3 TB, infeasible; E16). And any path through the fp4-activation kernel re-quantizes
+  the activation to fp4, destroying the >fp4 precision. So the only memory-feasible way to get
+  >fp4 activation is a real kernel that keeps weights fp4 (a16w4 or a8w4).
+- **Added an aiter experiment knob** (env-gated, reversible, default off): `fused_moe.py` after
+  the gfx1250 block — `AITER_MOE_FORCE_ADTYPE` in {bf16,fp8,fp4} overrides `q_dtype_a`. With
+  `=bf16` the MoE dtype signature correctly became `(bf16 act, bf16, fp4x2 weight)` = a16w4.
+- **Result: FAULTS on gfx950** with `RuntimeError: Unsupported scales/output dtype!` from the
+  aiter fused_moe op, in BOTH cuda-graph capture AND eager (first forward). => gfx950's MXFP4
+  MoE only has a working kernel for the **a4w4 (fp4x2 activation)** path; the bf16/fp8-activation
+  grouped kernels are not wired for R1's weight layout (weight scales are e8m0-shuffled for the
+  fp4 path, incompatible with the a16w4/a8w4 kernel's expected scale/output dtype). Forcing fp8
+  (a8w4) would hit the same wall (a8w4 grouped is gfx1250-flydsl-only).
+
+**Implication:** running a8w4 (or a16w4) MoE on gfx950 for a clean A/B is **not possible with
+existing kernels** — it genuinely requires writing/porting a kernel (the user's original idea).
+BUT the motivation to write it is weak: E18 (a8w4 op-test == quant-ref @ 3e-6) and E20 (a8w4
+per-op MORE accurate than a4w4) already show the gfx1250 a8w4 kernel is numerically correct, so
+the gap is most likely the **scheme / cross-layer interaction**, not a fixable kernel bug — and
+a universal a8w4 kernel would NOT help gfx1250 (it's already forced onto a8w4; the only more-
+accurate option is a4w4, which gfx1250 A0 cannot run). A universal kernel's only value would be
+diagnostic (run a8w4 on gfx950), which is a lot of work for a confirmation.
+
+**Cheaper remaining diagnostics** (preferred over the kernel): (1) a **slow per-forward bf16
+emulation** on a small Q count — dequant only the *active* experts per forward into a ~30 GB
+bf16 scratch (fits 309 GB) and do a bf16 grouped GEMM with mxfp8-qdq (a8w4) vs mxfp4-qdq (a4w4,
+validation) activations; hours for ~100 Q but decisive on the ~8-11% effect. (2) the **cross-node
+dump** (E28) once gfx1250 is re-dumped with the new hook. The `AITER_MOE_FORCE_ADTYPE` knob is
+left in aiter (harmless, default off) for a future box that has the a16w4/a8w4 MoE kernel wired.

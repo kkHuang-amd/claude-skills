@@ -11,3 +11,8 @@ See `EXPERIMENT_LOG.md`.
 ---
 
 ## (append new gfx950 runs below)
+
+## E42 (2026-07-09) bf16 matmul microbench (matmul_prec.py, HIP_VISIBLE_DEVICES=1)
+gfx950 bf16 vs fp64: K256=2.872e-3, K512=2.828e-3, K2048=2.892e-3 (fp32 ~1-4e-7).
+same-vals bf16: ~1.65e-3 == gfx1250 (E41) 1.65e-3. => gfx950 bf16 matmul NOT more accurate;
+identical to gfx1250. E41 hypothesis REFUTED (bf16 output-rounding dominated, arch-independent).

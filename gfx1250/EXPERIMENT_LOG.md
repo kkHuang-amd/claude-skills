@@ -1383,3 +1383,36 @@ Caveats: used torch/hipblas (the hand-written triton WMMA microkernel hit an ape
 coredump, not pursued) — but same gfx1250 matrix units and the magnitude matches the triton
 measurement. gfx950's bf16 (MFMA) is presumably closer to fp32-accum (untestable on this node),
 consistent with "gfx950 never needed FIX A".
+
+## E42. gfx950 bf16 matmul microbench = IDENTICAL to gfx1250 -> REFUTES E41's "gfx950 bf16 is more accurate"  [node: smci355-ccs-aus-m12-33 gfx950]
+Ran the SAME `scripts/matmul_prec.py` (torch/hipblas, attn-PV distribution) on gfx950 (MI355X,
+gfx950, HIP_VISIBLE_DEVICES=1). Apples-to-apples with E41.
+
+| K | gfx950 bf16 vs fp64 | gfx950 fp32 vs fp64 | gfx950 same-vals bf16 | gfx1250 (E41) bf16 | gfx1250 same-vals |
+|---|---|---|---|---|---|
+| 256  | 2.872e-3 | 1.50e-7 | 1.651e-3 | 2.87e-3 | 1.65e-3 |
+| 512  | 2.828e-3 | 2.04e-7 | 1.656e-3 | 2.83e-3 | 1.66e-3 |
+| 2048 | 2.892e-3 | 4.08e-7 | 1.669e-3 | 2.89e-3 | 1.67e-3 |
+
+**Result: gfx950 == gfx1250 to 3 sig figs (bf16 ~1.65e-3, fp32 ~1e-7).** gfx950's bf16 matmul is
+NOT more accurate — it is IDENTICAL. Per the handover's own decision rule ("if gfx950 shows the
+SAME ~1.6e-3 -> bf16 matmul is lossy on BOTH -> the gfx950-vs-gfx1250 difference is elsewhere ->
+re-open"), **E41's hypothesis is REFUTED**: raw torch/hipblas bf16 matmul precision is a wash
+between the two archs, so it alone cannot explain gfx1250=0.81 vs gfx950=0.93 (gfx950 has the
+same 1.65e-3 yet scores 0.93 with the plain bf16-PV code).
+
+Technical note (why the "same-vals" number is the same on both): `C_bf16 = (A_bf16 @ B_bf16)`
+returns a **bf16 output** in torch; the 1.65e-3 vs the fp64 recompute is dominated by the bf16
+**output rounding** (bf16 rel precision 2^-8 ~ 3.9e-3, rms ~1.6e-3), NOT the internal accumulation
+(hipblas accumulates in fp32 on both). So this microbench measures bf16 output precision, which is
+arch-independent — hence identical. It does NOT isolate the triton attention kernel's internal
+accumulation/downcast, which is where any gfx1250-specific attention effect (E39: idealizing
+attention helps) would live.
+
+Consequence / correction to E41: the attention-side contribution found in E39 is NOT explained by
+"gfx1250 bf16 matmul unit is intrinsically lossier than gfx950's" (they're equal). If FIX A
+(fp32 P·V) helps gfx1250 but gfx950 never needed it, the difference must be a **kernel-level dtype
+choice** (e.g., the gfx1250 triton MLA path downcasts P·V / accumulates in bf16 where the gfx950
+path keeps fp32), not the matmul unit's raw precision. Next: microbench the ACTUAL attention
+kernel per arch (force fp32 vs bf16 output/accum), or diff the two archs' triton MLA codegen for
+where the P·V dtype differs — do NOT rely on the torch/hipblas proxy for the accumulation claim.

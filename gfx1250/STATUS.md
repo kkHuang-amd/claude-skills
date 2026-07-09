@@ -308,9 +308,14 @@ MoE-fix + torch-attn -> ~0.925). See HANDOVER_kernel_fixes.md.
 - `crossnode_dump_compare.png` — E28 chart: gfx950-vs-gfx1250 per-layer rel_l2 + norms.
 - `scripts/plot_crossnode_dump.py` — regenerates the E28 chart from the two dumps.
 - `scripts/matmul_prec.py` — bf16-vs-fp32-vs-fp64 matmul precision microbench (E41: gfx1250 bf16
-  ~0.16-0.28% lossy, fp32 ~1e-6). Run on gfx950 to confirm its bf16 is accurate.
-- `HANDOVER_gfx950_bf16_microbench.md` — instructions to run matmul_prec.py on gfx950 (confirm
-  gfx950 bf16 matmul is accurate ~fp32, i.e. why gfx950 never needed FIX A).
+  ~0.16-0.28% off, fp32 ~1e-6).
+- `HANDOVER_gfx950_bf16_microbench.md` — **DONE (E42, gfx950 smci355-ccs-aus-m12-33):** gfx950 bf16
+  matmul = **IDENTICAL** to gfx1250 (bf16 ~1.65e-3, fp32 ~1e-7). => gfx950 bf16 is NOT more accurate;
+  **E41's "gfx950 bf16 accurate / gfx1250 uniquely lossy" is REFUTED.** The torch/hipblas 1.65e-3 is
+  bf16 **output-rounding** (arch-independent), not accumulation. FIX A still works (E37), but its
+  benefit is a **kernel-level dtype choice** (gfx1250 triton MLA downcasts P·V to bf16 where gfx950
+  keeps fp32), NOT the matmul unit's raw precision. Confirm by microbenching the ACTUAL attention
+  kernel per arch, not the torch proxy.
 - `scripts/moe_quant_probe.py` — MoE a4w4-vs-a8w4 quant-error probe (E20).
 - `scripts/moe_emul_sitecustomize.py` — bf16 MoE emulation (SGLANG_MOE_EMUL=a4w4|a8w4|a16w4).
   **CHUNKED version (2026-07-09, node H21-18)** — memory-safe on TP1; use on BOTH nodes.

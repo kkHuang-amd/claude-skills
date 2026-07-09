@@ -12,6 +12,18 @@ of work):
 - Model: `/dockerx/models/amd/DeepSeek-R1-0528-MXFP4` (Quark W4A4 MXFP4)
 - HW: 4x gfx1250, VRAM ~432 GB each. Shared with another user's `rccl-tests`.
 
+> **MULTI-NODE CONVENTION (2026-07-09):** several machines are now validating this
+> accuracy question in parallel (gfx1250 boxes + gfx950 reference). To avoid confusion
+> when more than one node appends here, **every new experiment entry MUST start with a
+> `node:` line** identifying the machine, arch, and repo commits, e.g.
+> `node: gfx1250 / host ctheliosr-rck-g02-j19-10 | sglang 000a61a2 | aiter 8815f4b5`.
+> Known nodes so far:
+> - `gfx1250 / host ctheliosr-rck-g02-j19-10` — 4x gfx1250 (this log's primary node).
+> - `gfx950` — 8x MI355X reference node (a4w4; E26/E27 dumps + ablations).
+>
+> If two nodes might edit simultaneously, prefer appending to your own node-suffixed
+> section or coordinate; the `node:` tag makes every entry attributable regardless.
+
 ---
 
 ## E0. Baseline run of run_ds-r1.sh (unmodified) — hang, then a4w4 root cause
@@ -810,3 +822,288 @@ Next: (a) run the same chunked emul on gfx950 (apples-to-apples confirm); (b) if
 non-MoE, bisect the non-MoE gfx1250 path more aggressively (whole-forward gfx1250-vs-gfx950
 logit compare, not just per-op) — the per-op attention checks (E22) were vs torch, not vs
 gfx950, so a systematic small gfx1250 attention/norm bias would pass E22 yet accumulate.
+
+## E31. Token-swept a8w4 kernel probe — bisect off-by-one found & fixed, but END-TO-END NEUTRAL
+(node ctheliosr-rck-g02-j19-10; note: numbering collides with the H21-18 "E31" above — both kept,
+disambiguated by node tag. Cross-refs below to "E31" mean this token-sweep entry.)
+node: gfx1250 / host ctheliosr-rck-g02-j19-10 | sglang 000a61a2 | aiter 8815f4b5 | 2026-07-09
+
+Goal (per E30's actionable): characterize the gfx1250 grouped a8w4 kernel's token/max_m-dependent
+error and localize it, then fix and re-measure GSM8K.
+
+**Setup / prerequisites re-applied on this fresh docker** (STATUS "3 code changes"; the tree
+started clean at 000a61a2, aiter clean at 8815f4b5):
+- sglang: `SGLANG_MOE_SHUFFLE_GFX1250` env-gated (16,16) weight shuffle in
+  `quark_w4a4_mxfp4_moe.py` (MANDATORY; without it GSM8K=0.000 garbage — reconfirmed:
+  flag off -> decode `爲爲爲...`, GSM8K 0.000/invalid 1.000; flag on -> " Paris...", 0.80).
+- aiter: `AITER_GROUPED_FORCE_SPLIT_K1` env in `grouped_moe_gfx1250.py` (this fresh aiter
+  lacked it -> warmup crashed with the §4.5 `IndexError` because CSV picks split_k=2 -> raw path).
+- GSM8K baseline on this node (both cuda-graph): flag-on = **0.80 (40Q)** / **0.833 (eager 30Q)**.
+
+**Token-sweep probe** (`op_tests/test_flydsl_grouped_gemm_gfx1250.py --scenario verify
+--data-format a8w4 --experts 256 --topk 8 --model-dim 7168 --inter-dim 2048 --no-check-aot-cache
+--tokens 8..1024`, `AITER_GROUPED_FORCE_SPLIT_K1=1` to match serving; needs `--no-check-aot-cache`
+else it forces `FLYDSL_RUNTIME_RUN_ONLY=1` and misses the AOT cache):
+
+| tokens | 8 | 16 | 32 | 64 | 128 | 256 | 512 | 1024 |
+|--------|---|----|----|----|-----|-----|-----|------|
+| logits_diff (buggy) | 3.4e-6 | 3.4e-6 | **1.6e-3** | 1.7e-3 | 3.2e-3 | 2.0e-3 | **5.4e-3** | 5.2e-3 |
+| rel_l2 (buggy)      | 0.26%  | 0.26%  | **5.6%**   | 5.9%   | 8.0%   | 6.3%   | **10.4%** | 10.2% |
+
+**Localization (AITER_GROUPED_DEBUG=1):** the jump is at tokens 16->32 and coincides EXACTLY with
+`grouped_contiguous_m` flipping **False->True** (routing picks contiguous-M when max_m crosses a
+threshold: tok16 max_m=64 contiguous=False exact; tok32 max_m=256 contiguous=True error). tile
+config is identical across all token counts (default tile_m=64/tile_n=256/tile_k=256/split_k=1,
+CSV miss cfg_row=None). So it is NOT a config change — it is a bug in the **contiguous-M path**.
+
+**Root cause + fix:** `kernels/gemm_mxscale_gfx1250.py:3010` per-tile expert-attribution binary
+search over the `[0, batch_count]` inclusive layout-offset range (batch_count+1 values) used
+`_bisect_iters = max(1, math.ceil(math.log2(batch_count)))`. For power-of-two batch_count (R1 =
+**256 experts**) `ceil(log2(256))=8` under-counts by 1 -> search un-converged -> wrong expert on the
+contiguous path. Fixed to `int(batch_count).bit_length()` (=9). (This IS STATUS "change #1"; it was
+NOT present in this fresh aiter.) `rm -rf /root/.flydsl/cache` after editing.
+
+**After fix:** op-test flat **3.4e-6 at ALL token counts** (32:3.40e-6, 128:3.41e-6, 512:3.46e-6,
+1024:3.43e-6). The token-growth is entirely gone -> the E16/E30 "large-token kernel numerics" =
+this bisect bug.
+
+**END-TO-END RESULT: NEUTRAL.** GSM8K on this node WITH the bisect fix (split_k1 + shuffle +
+cuda-graph, kernels recompiled after cache clear): **100Q = 0.830** — unchanged vs the 0.80/0.83
+baseline. So **fixing the large-token kernel error does NOT move GSM8K.** This:
+- **reconfirms E18** ("bisect fix real but end-to-end neutral"), and
+- **overturns E30's actionable conclusion** (E30 said the real-kernel large-token numerics were the
+  gap and fixing them should recover ~0.92 — they were fixed here and GSM8K did not move).
+
+**New clean contradiction to resolve:** op-test now says the real fused MoE path (route+quant+
+scatter+gemm) == the a8w4 quant-ref to 3e-6 at all token counts, AND E30 says an ideal a8w4 bf16
+emul = 0.925 (40Q) — yet the real gfx1250 kernel = 0.83 (100Q). If the real kernel truly equals
+ideal a8w4 to 3e-6, it "should" score ~0.925. It does not. => the 0.83<->0.925 gap is **NOT in the
+MoE gemm numerics** (op-test clean) and is either (a) E30's 0.925@40Q being an optimistic/noisy
+spot-check vs a proper large-Q number, or (b) a difference in the real serving path not covered by
+either the op-test verify or the E30 bf16-emul.
+
+**Decisive next (proposed):** on THIS gfx1250 node, same 100Q, run `scripts/moe_emul_sitecustomize.py`
+(`SGLANG_MOE_EMUL=a8w4`, the E30 bf16 emul) vs the real flydsl kernel — same HW/everything, only
+MoE impl differs. emul>>real => non-gemm real-kernel issue; emul~=real(~0.83) => the "to 0.93" gap
+is scheme/measurement (E30's 0.925 was gfx950/40Q-optimistic) and gfx1250-vs-gfx950 baseline
+comparability must be re-checked.
+
+**Kept:** the bisect fix is a genuine correctness fix (10% -> 3e-6 on random inputs) and is left
+applied in aiter (`gemm_mxscale_gfx1250.py:3010`).
+
+## E32. bf16 MoE emul ON gfx1250 — even IDEAL MoE doesn't close the gap => gap is NON-MoE
+node: gfx1250 (SECOND node, GPU3, TP1) — reported to the primary node; exact host TBD | 40Q
+
+Ran the E31 "decisive next" (E30-style `moe_emul_sitecustomize.py`) but ON a gfx1250 box: swap the
+MoE for a bf16 FFN (weights dequant fp4->bf16, activation quant per mode), measure GSM8K 40Q:
+
+| gfx1250 (GPU3, TP1, 40Q)                         | Accuracy        |
+|--------------------------------------------------|-----------------|
+| a8w4 real flydsl kernel                          | ~0.85 / 0.811 (1319Q) |
+| a8w4 bf16 emul (mxfp8 activation)                | 0.800           |
+| **a16w4 bf16 emul (bf16 activation = IDEAL, zero MoE quant)** | **0.825** |
+| gfx950 bf16 emul (E30, batched)                  | 0.925           |
+
+**Finding:** on gfx1250, even the fully ideal MoE (a16w4, no activation quant at all) = **0.825 ≈
+real 0.81**, far below gfx950's 0.925. Making the MoE ideal does NOT recover the gap =>
+**the gap is NOT the MoE** (real kernel [E31], scheme, or activation quant — all excluded) but
+**gfx1250's NON-MoE platform execution** (attention / norm / rope / linear / sampling — the parts
+the emul does NOT replace). Consistent with E31 (fixing MoE kernel numerics was end-to-end neutral).
+
+**Reconciles the E31 contradiction and the cross-node dump:** the dump's dense-layer match was only
+to the ~1e-2 TP2-vs-TP1 rel_l2 floor over 3 dense layers; a SMALL systematic non-MoE bias below that
+floor, accumulated over 61 layers + long generation, is invisible per-layer but is the gap. E22's
+attention check was "vs torch fp32", NOT "vs gfx950" — so a per-op-small but systematic gfx1250
+attention/norm/rope bias was never excluded cross-node.
+
+**CAVEAT (must resolve before trusting):** the gfx1250 emul here is the **chunked** variant (TP1
+memory forces it; the batched E30 emul OOMs on one card), while gfx950's 0.925 used the **batched**
+emul. So 0.825(chunked)-vs-0.925(batched) is not yet a clean apples-to-apples — the chunked emul
+could itself be lossy. **Control needed: run the SAME chunked emul on gfx950 and confirm it is still
+~0.925.** Only then is "gap = non-MoE" trustworthy.
+
+**Next (agreed):**
+1. [priority] gfx950 chunked-emul control -> expect 0.925 (rules out a chunked-emul bug).
+2. whole-forward cross-node logits comparison (final logits, not per-op / not per-layer residual) to
+   localize the systematic non-MoE gfx1250 bias (attention/norm/rope/linear/sampling).
+
+## E33. gfx950 chunked-emul CONTROL — passes; gap is DECISIVELY non-MoE
+node: gfx950 (reference node) | 40Q
+
+Ran the SAME chunked `moe_emul_sitecustomize.py` (a8w4) on gfx950 that gfx1250 used in E32, to rule
+out the chunked-vs-batched confound:
+- **gfx950 chunked a8w4 emul = 0.950** (40Q, latency ~562 s ≈ 9.4 min) == E30 batched 0.925 (40Q
+  noise) == native a4w4 ~0.93-0.945. So the chunked emul is faithful (NOT lossy).
+
+**Clean apples-to-apples (identical chunked a8w4 bf16-MoE emul, only the platform differs):**
+
+| chunked a8w4 bf16-MoE emul | GSM8K 40Q |
+|----------------------------|-----------|
+| gfx950                     | **0.950** |
+| gfx1250                    | **0.800** |
+
+The MoE math is now byte-identical bf16 on both nodes, so the **0.15 gap is 100% gfx1250's non-MoE
+platform execution** (attention / norm / rope / linear / sampling). MoE (real kernel, scheme,
+activation quant) is **fully excluded**. This closes E31/E32: the gap is NOT the MoE.
+
+**Next = localize WHICH non-MoE op.** Refined localizer (better than final-logits): re-run the
+cross-node per-layer residual dump (`hsdump_sitecustomize.py`) **with `SGLANG_MOE_EMUL=a8w4` on BOTH
+nodes** — MoE identical (bf16) so it no longer diverges by construction, and every layer (incl. the
+attention/norm of MoE layers 3-60) becomes comparable. The earliest layer/sublayer whose rel_l2
+climbs above the TP floor localizes the offending non-MoE op. (Caveat unchanged: gfx950 TP2 vs
+gfx1250 TP1 ~1e-2 floor; a 15%-accuracy non-MoE bias should exceed it somewhere.)
+
+## E34. non-MoE per-op vs torch-fp32 probe (same-node, no TP floor) — built + validated
+node: gfx1250 / host ctheliosr-rck-g02-j19-10 | sglang 000a61a2 | aiter 8815f4b5 | 2026-07-09
+
+Backup localizer for E33 ("gap is non-MoE"): extend E22 (attention-only) to EVERY non-MoE op vs a
+pure-torch fp32 reference, SAME-node (no TP2-vs-TP1 floor). Tool:
+`scripts/nonmoe_probe_sitecustomize.py` (env `SGLANG_NONMOE_PROBE=1`, launch
+`run_ds-r1_nonmoeprobe.sh`, EAGER). Each hook recomputes the fp32 ref from the SAME inputs
+(snapshotted BEFORE the op — rmsnorm/rope mutate in place), records rel_l2 by op+shape:
+rmsnorm->`forward_native`, rope->`forward_native`, linear->`x.float()@W.float().t()(+bias)`,
+lm_head->`LogitsProcessor._get_logits` vs `h.float()@lm_head.weight.float().t()`, sampling->greedy
+argmax(stored) vs argmax(fp32) disagreement + top1-top2 logit margin.
+
+**Validated end-to-end** (Natalia prompt, 32 new tokens, coherent "...Half of 48 is 24. So she
+sold"); all hooks fired (2700 records):
+
+| op                                    | mean rel_l2 | note |
+|---------------------------------------|-------------|------|
+| rope[q], rope[k]                      | **0.0**     | bit-exact vs torch native |
+| rmsnorm[d=512] (kv_a) / [d=1536] (q_a)| 1e-6 / 2e-6 | ~exact |
+| rmsnorm[d=7168] (main)                | 0.0024      | bf16 noise |
+| linear[* : o_proj/q/kv/gate/up/down]  | 0.0015-0.0017 | bf16 gemm noise |
+| lm_head[vocab~129280]                 | 0.0017      | bf16 gemm noise |
+| sampling argmax_disagree              | **0.0**     | greedy bf16==fp32, no flipped ties |
+| sampling top1-top2 margin             | 4.4 (logits)| healthy, not tie-prone |
+
+**Preliminary result:** every non-MoE op on gfx1250 matches its own torch-fp32 ref to bf16 noise
+(~1e-3) or better; rope bit-exact; greedy stable. => **no non-MoE op is grossly WRONG on gfx1250**
+(mirrors E22, now across rmsnorm/rope/linear/lm_head/sampling).
+
+**Scope:** this is gfx1250-op-vs-gfx1250-torch — it catches a *broken* gfx1250 op (as the bisect bug
+was for MoE) and finds none. It CANNOT catch a systematic gfx1250-vs-gfx950 platform bias where each
+side is individually "correct vs torch" but differs cross-node (accumulation/rounding order). So the
+E33 non-MoE gap is more likely such a systematic cross-node effect => the **E33 step-2 cross-node
+emul-dump is the primary localizer**; this probe (ready, validated) is the backup that already rules
+out a broken non-MoE op. Files: `scripts/nonmoe_probe_sitecustomize.py`, `run_ds-r1_nonmoeprobe.sh`.
+
+## E36. DSv4-Flash GSM8K on gfx1250 = 0.925 — hardware + a8w4 MoE fine; R1 gap is R1-specific non-MoE
+node: gfx1250 / host ctheliosr-rck-g02-j19-10 | sglang(/opt/venv serve) | aiter 8815f4b5(+edits) | 2026-07-09
+
+User's sharp sanity check: "if the gap were a gfx1250 HARDWARE problem, DSv4 couldn't score well on
+gfx1250." Measured it directly. Model `/dockerx/models/DeepSeek-V4-Flash` (DeepseekV4ForCausalLM, 43
+layers, **fp8 w8a8** dynamic e4m3; `is_fp4_experts=True` -> experts are fp4, so with
+`AITER_FORCE_A8W4=1` DSv4 uses the SAME a8w4 grouped MoE kernel as R1). Launch `run_v4_gfx1250.sh`
+style on GPU3, `--attention-backend dsv4`, fp8 KV. Same GSM8K 5-shot completion bench as R1.
+
+Traps hit + fixed:
+- The stock `run_v4_gfx1250.sh` has **no coredump guard**; first launch faulted during cuda-graph
+  capture (bs=200) and wrote a **95 GB `gpucore.*.gpu`** (deleted; disk restored). Added
+  `ulimit -c 0` + `HSA_COREDUMP_PATTERN=/dev/null` + `AMD_COREDUMP=0`.
+- DSv4 experts=fp4 -> a8w4 MoE hits the SAME split_k>1 raw-path fault as R1 at large bs; needed
+  `AITER_GROUPED_FORCE_SPLIT_K1=1` (not in the stock v4 script).
+- Even so, batched cuda-graph decode threw `hipErrorIllegalAddress` mid-GSM8K (DSv4-specific, likely
+  dsv4-attn / fp8-KV at batch decode — unrelated to R1's gap). Worked around with **eager**
+  (`--disable-cuda-graph`) + small batch (`--max-running-requests 16`, `--parallel 8`).
+
+**Result: DSv4 GSM8K 40Q = 0.925, invalid 0.000** (coherent, correct: "...The answer is 72."). And
+the other container has served DSv4 on gfx1250 GPU0 for hours. => **DSv4 scores well on gfx1250.**
+
+**Implications (clean same-machine contrast, same bench):** DSv4=0.925 vs R1=0.80-0.83 on gfx1250.
+- gfx1250 **hardware is fine** (a model scores 0.925). Confirms E34 / the user's argument.
+- The **a8w4 grouped MoE kernel is fine** — DSv4 uses the exact same kernel and scores 0.925
+  (independent confirmation of E30/E31/E33: MoE not the gap).
+- DSv4 and R1 differ in the **non-MoE path**: DSv4 = `dsv4` attention backend + fp8 w8a8 linears +
+  fp8 KV, calibrated fp8; R1 = triton MLA + mxfp4->bf16-dequant linears + bf16 KV, calibrated mxfp4.
+  => the R1 gap lives in R1's **specific non-MoE path** (triton MLA attention and/or the mxfp4
+  scheme running as bf16/a8w4), which DSv4 does not share. Consistent with E33 (gap is non-MoE) and
+  narrows it to R1/MLA-specific execution, most plausibly a cross-platform (wave32-vs-wave64)
+  accumulation difference in R1's triton MLA that DSv4's dsv4-backend attention avoids, OR a
+  quant-scheme-matching effect specific to the mxfp4 checkpoint. Cross-node emul-dump (step 2)
+  remains the localizer; focus attention-sublayer.
+
+## E37. DSv4 cuda-graph batched-decode crash on gfx1250 — REPRODUCIBLE (DSv4-specific, not the R1 gap)
+node: gfx1250 / host ctheliosr-rck-g02-j19-10 | 2026-07-09
+
+Confirmed reproducible (per user request): DSv4-Flash launched WITH cuda-graph
+(`run_v4_gpu3_safe.sh`: `--cuda-graph-max-bs 64`, `AITER_GROUPED_FORCE_SPLIT_K1=1`, coredump guards)
++ the crashing GSM8K command (`--parallel 32`, 40Q) -> **server dies with
+`torch.AcceleratorError: CUDA error: an illegal memory access` (hipErrorIllegalAddress)**, from
+`ExchangeDevice`. Second identical repro (first was E36's initial attempt).
+- Trigger: `#running-req` climbs to **31-32** with **cuda-graph decode active (`cuda graph: True`,
+  bs=32)** + interleaved prefills (swa mixed batch). 
+- Control: eager + `--max-running-requests 16` + `--parallel 8` does NOT crash (that config gave the
+  0.925 number in E36). => fault is specific to **DSv4 cuda-graph decode at batch >= ~32 with swa**,
+  i.e. dsv4-attention/swa/graph — **DSv4-specific, unrelated to R1's accuracy gap**.
+- Coredump guards held (no `gpucore.*.gpu`; disk stable). GPU3 freed cleanly after.
+- Repro files: `run_v4_gpu3_safe.sh` (graph on) + `bench_sglang.py --parallel 32 --port 8100`;
+  workaround for a usable DSv4 serve = eager + small batch (E36).
+
+## E38. The DSv4 crash is CAUSED BY the E31 bisect "fix" — reverted (net-negative)
+node: gfx1250 / host ctheliosr-rck-g02-j19-10 | aiter 8815f4b5 | 2026-07-09
+
+Tested (user idea): revert the E31 edit in `gemm_mxscale_gfx1250.py:3010`
+(`int(batch_count).bit_length()` -> back to original `math.ceil(math.log2(batch_count))`),
+`rm -rf /root/.flydsl/cache`, and re-run the E37 crash repro (DSv4, cuda-graph ON, GSM8K
+`--parallel 32`).
+
+**Result: NO CRASH. DSv4 = 0.925, invalid 0.000, server survived** (same config that crashed 2x
+with the fix present). => **the DSv4 `hipErrorIllegalAddress` was caused by the bisect "fix", not by
+DSv4.** Mechanism (very likely): `bit_length(256)=9` iterations vs `ceil(log2 256)=8` — the extra
+bisection step drives `mid` to the inclusive upper bound `batch_count` and does
+`buffer_load(layout_rsrc, batch_count)` = an **out-of-bounds read** of the layout-offset buffer ->
+illegal address. It faults under DSv4's high-concurrency contiguous-M prefill (bs~32); R1 tolerated
+it (no crash in E31) but it was a latent OOB.
+
+**Verdict on the bisect "fix" (STATUS "code change #1"): NET-NEGATIVE, keep it REVERTED.**
+- It fixed only the contiguous-M op-test error (10% -> 3e-6) which E31 proved **end-to-end NEUTRAL**
+  (R1 GSM8K unchanged 0.83 vs 0.80).
+- It INTRODUCES an OOB read that crashes DSv4 (E37) and is a latent crash for R1 at high concurrency.
+- => No accuracy benefit, real crash cost. Left reverted (`ceil(log2)`, original). A correct fix
+  would need an OOB-safe bisect (clamp `mid`/`hi` to `batch_count-1`, or bound the buffer), but since
+  the numeric error is end-to-end neutral it is not worth the risk right now.
+- **Action item for STATUS/CHANGES:** demote change #1 from "recommended" to "do NOT apply as-is
+  (causes DSv4 OOB crash); only the shuffle (#2) + split_k1 (#3) are needed.**
+- **PARTLY SUPERSEDED by E39:** the MoE fix that #1 targets IS actually part of the real gap fix
+  (its benefit was masked by the attention error, so E31's "neutral" was the masking confound). So
+  the fix is *needed* — but the `bit_length` **implementation** has the OOB crash and must be
+  reimplemented OOB-safe (clamp `mid`/`hi` to `batch_count-1`) before use. Keep reverted until then.
+
+## E39. BREAKTHROUGH — the gap is TWO gfx1250 real kernels (MoE + attention) that MUTUALLY MASK
+node: gfx1250 (SECOND node) | reported to primary | 40Q
+
+The other gfx1250 box ran the decisive combo: idealize the MoE (bf16 emul) AND the attention
+(torch-naive softmax over paged KV, i.e. torch SDPA reference) **independently and together**:
+
+| gfx1250 config                                  | GSM8K |
+|-------------------------------------------------|-------|
+| real MoE + real attention (baseline)            | ~0.80 |
+| idealize MoE ONLY (bf16 emul)                    | ~0.825 |
+| idealize ATTENTION ONLY (torch softmax/SDPA)     | ~0.825 |
+| idealize BOTH                                    | **0.925 (== gfx950)** |
+
+**Conclusion: the ~0.10-0.12 gap is caused by TWO real gfx1250 kernels EACH injecting error — the
+FlyDSL a8w4 grouped MoE (large-token, E16) AND the Triton MLA softmax attention (decode/extend) —
+and they MUTUALLY MASK: fixing only one leaves the other, so accuracy barely moves (0.80->0.825).
+Fixing BOTH recovers 0.925.**
+
+This resolves every prior "innocent" verdict as the masking confound:
+- **E31** ("MoE fix end-to-end neutral") — neutral only because the attention error still dominated.
+  The MoE fix IS real and needed; it just can't show alone.
+- **E33/E36** (idealize MoE only -> 0.825) — same masking (attention still real).
+- **E22/E34** ("attention matches torch to 0.16%, clean") — WRONG as an end-to-end verdict: that
+  0.16%/per-op **accumulates** over the long CoT and, once the MoE is also idealized, is worth ~0.10.
+  Per-op-vs-torch (same-node) genuinely cannot see an accumulating systematic bias — exactly the E34
+  scope caveat.
+- Combo still used the Triton **qk-rmsnorm** and still hit 0.925 => **qk-norm is fine**; the
+  attention problem is specifically in the **softmax decode/extend kernel** (triton MLA), not qk-norm.
+
+**Actionable (fix BOTH gfx1250 real kernels; MUST validate end-to-end — small-token op-tests are blind):**
+1. **Triton MLA softmax attention (decode + extend) numerics** — reference = torch SDPA over paged KV
+   (torch-naive recovers it). Likely a softmax/reduction precision or wave32 accumulation issue.
+2. **FlyDSL a8w4 grouped MoE large-token numerics** (E16) — bf16 emul recovers it; needs a correct
+   real-kernel fix (the `bit_length` bisect targets this but is OOB-crashy per E38 — reimplement
+   OOB-safe, or find the true large-token accumulation issue).
+- Fix one -> ~0.825; fix both -> ~0.925.

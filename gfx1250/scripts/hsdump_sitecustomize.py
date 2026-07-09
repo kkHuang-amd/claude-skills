@@ -26,6 +26,11 @@ if os.environ.get("HS_DUMP", "0") in ("1", "true", "True"):
 
     OUT = os.environ.get("HS_DUMP_OUT", "/tmp/hs_dump.json")
     N = int(os.environ.get("HS_DUMP_NLAYERS", "61"))
+    # Only capture a forward pass whose token count is >= MIN_TOKENS. This skips the
+    # spurious 1-token (M:1) readiness/health forward that sglang runs right after
+    # startup (even with --skip-server-warmup), which otherwise gets captured INSTEAD
+    # of the real fixed prompt. Set well below the fixed prompt length (~41 tokens).
+    MIN_TOKENS = int(os.environ.get("HS_DUMP_MIN_TOKENS", "8"))
     STATE = {"done": False}
 
     def _install():
@@ -55,6 +60,12 @@ if os.environ.get("HS_DUMP", "0") in ("1", "true", "True"):
             return {"norm": float(torch.norm(last).item()),
                     "slice64": [round(x, 5) for x in last[:64].tolist()]}
 
+        def _ntok(t):
+            try:
+                return int(t.reshape(-1, t.shape[-1]).shape[0])
+            except Exception:
+                return -1
+
         # ---- attention-module hook: capture post-attention (pre-MoE) output ----
         if AttnCls is not None and hasattr(AttnCls, "forward"):
             _a_orig = AttnCls.forward
@@ -64,7 +75,8 @@ if os.environ.get("HS_DUMP", "0") in ("1", "true", "True"):
                 if not STATE["done"] and len(attn_outs) < N:
                     try:
                         t = out[0] if isinstance(out, (tuple, list)) else out
-                        attn_outs.append(slice_stats(t))
+                        if _ntok(t) >= MIN_TOKENS:  # skip the M:1 readiness forward
+                            attn_outs.append(slice_stats(t))
                     except Exception:
                         attn_outs.append(None)
                 return out
@@ -74,6 +86,10 @@ if os.environ.get("HS_DUMP", "0") in ("1", "true", "True"):
         _l_orig = Layer.forward
 
         def l_hooked(self, positions, hidden_states, forward_batch, residual, *a, **k):
+            # Skip the spurious 1-token readiness forward: only record passes whose
+            # token count reaches MIN_TOKENS (the real fixed prompt is ~41 tokens).
+            if _ntok(hidden_states) < MIN_TOKENS:
+                return _l_orig(self, positions, hidden_states, forward_batch, residual, *a, **k)
             pre = None
             try:
                 pre = slice_stats(hidden_states)

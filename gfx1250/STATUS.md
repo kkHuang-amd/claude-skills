@@ -16,6 +16,73 @@ clobber. Rules:
 - Prefer writing raw run logs to a **per-node file** (e.g. `results_<node>.md`) and only
   summarizing into EXPERIMENT_LOG/STATUS to reduce collision risk.
 - Numbers without a node tag are ambiguous — always state which arch/node produced them.
+- Additional known node: `ctheliosr-rck-g02-j19-10` = **gfx1250** (4x; primary box for the
+  token-sweep E31 through E39; sglang 000a61a2, aiter 8815f4b5).
+
+> **★ UPDATE 2026-07-09 (E39 — node: gfx1250 SECOND box): BREAKTHROUGH — the gap = TWO real kernels
+> that MUTUALLY MASK.** Idealizing (bf16/torch) the MoE AND the attention independently and together:
+> real+real ~0.80; **idealize MoE only ~0.825; idealize attention only ~0.825; idealize BOTH = 0.925
+> (== gfx950).** => the gap is the FlyDSL a8w4 grouped MoE (large-token) AND the Triton MLA softmax
+> attention (decode/extend) EACH injecting error, masking each other. This resolves all prior
+> "innocent" verdicts as the masking confound: E31 "MoE fix neutral" (masked by attention), E22/E34
+> "attention clean" (per-op 0.16% ACCUMULATES over long CoT; only shows once MoE is also idealized).
+> qk-rmsnorm is fine (combo kept Triton qk-norm and still hit 0.925) — the attention issue is the
+> **softmax decode/extend kernel**. **ACTIONABLE: fix BOTH gfx1250 real kernels, validate
+> END-TO-END (small-token op-tests are blind): (1) Triton MLA softmax attention -> match torch SDPA
+> over paged KV; (2) FlyDSL a8w4 grouped MoE large-token -> the bisect targets this but is OOB-crashy
+> (E38), reimplement OOB-safe or find the true large-token accumulation issue. Fix one -> ~0.825;
+> both -> ~0.925.**
+>
+> **UPDATE 2026-07-09 (E37/E38 — node: gfx1250/ctheliosr-rck-g02-j19-10): the DSv4 crash is caused
+> by our own bisect "fix", now REVERTED.** DSv4 + cuda-graph + GSM8K `--parallel 32` crashed
+> reproducibly (`hipErrorIllegalAddress`) — but ONLY with the E31 bisect edit
+> (`gemm_mxscale_gfx1250.py:3010` `bit_length()`); reverting to the original `ceil(log2)` makes DSv4
+> run clean at **0.925** (parallel 32, cuda-graph). The `bit_length` extra iteration is an OOB read
+> of the layout buffer. Since that "fix" was **end-to-end neutral** for R1 (E31) and crashes DSv4,
+> it is **NET-NEGATIVE and left reverted**. => STATUS "3 code changes" #1 is now **do-NOT-apply**;
+> only #2 (weight shuffle) and #3 (AITER_GROUPED_FORCE_SPLIT_K1) are needed.
+>
+> **UPDATE 2026-07-09 (E36 — node: gfx1250/ctheliosr-rck-g02-j19-10): DSv4 = 0.925 on gfx1250.**
+> Directly tested the user's "if it were hardware, DSv4 would also be bad" argument. DeepSeek-V4-Flash
+> (fp8; experts fp4 -> SAME a8w4 MoE kernel as R1) GSM8K 40Q = **0.925** on gfx1250 (eager+small-batch;
+> batched cuda-graph decode throws hipErrorIllegalAddress — DSv4 dsv4-attn/fp8-KV, unrelated). =>
+> gfx1250 **hardware is fine** and the **a8w4 MoE kernel is fine** (DSv4 uses it, 0.925). So the R1
+> gap (0.80-0.83) is in R1's **specific non-MoE path** (triton MLA + mxfp4->bf16 linears + bf16 KV),
+> which DSv4 (dsv4-attn + fp8) does not share — most plausibly a cross-platform (wave32/64)
+> accumulation diff in R1's triton MLA, or an mxfp4 quant-matching effect. Localizer: step-2 emul-dump,
+> focus the attention sublayer. (Traps: v4 script lacks coredump guard -> a 95 GB gpucore; needs
+> AITER_GROUPED_FORCE_SPLIT_K1=1. See E36.)
+>
+> **UPDATE 2026-07-09 (E33 — node: gfx950 control): gap is DECISIVELY non-MoE.** The gfx950
+> chunked-emul control passed: **gfx950 chunked a8w4 emul = 0.950 (40Q)** == E30 batched 0.925 ==
+> native ~0.93 -> the chunked emul is faithful (confound ruled out). So with the **identical
+> chunked a8w4 bf16-MoE emul, gfx950=0.950 vs gfx1250=0.800** — MoE math byte-identical, so the
+> **0.15 gap is 100% gfx1250 non-MoE platform** (attention/norm/rope/linear/sampling). MoE fully
+> excluded. NEXT (localizer): cross-node per-layer dump with `SGLANG_MOE_EMUL=a8w4` on BOTH nodes
+> (MoE identical -> every layer comparable) -> earliest above-floor rel_l2 = the offending non-MoE op.
+>
+> **UPDATE 2026-07-09 (E32 — node: gfx1250 SECOND box, GPU3): the gap is NON-MoE.** Ran the
+> bf16 MoE emul ON gfx1250: even the **fully ideal MoE (a16w4, zero activation quant) = 0.825**
+> (40Q) ≈ real 0.81, vs gfx950 0.925. Making the MoE ideal does NOT close the gap => the gap is
+> **gfx1250's non-MoE platform execution** (attention/norm/rope/linear/sampling), NOT the MoE
+> (real kernel [E31], scheme, or activation quant — all excluded). CAVEAT: gfx1250 emul is the
+> **chunked** variant; gfx950's 0.925 was **batched** — must run the SAME chunked emul on gfx950
+> (expect 0.925) to rule out a chunked-emul bug before fully trusting this. Next: (1) gfx950
+> chunked-emul control; (2) whole-forward cross-node **logits** diff (not per-op) to localize the
+> systematic non-MoE bias — note E22's attention check was "vs torch", never "vs gfx950".
+>
+> **UPDATE 2026-07-09 (E31 — node: gfx1250/ctheliosr-rck-g02-j19-10): the "large-token a8w4
+> kernel numerics" hypothesis is OVERTURNED (end-to-end).** Token-swept op-test localized the
+> growth to the **contiguous-M path bisect off-by-one** (`gemm_mxscale_gfx1250.py:3010`,
+> `ceil(log2(256))` -> `bit_length()`; 256 experts = power of two). Fix -> op-test flat **3.4e-6
+> at all token counts** (was 10% @ 512). **But GSM8K 100Q = 0.830, UNCHANGED** from the
+> 0.80/0.83 baseline -> the large-token kernel error is **end-to-end NEUTRAL** (reconfirms E18,
+> overturns E30's actionable claim). New clean contradiction: real fused MoE == a8w4 ref @ 3e-6
+> (op-test) yet scores 0.83, while E30's ideal a8w4 emul = 0.925 (40Q). Next: on gfx1250, same
+> 100Q, run the E30 bf16 MoE emul (`SGLANG_MOE_EMUL=a8w4`) vs the real kernel — emul>>real =>
+> non-gemm real-kernel issue; emul~=real => the gap is scheme/measurement (E30's 0.925 was
+> gfx950/40Q-optimistic). [SUPERSEDED by E38: the bisect fix was later REVERTED — it is end-to-end
+> neutral AND causes an OOB crash on DSv4; do not apply.]
 
 > **UPDATE 2026-07-09 (E26): the gfx950 absorb ablation is DONE — absorb is NOT the gap.**
 > Forcing gfx950's MLA absorb BMM to bf16 (mimic gfx1250) left GSM8K at **0.942 vs 0.944
@@ -67,10 +134,12 @@ cuda-graph ON. Model at `/dockerx/data/models/DeepSeek-R1-0528-MXFP4`. Launch:
 
 ## 3 code changes THIS environment needed (re-apply after any machine switch)
 See CHANGES.md "2026-07-08 session edits" for exact diffs. Summary:
-1. **aiter** `ops/flydsl/kernels/gemm_mxscale_gfx1250.py` ~L3010: bisect off-by-one
-   `math.ceil(math.log2(batch_count))` -> `int(batch_count).bit_length()` (power-of-2
-   expert count; R1=256). Real bug, op-test 3.2e-3->3.4e-6, but end-to-end neutral.
-   After editing, `rm -rf /root/.flydsl/cache` so FlyDSL recompiles.
+1. ~~**aiter** `ops/flydsl/kernels/gemm_mxscale_gfx1250.py` ~L3010: bisect off-by-one
+   `math.ceil(math.log2(batch_count))` -> `int(batch_count).bit_length()`.~~ **DO NOT APPLY
+   (E38).** It fixes only the contiguous-M op-test (3.2e-3->3.4e-6) which is **end-to-end
+   NEUTRAL**, and the extra `bit_length` iteration is an **OOB read of the layout buffer that
+   crashes DSv4** (cuda-graph + parallel 32, `hipErrorIllegalAddress`; R1 tolerated it latently).
+   Keep the ORIGINAL `ceil(log2)`. Only #2 and #3 below are needed.
 2. **sglang** `quark/schemes/quark_w4a4_mxfp4_moe.py`: enable weight `shuffle_weight
    (w,(16,16))` on gfx1250 when a8w4 (mirror DSv4 fp8.py). MANDATORY on THIS aiter build —
    without it GSM8K = 0.000 garbage. NUANCE (E25c, verified 2026-07-09): this is because
@@ -190,7 +259,8 @@ nodes' **per-layer residual stream** on the SAME fixed prompt.
 
 ## Machine-switch checklist
 1. Confirm GPUs: `ls /dev/kfd /dev/dri && python3 -c "import torch;print(torch.cuda.device_count())"`.
-2. Re-apply the 3 code changes (CHANGES.md) if the new repo lacks them; `rm -rf /root/.flydsl/cache`.
+2. Re-apply code changes #2 (weight shuffle) + #3 (AITER_GROUPED_FORCE_SPLIT_K1) if missing;
+   **do NOT apply #1 (bisect/bit_length) — it crashes DSv4, see E38**; `rm -rf /root/.flydsl/cache`.
 3. Point `run_ds-r1.sh --model-path` at the checkpoint; verify it's W4A4 (E2) / matches HF fingerprint (E23).
 4. Launch working recipe, sanity curl (coherent, not token-0), GSM8K ~0.85.
 5. Next real work = the cross-node dump diff (HANDOVER_crossnode_dump.md).

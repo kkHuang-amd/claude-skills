@@ -13,8 +13,10 @@ clobber. Rules:
   - `ctheliosp-...-H21-17` = **gfx1250** (the original 7aa6082 docker; now gone).
   - the **gfx950** cross-val box (TP2) = `/sgl-workspace/sglang_gfx-1250` tree.
 - **APPEND, never rewrite** shared files; keep your node's edits in clearly-tagged blocks.
-- Prefer writing raw run logs to a **per-node file** (e.g. `results_<node>.md`) and only
-  summarizing into EXPERIMENT_LOG/STATUS to reduce collision risk.
+- **Write raw runs to your node's file first, then promote a short summary into
+  EXPERIMENT_LOG/STATUS** (this avoids the concurrent-write conflicts we already hit). Per-node
+  files: `results_gfx1250-j19-10.md` (this box), `results_gfx1250-H21-18.md` (2nd gfx1250),
+  `results_gfx950.md` (gfx950 ref). EXPERIMENT_LOG/STATUS = curated cross-node summary only.
 - Numbers without a node tag are ambiguous — always state which arch/node produced them.
 - Additional known node: `ctheliosr-rck-g02-j19-10` = **gfx1250** (4x; primary box for the
   token-sweep E31 through E39; sglang 000a61a2, aiter 8815f4b5).

@@ -783,7 +783,11 @@ to the growth. (Caveat: 40Q is a spot-check; the internal a4w4-vs-a8w4 A/B is cl
 native, and the gap to gfx1250's 0.85 is far larger than 40Q noise. A 200Q emul rerun ~3 h each
 would tighten it if desired.)
 
-## E31. bf16 MoE emul RUN ON gfx1250 — FLIPS E30: the gap is NOT the MoE (case B)  [node: H21-18 gfx1250]
+## E32-H21 (H21-18 node's own writeup). bf16 MoE emul RUN ON gfx1250 — the gap is NOT the MoE (case B)  [node: H21-18 gfx1250]
+> NOTE (numbering dedup 2026-07-09): this is the H21-18 node's full writeup of the "bf16 MoE emul on
+> gfx1250" run. It is the SAME experiment as **E32** (this-node summary) below; renamed from its
+> original "E31" to remove the collision with the token-sweep E31. "E31" now uniquely = the
+> token-sweep entry immediately below.
 E30 inferred "gfx1250 real a8w4 kernel is the gap" from a gfx950 emul (0.925) vs gfx1250
 real (0.85). E31 runs the SAME emulation directly ON gfx1250 (bypasses the real flydsl
 kernel with ideal bf16 MoE) to test that inference. Setup: `scripts/moe_emul_sitecustomize.py`
@@ -824,8 +828,8 @@ logit compare, not just per-op) — the per-op attention checks (E22) were vs to
 gfx950, so a systematic small gfx1250 attention/norm bias would pass E22 yet accumulate.
 
 ## E31. Token-swept a8w4 kernel probe — bisect off-by-one found & fixed, but END-TO-END NEUTRAL
-(node ctheliosr-rck-g02-j19-10; note: numbering collides with the H21-18 "E31" above — both kept,
-disambiguated by node tag. Cross-refs below to "E31" mean this token-sweep entry.)
+node: gfx1250 / host ctheliosr-rck-g02-j19-10. (The H21-18 node's former "E31" above was renamed to
+**E32-H21** to remove the collision; all cross-refs to "E31" in this file/STATUS mean THIS token-sweep.)
 node: gfx1250 / host ctheliosr-rck-g02-j19-10 | sglang 000a61a2 | aiter 8815f4b5 | 2026-07-09
 
 Goal (per E30's actionable): characterize the gfx1250 grouped a8w4 kernel's token/max_m-dependent
@@ -892,7 +896,9 @@ comparability must be re-checked.
 applied in aiter (`gemm_mxscale_gfx1250.py:3010`).
 
 ## E32. bf16 MoE emul ON gfx1250 — even IDEAL MoE doesn't close the gap => gap is NON-MoE
-node: gfx1250 (SECOND node, GPU3, TP1) — reported to the primary node; exact host TBD | 40Q
+node: gfx1250 (H21-18 SECOND node, GPU3, TP1) | 40Q
+> This is the this-node SUMMARY of the same run that **E32-H21** (above) writes up in full detail.
+> Kept both: E32-H21 = H21-18's original text, E32 = the summary + cross-node reconciliation.
 
 Ran the E31 "decisive next" (E30-style `moe_emul_sitecustomize.py`) but ON a gfx1250 box: swap the
 MoE for a bf16 FFN (weights dequant fp4->bf16, activation quant per mode), measure GSM8K 40Q:

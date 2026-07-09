@@ -6,6 +6,13 @@ E29). Env `SGLANG_MOE_EMUL` in {a4w4, a8w4, a16w4}:
   - a16w4: no activation quant    (upper precision bound)
 Weights stay fp4 (dequanted per-forward per active expert -> ~fits; slow but memory-feasible).
 
+CHUNKED-DEQUANT version (updated 2026-07-09, node H21-18 gfx1250): the MoE run dequants
+active experts in chunks of CH=32 (peak ~7 GB) instead of all-at-once (~25 GB, which OOMs at
+TP1 with the ~353 GB bf16-dequant model). Math is identical to the original batched version;
+only peak memory / call count differs. Use THIS version on BOTH nodes for apples-to-apples.
+E30's gfx950 0.925 was measured with the ORIGINAL batched version; re-run gfx950 with this
+chunked version (HANDOVER_gfx950_moe_emul_apples.md) to confirm equivalence.
+
 Mechanism (no repo edits):
   1. Make the MoE weight/scale shuffles identity so weights keep the clean create_weights
      layout ([E, N, K//2] uint8 + [E, N, K//32] e8m0), dequantable by the E20 probe's
@@ -125,24 +132,31 @@ if _MODE in ("a4w4", "a8w4", "a16w4"):
 
             active = torch.unique(topk_ids)
             active = active[(active >= 0) & (active < E)]
-            # batched dequant of ONLY the active experts (2 calls, not 2*A)
-            w13d = _dequant_batched(w13_u8[active], w13_s[active])  # [A, 2*inter, model] bf16
-            w2d = _dequant_batched(w2_u8[active], w2_s[active])      # [A, model, inter] bf16
-
-            for ai, e in enumerate(active.tolist()):
-                sel = topk_ids == e
-                tok, slot = sel.nonzero(as_tuple=True)
-                if tok.numel() == 0:
-                    continue
-                x_e = xq_all[tok]                       # [n, model] bf16
-                gu = x_e @ w13d[ai].t()                 # [n, 2*inter] bf16
-                gate, up = gu.chunk(2, dim=-1)
-                h = torch.nn.functional.silu(gate) * up  # [n, inter]
-                h = _act_q(h)                           # stage2 activation quant
-                y = h @ w2d[ai].t()                     # [n, model] bf16
-                out.index_add_(
-                    0, tok, (y.to(torch.float32) * topk_w[tok, slot].unsqueeze(-1))
-                )
+            active_list = active.tolist()
+            # CHUNKED dequant: process CH experts per batch (peak ~7 GB vs ~25 GB for all-at-
+            # once which OOMs at TP1 w/ the ~353 GB bf16 model; ~E/CH dequant calls vs E for
+            # per-expert -> ~30x faster than per-expert, still memory-feasible).
+            CH = 32
+            for ci in range(0, len(active_list), CH):
+                chunk = active_list[ci:ci + CH]
+                cidx = torch.tensor(chunk, device=hs.device, dtype=torch.long)
+                w13d = _dequant_batched(w13_u8[cidx], w13_s[cidx])  # [c, 2*inter, model] bf16
+                w2d = _dequant_batched(w2_u8[cidx], w2_s[cidx])      # [c, model, inter] bf16
+                for j, e in enumerate(chunk):
+                    sel = topk_ids == e
+                    tok, slot = sel.nonzero(as_tuple=True)
+                    if tok.numel() == 0:
+                        continue
+                    x_e = xq_all[tok]                       # [n, model] bf16
+                    gu = x_e @ w13d[j].t()                  # [n, 2*inter] bf16
+                    gate, up = gu.chunk(2, dim=-1)
+                    h = torch.nn.functional.silu(gate) * up  # [n, inter]
+                    h = _act_q(h)                           # stage2 activation quant
+                    y = h @ w2d[j].t()                      # [n, model] bf16
+                    out.index_add_(
+                        0, tok, (y.to(torch.float32) * topk_w[tok, slot].unsqueeze(-1))
+                    )
+                del w13d, w2d
 
             if not STATE["logged"]:
                 print(f"[moe_emul] MODE={_MODE} active={active.numel()} E={E} T={T} "

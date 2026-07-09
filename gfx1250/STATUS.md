@@ -1,8 +1,21 @@
 # STATUS — gfx1250 DeepSeek-R1-0528-MXFP4 accuracy gap investigation
 
 Single entry point / handover snapshot. Last updated **2026-07-09**.
-Read this first, then EXPERIMENT_LOG.md (E17-E28) for detail, CHANGES.md for the exact
+Read this first, then EXPERIMENT_LOG.md (E17-E31) for detail, CHANGES.md for the exact
 code edits, HANDOVER_crossnode_dump.md for the next experiment.
+
+## ⚠️ MULTI-NODE CONVENTION (several machines share this dir)
+Multiple nodes run these experiments and write to these SAME md files — concurrent edits can
+clobber. Rules:
+- **Tag every result/entry with its node + arch**, e.g. `[node: H21-18 gfx1250]` or
+  `[node: <hostname-short> gfx950]`. Known nodes so far:
+  - `ctheliosp-...-H21-18` = **gfx1250** (this session's box; the current gfx1250 stack).
+  - `ctheliosp-...-H21-17` = **gfx1250** (the original 7aa6082 docker; now gone).
+  - the **gfx950** cross-val box (TP2) = `/sgl-workspace/sglang_gfx-1250` tree.
+- **APPEND, never rewrite** shared files; keep your node's edits in clearly-tagged blocks.
+- Prefer writing raw run logs to a **per-node file** (e.g. `results_<node>.md`) and only
+  summarizing into EXPERIMENT_LOG/STATUS to reduce collision risk.
+- Numbers without a node tag are ambiguous — always state which arch/node produced them.
 
 > **UPDATE 2026-07-09 (E26): the gfx950 absorb ablation is DONE — absorb is NOT the gap.**
 > Forcing gfx950's MLA absorb BMM to bf16 (mimic gfx1250) left GSM8K at **0.942 vs 0.944
@@ -17,8 +30,19 @@ code edits, HANDOVER_crossnode_dump.md for the next experiment.
 > Chart: `crossnode_dump_compare.png`. **Remaining blocker: re-dump gfx1250 with the new
 > rank-gated hook** to also diff `post_attn` at MoE layers 3-60 (strict attention check).
 >
-> **UPDATE 2026-07-09 (E30, PIVOTAL): the a8w4 SCHEME is accuracy-neutral — the gap is the
-> gfx1250 REAL KERNEL.** bf16 MoE emulation on gfx950 (`scripts/moe_emul_sitecustomize.py`,
+> **UPDATE 2026-07-09 (E31, FLIPS E30): the gap is NOT the MoE at all — it is a gfx1250
+> NON-MoE effect (case B).** Ran the SAME bf16 MoE emul DIRECTLY ON gfx1250 (bypass the real
+> flydsl kernel): a8w4-emul = **0.800**, a16w4-emul (most ideal, zero MoE quant) = **0.825**
+> (40Q) — i.e. ~= gfx1250's real 0.81, NOT gfx950's 0.925. So making the MoE ideal does NOT
+> recover gfx1250 => the real a8w4 kernel is NOT the gap (E30's inference was from gfx950-only
+> and is wrong for gfx1250). A new/fixed MoE kernel will NOT help. Caveats: 40Q noise; the
+> gfx1250 emul is the CHUNKED variant (TP1 memory) — run the same chunked emul on gfx950 for a
+> strict apples-to-apples (expect ~0.925). Next: bisect the NON-MoE gfx1250 path with a
+> WHOLE-FORWARD gfx1250-vs-gfx950 logit compare (E22 attention checks were vs torch, not vs
+> gfx950, so a systematic small gfx1250 bias could pass per-op yet accumulate). See E31.
+>
+> **UPDATE 2026-07-09 (E30, SUPERSEDED BY E31): the a8w4 SCHEME is accuracy-neutral — [E30
+> inferred] the gap is the gfx1250 REAL KERNEL.** bf16 MoE emulation on gfx950 (`scripts/moe_emul_sitecustomize.py`,
 > `SGLANG_MOE_EMUL`): **a4w4-emul = a8w4-emul = 0.925 (40Q)**, matching native a4w4 (~0.93).
 > So an *idealized* a8w4 (fp8 act x fp4 weight) does NOT lose accuracy vs a4w4 — quant-matching
 > is FALSE. Yet the gfx1250 real flydsl a8w4 kernel scores ~0.85 for the same scheme. =>
@@ -48,8 +72,12 @@ See CHANGES.md "2026-07-08 session edits" for exact diffs. Summary:
    expert count; R1=256). Real bug, op-test 3.2e-3->3.4e-6, but end-to-end neutral.
    After editing, `rm -rf /root/.flydsl/cache` so FlyDSL recompiles.
 2. **sglang** `quark/schemes/quark_w4a4_mxfp4_moe.py`: enable weight `shuffle_weight
-   (w,(16,16))` on gfx1250 when a8w4 (mirror DSv4 fp8.py). MANDATORY — without it
-   GSM8K = 0.000 garbage (B-scale is already n32k4-shuffled; weight must match).
+   (w,(16,16))` on gfx1250 when a8w4 (mirror DSv4 fp8.py). MANDATORY on THIS aiter build —
+   without it GSM8K = 0.000 garbage. NUANCE (E25c, verified 2026-07-09): this is because
+   THIS docker's aiter grouped a8w4 kernel requires (16,16)-shuffled weight — NOT because
+   raw weight is inherently broken (commit 7aa6082 got 0.82 on gfx1250 with raw weight on
+   the OLD docker's aiter). Reverting the bisect fix does not restore raw-weight, so the
+   break is the aiter kernel version, not sglang/bisect/split_k1.
 3. **aiter** `ops/flydsl/grouped_moe_gfx1250.py`: add `AITER_GROUPED_FORCE_SPLIT_K1`
    env (force split_k1=split_k2=1; CSV picks 2 for token=1 decode -> illegal-address)
    + `AITER_GROUPED_FORCE_TILE_M` investigation knob (default off).
@@ -142,7 +170,10 @@ nodes' **per-layer residual stream** on the SAME fixed prompt.
 - `crossnode_dump_compare.png` — E28 chart: gfx950-vs-gfx1250 per-layer rel_l2 + norms.
 - `scripts/plot_crossnode_dump.py` — regenerates the E28 chart from the two dumps.
 - `scripts/moe_quant_probe.py` — MoE a4w4-vs-a8w4 quant-error probe (E20).
-- `scripts/moe_emul_sitecustomize.py` — E30 bf16 MoE emulation (SGLANG_MOE_EMUL=a4w4|a8w4|a16w4).
+- `scripts/moe_emul_sitecustomize.py` — bf16 MoE emulation (SGLANG_MOE_EMUL=a4w4|a8w4|a16w4).
+  **CHUNKED version (2026-07-09, node H21-18)** — memory-safe on TP1; use on BOTH nodes.
+- `HANDOVER_gfx950_moe_emul_apples.md` — **NEXT**: run this chunked emul on gfx950 to confirm
+  it still gives ~0.925 (rules out a chunked-emul bug), making E31's "gap is non-MoE" airtight.
 - `HANDOVER_gfx1250_moe_emul.md` — **NEXT STEP**: run the E30 emul ON gfx1250 to decide
   flydsl-kernel-bug (case A, emul~0.925>>0.85) vs deeper gfx1250 issue (case B). No new kernel.
 - `HANDOVER_moe_emul_method.md` — self-contained METHOD/implementation guide for the bf16 MoE
@@ -154,6 +185,8 @@ nodes' **per-layer residual stream** on the SAME fixed prompt.
 - `scripts/gfx1250_absorb_quant_emul_sitecustomize.py` — gfx1250 bf16-EMULATE quantized
   absorb (w_fp4 ready; a4w4/a8w4 activation via doc). No fp4 kernel (safe on A0).
 - `HANDOVER_gfx1250_absorb_quant.md` — gfx1250 emulation instructions + activation skeleton.
+- `scripts/gfx1250_disable_moe_scale_shuffle_sitecustomize.py` — disable gfx1250 B-scale
+  n32k4 shuffle (E25b: with `SGLANG_MOE_SHUFFLE_GFX1250=0` = both-raw consistency test).
 
 ## Machine-switch checklist
 1. Confirm GPUs: `ls /dev/kfd /dev/dri && python3 -c "import torch;print(torch.cuda.device_count())"`.

@@ -1,5 +1,10 @@
 # gfx1250 MXFP4 a4w4->a8w4 — Experiment Log (2026-07-07)
 
+> MULTI-NODE: several machines share this file. **Tag each new entry with its node**, e.g.
+> `[node: H21-18 gfx1250]` / `[node: <host> gfx950]`. APPEND, don't rewrite. See STATUS.md
+> "MULTI-NODE CONVENTION". (E0-E25 predate this and are the H21-17/H21-18 gfx1250 + gfx950
+> cross-val work; E26/E27/E28/E30 were the gfx950 box; E31 = H21-18 gfx1250.)
+
 Chronological record of what was run and observed. Repos (base commits at time
 of work):
 - `/sgl-workspace/sglang` @ `8d30387cd671a3bc8eae178988f7c119544d08b7` (2026-07-02)
@@ -346,6 +351,11 @@ cuda-graph capture clean, decode coherent (" Paris. Paris is located ...").
   **0.000 / invalid 1.000** (garbage). => on THIS code the weight shuffle is
   **mandatory** (B-scale is already n32k4-shuffled for gfx1250; an unshuffled weight
   mismatches it -> garbage). shuffle on = 0.85. Keep shuffle ON.
+  (NUANCE — see E25b/E25c: shuffle is mandatory ON THIS STACK because THIS docker's aiter
+  grouped kernel requires (16,16)-shuffled weight. It is NOT that "raw weight is inherently
+  broken": commit 7aa6082 got 0.82 on gfx1250 with raw weight on the OLD docker's aiter.
+  Verified 2026-07-09: reverting the bisect fix does NOT restore raw-weight (still 0.000),
+  so the break is the aiter kernel VERSION, not sglang / bisect / split_k1.)
 - **eager** (`--disable-cuda-graph`): 100Q = 0.840 ~= cuda-graph 0.850. cuda-graph
   capture branch is NOT the gap.
 
@@ -457,6 +467,70 @@ per-layer comparison to localize.
    not the accuracy gap.
 4. Everything else (MoE, attention decode+prefill, bf16 gemm, cuda-graph, radix,
    fp32-reduce) is already ruled out — do NOT re-chase them.
+
+## E25b. Clarification: "unshuffled = 0.000" is a scale/weight MISMATCH, not universal
+Question (user): before yesterday's edits (no gfx1250 weight shuffle, no bisect fix)
+GSM8K was still ~0.8x; but yesterday `SGLANG_MOE_SHUFFLE_GFX1250=0` gave 0.000 garbage —
+how did the earlier code get 0.8x with no weight shuffle?
+Anchor: the CURRENT `quark_w4a4_mxfp4_moe.py` `process_weights_after_loading` shuffles the
+MoE **B-scale to n32k4 UNCONDITIONALLY for gfx1250** (`if _is_gfx1250: moe_shuffle_scale`),
+while the **weight** shuffle was gated to gfx95 only (`_is_shuffle_moe_mxfp4 =
+is_gfx95_supported()`). So:
+| state | weight | B-scale | consistent? | GSM8K |
+|---|---|---|---|---|
+| current code, `SGLANG_MOE_SHUFFLE_GFX1250=0` | raw | n32k4-shuffled | NO (mismatch) | 0.000 |
+| current code + fix (E17) | (16,16)-shuffled | n32k4-shuffled | yes | 0.85 |
+| earlier 0.8x runs | consistent (see below) | consistent | yes | 0.8x |
+=> **0.000 is caused by weight-raw WHILE scale-shuffled (layout mismatch), NOT by "no
+shuffle" per se.** The earlier 0.8x code was internally CONSISTENT — either (a) it did not
+n32k4-shuffle the gfx1250 B-scale either (both raw), or (b) its weight-shuffle gate also
+covered gfx1250 (both shuffled). Someone later added the gfx1250 n32k4 B-scale shuffle
+WITHOUT adding the matching weight shuffle -> silent mismatch -> 0.000. The E17 weight-
+shuffle fix simply realigns the weight to the already-shuffled scale.
+Corrections: E19 / SKILL / STATUS said "unshuffled = garbage" too absolutely — it should
+read "weight-unshuffled while scale-shuffled = garbage".
+CONFIRM when a box is up: (1) `git log -p` on quark_w4a4_mxfp4_moe.py to date the gfx1250
+`moe_shuffle_scale` vs weight-shuffle gate; (2) on current code, ALSO skip the gfx1250
+`moe_shuffle_scale` (both raw, consistent) and expect GSM8K to return to ~0.82 — proving
+the mismatch theory. Tool for (2): `scripts/gfx1250_disable_moe_scale_shuffle_sitecustomize.py`
+(env `SGLANG_DISABLE_MOE_SCALE_SHUFFLE_GFX1250=1` + `SGLANG_MOE_SHUFFLE_GFX1250=0`).
+  - both-raw -> ~0.82 => confirms mismatch theory (old code was both-raw).
+  - both-raw -> still 0.000 => the aiter grouped kernel REQUIRES shuffled B/B-scale, so the
+    old 0.82 must have shuffled BOTH (old weight-shuffle gate covered gfx1250).
+
+## E25c. CORRECTED: 7aa6082 IS the gfx1250 0.82 recipe commit; raw-weight break is an aiter-VERSION difference
+(My earlier claim here — "7aa6082 was the gfx950 tree, never run on gfx1250" — was WRONG;
+user corrected it, git confirms.)
+- `git show --no-patch 7aa6082b57`: authored by me (Cursor co-author) 2026-07-07, message
+  "Enable DeepSeek-R1-0528-MXFP4 serving on a single **gfx1250** ... GSM8K **~0.82**
+  completion". So **7aa6082 is the gfx1250 working-recipe commit, 0.82 ON gfx1250.** The
+  gfx950 cross-val (gfx1250.md) simply COPIED that same tree (rev 7aa6082) onto gfx950 and
+  got 0.932 there — same commit used on both nodes; both numbers are real.
+- `git show 7aa6082b57:...quark_w4a4_mxfp4_moe.py` is IDENTICAL to the current pre-fix
+  file: gfx1250 = n32k4 B-scale shuffle + weight NOT shuffled ("raw-weight" state).
+  => At 7aa6082 this raw-weight state gave **0.82 on gfx1250**.
+
+### VERIFIED ablation (2026-07-09, machine back up)
+Reproduced the raw-weight state (`SGLANG_MOE_SHUFFLE_GFX1250=0`) on the CURRENT stack:
+| stack | weight | bisect | GSM8K 100Q |
+|---|---|---|---|
+| 7aa6082 (original docker aiter) | raw | buggy (ceil log2) | **0.82** (historical) |
+| current, raw | raw | fixed (bit_length) | **0.000** / invalid 0.99 |
+| current, raw + bisect REVERTED to buggy | raw | buggy | **0.000** / invalid 1.0 |
+| current, shuffled (E17 fix) | (16,16) | fixed | 0.85 |
+=> Reverting the bisect fix did NOT restore raw-weight (still 0.000). So the bisect fix is
+NOT the cause, and split_k1 is identical on both. **The raw-weight 0.82->0.000 difference
+is the aiter grouped-a8w4 kernel VERSION/build itself** (this docker's aiter requires
+(16,16)-shuffled weight; the original docker's aiter tolerated/handled raw weight). The
+sglang quark file is byte-identical between 7aa6082 and current, so it's not sglang.
+=> **Reconciliation (no contradiction):** 7aa6082 got 0.82 with raw weight on the OLD
+docker's aiter; on THIS docker's aiter, raw weight = 0.000 and (16,16)-shuffled = 0.85.
+The E17 weight-shuffle fix correctly aligns sglang to THIS aiter's kernel expectation.
+Corrections applied: E19 "shuffle mandatory" is true ON THIS STACK but NOT because raw is
+inherently broken; it is because this aiter build requires shuffled weight.
+- The gfx1250 n32k4 scale-shuffle block was added by `6f1c92907 "Squash gfx1250
+  development"` (before it: unconditional e8m0_shuffle). The 8d30387 docker (the even
+  earlier 0.822 runs) is a different fork not in this repo — can't inspect.
 
 ## E25. gfx95-gated path audit — MLA absorb BMM is fp4 on gfx950, bf16 on gfx1250
 Question (user): are there MANY `_use_aiter_gfx95`-gated paths that gfx950 takes and
@@ -696,3 +770,43 @@ this E30 emul (0.925) and the token-swept logits_diff, since the op-test at smal
 to the growth. (Caveat: 40Q is a spot-check; the internal a4w4-vs-a8w4 A/B is clean and both match
 native, and the gap to gfx1250's 0.85 is far larger than 40Q noise. A 200Q emul rerun ~3 h each
 would tighten it if desired.)
+
+## E31. bf16 MoE emul RUN ON gfx1250 — FLIPS E30: the gap is NOT the MoE (case B)  [node: H21-18 gfx1250]
+E30 inferred "gfx1250 real a8w4 kernel is the gap" from a gfx950 emul (0.925) vs gfx1250
+real (0.85). E31 runs the SAME emulation directly ON gfx1250 (bypasses the real flydsl
+kernel with ideal bf16 MoE) to test that inference. Setup: `scripts/moe_emul_sitecustomize.py`
+(chunked per-32-expert dequant — see note), `--disable-cuda-graph`, mem-fraction 0.88,
+GPU3 TP1, few_shot_gsm8k 40Q parallel 40.
+
+| platform | real kernel | a8w4 emul (40Q) | a16w4 emul (40Q, no act quant, most ideal) |
+|---|---|---|---|
+| gfx1250 | ~0.85 (40Q) / 0.811 (1319Q) | **0.800** | **0.825** |
+| gfx950 (E30) | ~0.93 | 0.925 | (not run; expect >=0.925) |
+
+**Result: on gfx1250 even the MOST ideal MoE (a16w4 = bf16 weight x bf16 act, zero MoE
+quant) scores only 0.825 ~= gfx1250 real 0.81 — NOT gfx950's 0.925.** a8w4 vs a16w4
+(0.80 vs 0.825) is within 40Q noise. => **bypassing the real MoE kernel does NOT close the
+gap** => the gap is **NOT the MoE** (kernel, scheme, AND activation-quant all excluded;
+E30's "real kernel is the gap" is WRONG for gfx1250). This is CASE B (HANDOVER_gfx1250_moe_
+emul.md): even ideal bf16 a8w4 degrades on gfx1250 => a new/fixed MoE kernel will NOT help.
+=> The gap is a **gfx1250-specific NON-MoE effect** (attention/norm/rope/linear/sampling
+run natively per-platform; the emul only swaps the MoE). Consistent with the emul faithfully
+reproducing each platform's real score (gfx1250 emul~0.81==real; gfx950 emul~0.925==real).
+
+CAVEATS (do not over-conclude):
+1. 40Q noise (0.825 vs 0.925 = 4 questions). But the 1319Q real gap (0.811 vs 0.932) is the
+   same ~0.12 and the emul tracks each platform's real number, so the direction is real.
+2. The gfx1250 emul is the CHUNKED variant (edited from the E30 batched one for TP1 memory:
+   the batched all-active dequant OOMs at ~25 GB with the ~353 GB bf16-dequant model). The
+   math should be identical, but for a strict apples-to-apples the SAME chunked emul should be
+   run on gfx950 (expect ~0.925). If gfx950-chunked also = 0.925, the platform (non-MoE) gap
+   is confirmed; if gfx950-chunked drops too, suspect a chunked-emul bug.
+3. This contradicts neither E22 (attention matches torch fp32 per-op) nor E28 (cross-node
+   dump divergence starts at MoE layer 3) directly — those compared REAL a4w4-vs-a8w4 MoE.
+   E31 says: with MoE made identical/ideal, gfx1250 still trails => the non-MoE residual
+   difference (small per-op, but the whole gfx1250 forward vs gfx950) is what remains.
+
+Next: (a) run the same chunked emul on gfx950 (apples-to-apples confirm); (b) if confirmed
+non-MoE, bisect the non-MoE gfx1250 path more aggressively (whole-forward gfx1250-vs-gfx950
+logit compare, not just per-op) — the per-op attention checks (E22) were vs torch, not vs
+gfx950, so a systematic small gfx1250 attention/norm bias would pass E22 yet accumulate.

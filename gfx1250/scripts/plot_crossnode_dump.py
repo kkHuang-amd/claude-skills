@@ -1,7 +1,9 @@
 """Plot the cross-node per-layer residual-stream comparison (E28).
 
 gfx950 (TP2, a4w4 MoE, bf16 absorb via ablation) vs gfx1250 (TP1, a8w4 MoE, bf16 absorb).
-Only `input` and `post_layer` are compared (gfx1250 dump is STALE: no `post_attn`).
+Compares `input`, `post_attn` (attention-sublayer output, the clean non-MoE signal),
+and `post_layer` (post-MoE, the a4w4-vs-a8w4 control). Both dumps now use the
+post-attention-split hook (gfx1250 re-dumped 2026-07-09, no longer stale).
 
 Usage:
   python3 scripts/plot_crossnode_dump.py \
@@ -38,13 +40,15 @@ def main():
     n = min(len(g50), len(g12))
     layers = list(range(n))
 
-    in_rel, pl_rel = [], []
+    in_rel, pa_rel, pl_rel = [], [], []
     n50_in, n12_in, n50_pl, n12_pl = [], [], [], []
     for i in range(n):
         a, b = g50[i], g12[i]
         ia, ib = a["input"], b["input"]
         pa, pb = a["post_layer"], b["post_layer"]
+        aa, ab = a.get("post_attn"), b.get("post_attn")
         in_rel.append(rel_l2(ia["slice64"], ib["slice64"]) if ia and ib else float("nan"))
+        pa_rel.append(rel_l2(aa["slice64"], ab["slice64"]) if aa and ab else float("nan"))
         pl_rel.append(rel_l2(pa["slice64"], pb["slice64"]))
         n50_in.append(ia["norm"] if ia else float("nan"))
         n12_in.append(ib["norm"] if ib else float("nan"))
@@ -59,6 +63,7 @@ def main():
     ax1.axvspan(dense - 0.5, n - 0.5, color="tab:red", alpha=0.06, label=f"MoE layers {dense}-{n-1}")
     ax1.axhline(1e-2, color="gray", ls="--", lw=1, label="TP/bf16 floor ~1e-2")
     ax1.plot(layers, in_rel, "o-", ms=4, color="tab:blue", label="input rel_l2")
+    ax1.plot(layers, pa_rel, "D-", ms=4, color="tab:purple", label="post_attn rel_l2 (non-MoE signal)")
     ax1.plot(layers, pl_rel, "s-", ms=4, color="tab:orange", label="post_layer rel_l2")
     ax1.axvline(dense, color="tab:red", ls=":", lw=1.5)
     ax1.annotate(
@@ -95,10 +100,10 @@ def main():
     fig.savefig(args.out, dpi=130)
     print(f"wrote {args.out}")
     # also print a compact table
-    print(f"{'L':>3} {'zone':<5} {'in_relL2':>9} {'pl_relL2':>9} {'n50_pl':>8} {'n12_pl':>8}")
+    print(f"{'L':>3} {'zone':<5} {'in_relL2':>9} {'pa_relL2':>9} {'pl_relL2':>9} {'n50_pl':>8} {'n12_pl':>8}")
     for i in range(n):
         z = "dense" if i < dense else "moe"
-        print(f"{i:>3} {z:<5} {in_rel[i]:9.4f} {pl_rel[i]:9.4f} {n50_pl[i]:8.2f} {n12_pl[i]:8.2f}")
+        print(f"{i:>3} {z:<5} {in_rel[i]:9.4f} {pa_rel[i]:9.4f} {pl_rel[i]:9.4f} {n50_pl[i]:8.2f} {n12_pl[i]:8.2f}")
 
 
 if __name__ == "__main__":

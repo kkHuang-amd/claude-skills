@@ -651,3 +651,48 @@ bf16 scratch (fits 309 GB) and do a bf16 grouped GEMM with mxfp8-qdq (a8w4) vs m
 validation) activations; hours for ~100 Q but decisive on the ~8-11% effect. (2) the **cross-node
 dump** (E28) once gfx1250 is re-dumped with the new hook. The `AITER_MOE_FORCE_ADTYPE` knob is
 left in aiter (harmless, default off) for a future box that has the a16w4/a8w4 MoE kernel wired.
+
+## E30. bf16 MoE emulation on gfx950 — a8w4 SCHEME is accuracy-NEUTRAL (flips the leaning)
+Ran diagnostic (1) above. Tool: `scripts/moe_emul_sitecustomize.py` (env `SGLANG_MOE_EMUL` in
+{a4w4,a8w4,a16w4}). Mechanism (no repo edits): neuter the MoE weight/scale shuffles so weights
+keep the clean fp4 layout, then replace `AiterRunnerCore.run` with a bf16 grouped FFN — per
+active expert: dequant fp4->bf16, q-dq the activation per mode (mxfp4=a4w4, mxfp8=a8w4, none=
+a16w4) on BOTH stages, silu(gate)*up, topk-weighted sum. Weights stay fp4 (dequanted per-forward;
+batched over active experts + all-bf16 to fit memory). gfx950, TP2, **eager** (Python hook can't
+run under cuda-graph), `--mem-fraction-static 0.70` + `PYTORCH_HIP_ALLOC_CONF=expandable_segments`
+(the bf16 dequant scratch OOMs at 0.90). Slow (~4 tok/s batched); GSM8K 40 Q, parallel 40.
+
+| MoE path (emulated, bf16 matmul, fp4 weight) | GSM8K 40Q | Invalid |
+|----------------------------------------------|-----------|---------|
+| a4w4 emul (mxfp4 activation) = VALIDATION     | **0.925** | 0.000   |
+| a8w4 emul (mxfp8 activation) = the TEST       | **0.925** | 0.000   |
+| (native gfx950 a4w4 kernel, ref)             | 0.93-0.945| 0.000   |
+| (gfx1250 real a8w4 flydsl kernel, ref)       | ~0.85     | 0.000   |
+
+**Findings:**
+1. **Validation passed:** a4w4 emul (0.925) reproduces the native gfx950 a4w4 kernel (~0.93) =>
+   the bf16 emulation + fp4 dequant + FFN structure are faithful; the framework is trustworthy.
+2. **a8w4 emul == a4w4 emul == 0.925** (identical, same 40Q set, only the activation quant
+   differs). => The **a8w4-vs-a4w4 MoE SCHEME / ideal numerics are accuracy-neutral.** The
+   quantization-matching thesis (E25) is **FALSE for the MoE too**: making the MoE activation
+   more precise (fp8) does NOT hurt vs a4w4.
+3. **Therefore the gfx1250 gap is NOT the a8w4 scheme** — an *idealized* a8w4 (fp8 act x fp4
+   weight, bf16 accumulate) scores 0.925, but the **gfx1250 real flydsl a8w4 kernel scores
+   ~0.85** for the same scheme. So the shortfall is in the **gfx1250 real-kernel execution
+   numerics**, not the scheme, attention, absorb, or serving integration.
+
+**This FLIPS the E29 leaning.** Per E29's own decision rule ("gfx950 a8w4 stays ~0.93 => gfx1250
+drop is a fixable kernel issue => writing/fixing the kernel is worthwhile"), the a8w4 kernel path
+IS now the actionable target. Reconciles with E16 (the gfx1250 grouped a8w4 kernel's logits_diff
+GROWS with token/max_m: 8 tok -> 3.4e-6 but 512 tok -> 5.4e-3 / 10% rel_l2) — a token-count-
+dependent error that small-token op-tests (E18, 3e-6) miss but that accumulates over real long
+GSM8K generations. The ideal a8w4 emul (E30) has no such growth, hence 0.925.
+
+**Actionable next:** fix the gfx1250 grouped a8w4 kernel's large-token / max_m numerics (FlyDSL
+`moe_grouped_gemm_mxscale_gfx1250.py` / `gemm_mxscale_gfx1250.py`) — the accumulation/tiling that
+degrades at high token counts — OR write a correct a8w4 MoE kernel for gfx1250; either should
+recover toward ~0.92. Validate any new kernel end-to-end (not just small-token op-test) against
+this E30 emul (0.925) and the token-swept logits_diff, since the op-test at small tokens is blind
+to the growth. (Caveat: 40Q is a spot-check; the internal a4w4-vs-a8w4 A/B is clean and both match
+native, and the gap to gfx1250's 0.85 is far larger than 40Q noise. A 200Q emul rerun ~3 h each
+would tighten it if desired.)

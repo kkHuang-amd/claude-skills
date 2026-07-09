@@ -16,6 +16,16 @@ code edits, HANDOVER_crossnode_dump.md for the next experiment.
 > propagates. => the ONLY cross-node divergence is the MoE; non-MoE is consistent (no bug).
 > Chart: `crossnode_dump_compare.png`. **Remaining blocker: re-dump gfx1250 with the new
 > rank-gated hook** to also diff `post_attn` at MoE layers 3-60 (strict attention check).
+>
+> **UPDATE 2026-07-09 (E30, PIVOTAL): the a8w4 SCHEME is accuracy-neutral — the gap is the
+> gfx1250 REAL KERNEL.** bf16 MoE emulation on gfx950 (`scripts/moe_emul_sitecustomize.py`,
+> `SGLANG_MOE_EMUL`): **a4w4-emul = a8w4-emul = 0.925 (40Q)**, matching native a4w4 (~0.93).
+> So an *idealized* a8w4 (fp8 act x fp4 weight) does NOT lose accuracy vs a4w4 — quant-matching
+> is FALSE. Yet the gfx1250 real flydsl a8w4 kernel scores ~0.85 for the same scheme. =>
+> **the shortfall is the gfx1250 grouped a8w4 kernel's real-execution numerics** (token/max_m-
+> dependent error, cf. E16: 512-tok logits_diff ~10%), NOT the scheme/attention/absorb/serving.
+> This FLIPS the earlier "MoE exonerated / quant-matching" leaning: **fixing the gfx1250 a8w4
+> kernel's large-token numerics is now the actionable target** and should recover toward ~0.92.
 
 ## The problem
 Serve `DeepSeek-R1-0528-MXFP4` on **gfx1250** (SGLang+aiter, forced **a8w4** MoE).
@@ -45,9 +55,13 @@ See CHANGES.md "2026-07-08 session edits" for exact diffs. Summary:
    + `AITER_GROUPED_FORCE_TILE_M` investigation knob (default off).
 
 ## What is RULED OUT (do not re-chase) — EXPERIMENT_LOG E18-E23
-- **MoE a8w4 kernel**: op-test == quant-ref @ 3e-6; and a8w4 activation quant (3.6%)
-  is **4x more accurate** than gfx950's a4w4 (15%). MoE is cleaner on gfx1250, cannot
-  be the gap. (`scripts/moe_quant_probe.py`)
+- **MoE a8w4 SCHEME / small-token numerics**: op-test == quant-ref @ 3e-6; a8w4 act quant
+  (3.6%) is 4x more accurate than a4w4 (15%); and E30 bf16 emulation shows an *idealized*
+  a8w4 scores the SAME as a4w4 end-to-end (0.925). So the scheme is NOT the gap.
+  **CAVEAT (E30, revised):** this does NOT clear the gfx1250 *real* grouped a8w4 kernel — its
+  logits_diff GROWS with token/max_m (E16: 512 tok ~10%), which the small-token op-test misses.
+  That large-token kernel error IS now the leading suspect. (`scripts/moe_quant_probe.py`,
+  `scripts/moe_emul_sitecustomize.py`)
 - **Attention** (triton MLA decode + MHA prefill): both match torch fp32 to ~0.16-0.18%
   across all 61 layers, no outlier. Clean. (`scripts/attn_probe_sitecustomize.py`)
 - **bf16 GEMMs** (attn proj / lm_head / dense-MLP): log `torch solution:0` = torch itself.
@@ -128,6 +142,11 @@ nodes' **per-layer residual stream** on the SAME fixed prompt.
 - `crossnode_dump_compare.png` — E28 chart: gfx950-vs-gfx1250 per-layer rel_l2 + norms.
 - `scripts/plot_crossnode_dump.py` — regenerates the E28 chart from the two dumps.
 - `scripts/moe_quant_probe.py` — MoE a4w4-vs-a8w4 quant-error probe (E20).
+- `scripts/moe_emul_sitecustomize.py` — E30 bf16 MoE emulation (SGLANG_MOE_EMUL=a4w4|a8w4|a16w4).
+- `HANDOVER_gfx1250_moe_emul.md` — **NEXT STEP**: run the E30 emul ON gfx1250 to decide
+  flydsl-kernel-bug (case A, emul~0.925>>0.85) vs deeper gfx1250 issue (case B). No new kernel.
+- `HANDOVER_moe_emul_method.md` — self-contained METHOD/implementation guide for the bf16 MoE
+  emulation (so an agent on gfx1250 can re-implement it against whatever code/commit is there).
 - `scripts/attn_probe_sitecustomize.py` — attention decode/prefill torch-fp32 hook (E22).
 - `scripts/hsdump_sitecustomize.py` — cross-node per-layer dump hook (post-attn split).
 - `scripts/gfx950_disable_absorb_fp4_sitecustomize.py` — gfx950 absorb→bf16 ablation (E25).

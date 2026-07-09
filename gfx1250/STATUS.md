@@ -45,7 +45,36 @@ See CHANGES.md "2026-07-08 session edits" for exact diffs. Summary:
 
 => On gfx1250 **every component is numerically correct in isolation**. No single-kernel bug.
 
-## THE remaining path: cross-node per-layer diff
+## Key reframing (E25): gfx1250 is MORE precise everywhere, yet scores lower
+Audit of `_use_aiter_gfx95`-gated paths: for R1 (bf16 attention) most don't fire; the one
+non-MoE path that does is the **MLA absorb BMM** — **fp4 on gfx950, bf16 on gfx1250**
+(gfx950 runs `quark_post_load_weights` to mxfp4 w_kc/w_vc; gfx1250 skips it, stays bf16).
+`quark_post_load_weights` is NOT used on gfx1250 (gated by `_use_aiter_gfx95`, False on
+gfx1250). Direction matters: bf16 absorb (gfx1250) > fp4 absorb (gfx950); a8w4 MoE
+(gfx1250) > a4w4 (gfx950). So gfx1250 is equal-or-MORE precise everywhere yet lower =>
+leading thesis is a **quantization-MATCHING effect** (the PTQ model performs best under
+its own a4w4+fp4 error pattern; gfx1250's more-precise bf16/a8w4 is a distribution mismatch).
+
+## NEXT (preferred, cleanest): gfx950 absorb-BMM ablation — single-node A/B
+Test the quant-matching thesis with NO cross-node confound. On gfx950, force the MLA
+absorb BMM to bf16 (like gfx1250) and re-measure GSM8K.
+- Tool: `scripts/gfx950_disable_absorb_fp4_sitecustomize.py` (env
+  `SGLANG_DISABLE_QUARK_ABSORB_FP4=1`) + `HANDOVER_gfx950_ablation.md`.
+- **0.93 -> ~0.85** => fp4 absorb (quant-matching) is the gap. **stays 0.93** => absorb
+  isn't it; gap is the a8w4-vs-a4w4 MoE scheme.
+- NOTE (user 2026-07-09): **gfx1250 A0 cannot do a4w4 gemm** (no fp4-act scaled-WMMA), so
+  running the real fp4 absorb on gfx1250 is IMPOSSIBLE (would crash). Do NOT attempt it.
+- **Complementary on gfx1250 (ready): EMULATE the quantized absorb in bf16** (MXFP4/MXFP8
+  q-dq, no fp4 kernel). Tool `scripts/gfx1250_absorb_quant_emul_sitecustomize.py`
+  (env `SGLANG_ABSORB_QUANT_EMUL=w_fp4`) + `HANDOVER_gfx1250_absorb_quant.md`.
+  - `w_fp4` (ready): w_kc/w_vc -> fp4 q-dq (a16w4 absorb). If gfx1250 rises toward 0.93,
+    quant-matching confirmed.
+  - `a4w4`/`a8w4` (activation side): wire per the doc skeleton. `a4w4` emul = gfx950's exact
+    numerics (the ceiling, but a4w4 is NOT runnable on A0). `a8w4` emul = the FEASIBLE route
+    (implementable as a real a8w4 absorb kernel later); if it only partially recovers, the
+    residual is an A0 hardware limitation (needs fp4-act).
+
+## Fallback path: cross-node per-layer diff
 The gap must be a cross-layer/hardware interaction only visible by comparing the two
 nodes' **per-layer residual stream** on the SAME fixed prompt.
 - **HANDOVER_crossnode_dump.md** — give to the gfx950 node's agent. Contains the
@@ -76,6 +105,11 @@ nodes' **per-layer residual stream** on the SAME fixed prompt.
 - `scripts/moe_quant_probe.py` — MoE a4w4-vs-a8w4 quant-error probe (E20).
 - `scripts/attn_probe_sitecustomize.py` — attention decode/prefill torch-fp32 hook (E22).
 - `scripts/hsdump_sitecustomize.py` — cross-node per-layer dump hook (post-attn split).
+- `scripts/gfx950_disable_absorb_fp4_sitecustomize.py` — gfx950 absorb→bf16 ablation (E25).
+- `HANDOVER_gfx950_ablation.md` — gfx950 single-node A/B instructions (preferred next test).
+- `scripts/gfx1250_absorb_quant_emul_sitecustomize.py` — gfx1250 bf16-EMULATE quantized
+  absorb (w_fp4 ready; a4w4/a8w4 activation via doc). No fp4 kernel (safe on A0).
+- `HANDOVER_gfx1250_absorb_quant.md` — gfx1250 emulation instructions + activation skeleton.
 
 ## Machine-switch checklist
 1. Confirm GPUs: `ls /dev/kfd /dev/dri && python3 -c "import torch;print(torch.cuda.device_count())"`.

@@ -457,3 +457,50 @@ per-layer comparison to localize.
    not the accuracy gap.
 4. Everything else (MoE, attention decode+prefill, bf16 gemm, cuda-graph, radix,
    fp32-reduce) is already ruled out — do NOT re-chase them.
+
+## E25. gfx95-gated path audit — MLA absorb BMM is fp4 on gfx950, bf16 on gfx1250
+Question (user): are there MANY `_use_aiter_gfx95`-gated paths that gfx950 takes and
+gfx1250 does not, causing the gap? Audited all `is_gfx95_supported` / `_use_aiter_gfx95`
+branches in the DeepSeek path. For **R1** (attention q/k/v/o proj are bf16 = excluded
+from quant), most gfx95 branches are ALSO gated on `weight.dtype == fp8/uint8` and so
+**do not fire on either platform**. The branches that DO fire for R1:
+- `quark_post_load_weights` (`quark/utils.py`, called in `deepseek_weight_loader.py:632`
+  under `_use_aiter_gfx95 and quark and DeepseekV3`): on gfx950 it dynamically quantizes
+  the bf16 `kv_b_proj` weight into **mxfp4** w_kc/w_vc (+e8m0 scales). Its bf16 split is
+  **identical** to the generic path (`deepseek_weight_loader.py:628-630`); the ONLY
+  difference is the mxfp4 quantization. On gfx1250 it is **skipped** -> w_kc/w_vc stay bf16.
+- Consequently `forward_mla.py:479` (`_use_aiter_gfx95 and w_kc.dtype==uint8`, and :874
+  for w_vc): the **MLA absorb BMM** (`q_nope @ w_kc`, `attn_out @ w_vc`) runs **fp4×fp4**
+  (`batched_gemm_afp4wfp4_pre_quant`) on gfx950, but **bf16** on gfx1250.
+- `deepseek_v2.py:2421` (`_use_aiter_gfx95 and n_routed_experts==256`): only sizes a
+  `gemm_output_zero_allocator` buffer — **no numerical effect**.
+- All the fused-RMSNorm-fp8 / fp8-bmm gfx95 branches require fp8 weights -> don't fire
+  for R1's bf16 attention.
+
+**Key result:** the confirmed R1 non-MoE gfx95 divergence is the **MLA absorb BMM
+(gfx950 fp4 vs gfx1250 bf16)**. Note the DIRECTION: gfx1250 is again the *more precise*
+one (bf16 > fp4). So across every audited path (absorb BMM, MoE) gfx1250 is equal-or-
+more-precise than gfx950, yet scores lower. This makes a **quantization-MATCHING effect**
+the leading thesis: the Quark PTQ model may perform best under its own quant error
+pattern (a4w4 MoE + fp4 absorb), and gfx1250's more-precise bf16/a8w4 substitutions are a
+distribution mismatch.
+
+### DECISIVE single-node experiment (no cross-node confound) — TODO on gfx950
+Ablate gfx950 to gfx1250's MORE-precise absorb path and re-measure:
+- Tool: `scripts/gfx950_disable_absorb_fp4_sitecustomize.py` (env
+  `SGLANG_DISABLE_QUARK_ABSORB_FP4=1`) monkeypatches `quark_post_load_weights` to return
+  **bf16** w_kc/w_vc (mimicking gfx1250), so gfx950's absorb BMM runs bf16.
+- Run GSM8K on gfx950 with it. **If accuracy drops 0.93 -> ~0.85**, the fp4 absorb (i.e.
+  quant-matching) IS the gap. **If it stays 0.93**, the absorb isn't it -> the gap is the
+  a8w4-vs-a4w4 MoE scheme.
+- **IMPORTANT (user, 2026-07-09): gfx1250 A0 does NOT support a4w4 (fp4-activation)
+  gemm** — it lacks `V_WMMA_SCALE_F32_32X16X128_F4`, which is the whole reason a8w4 is
+  used. So the gfx950 fp4 absorb (`batched_gemm_afp4wfp4_pre_quant`) **cannot be ported
+  to gfx1250** (it would crash, SQC inst fault). Therefore:
+  - The complementary "force fp4 absorb on gfx1250" test is **infeasible** — do NOT try it.
+  - If the gfx950 ablation shows absorb precision matters, the only feasible gfx1250
+    absorb-quant direction is **a8w4 absorb** (fp8-act x fp4-weight, via the supported fp8
+    scaled-WMMA, mirroring the MoE workaround). CAVEAT: a8w4 (fp8 act) is still MORE
+    precise than gfx950's fp4 act, so if the effect is pure quant-matching, a8w4 absorb may
+    only PARTIALLY close the gap, not fully.
+- See `HANDOVER_gfx950_ablation.md`.

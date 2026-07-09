@@ -1,5 +1,13 @@
 # Cross-node hidden-state dump — gfx950 (reference) vs gfx1250 (a8w4)
 
+> **MULTI-NODE WRITE WORKFLOW (read first).** Several machines share this dir and pushing to the
+> same shared files (`EXPERIMENT_LOG.md`, `STATUS.md`) already caused git conflicts. So:
+> **write your raw runs to your node's own file first** — `results_gfx950.md` (gfx950 ref),
+> `results_gfx1250-j19-10.md`, `results_gfx1250-H21-18.md` — then promote only a short, node-tagged
+> summary into `EXPERIMENT_LOG.md` / `STATUS.md`. Tag every entry with your node
+> (e.g. `[node: gfx950]`). `git pull --rebase` before you push. This keeps concurrent pushes from
+> clobbering each other.
+
 ## Why
 `DeepSeek-R1-0528-MXFP4` GSM8K: **gfx950 (native a4w4) = 0.93 (stably reproducible)**
 vs **gfx1250 (forced a8w4) = ~0.81-0.85**. On gfx1250 every component is numerically

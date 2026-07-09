@@ -1113,3 +1113,273 @@ This resolves every prior "innocent" verdict as the masking confound:
    real-kernel fix (the `bit_length` bisect targets this but is OOB-crashy per E38 — reimplement
    OOB-safe, or find the true large-token accumulation issue).
 - Fix one -> ~0.825; fix both -> ~0.925.
+
+## E32. DSv4 on gfx1250 = 0.94 => the gap is R1-path-specific (triton MLA), NOT general gfx1250  [node: H21-18 gfx1250]
+User insight (2026-07-09): **DeepSeek-V4-Flash (DSv4) runs on the SAME gfx1250 box and keeps
+GSM8K ~0.94** — it does NOT drop to 0.8x. So E31's "gfx1250 non-MoE platform effect" is too
+broad: the gfx1250 hardware + shared infra (bf16 gemm, rope, sampling, general attention) are
+NOT broken. The R1 (ds-r1) gap is specific to R1's serving path. No cross-node needed.
+
+Path diff (run_ds-r1.sh vs run_v4_gfx1250.sh), same box:
+| | R1 | DSv4 |
+|---|---|---|
+| attention-backend | **triton** (classic MLA absorb) | **dsv4** (sparse indexer / DSA) |
+| arch | DeepseekV3ForCausalLM (MLA) | DeepseekV4ForCausalLM (index_topk sparse) |
+| KV cache | auto (bf16; fp8 broke R1 decode, E13) | **fp8_e4m3** (works, 0.94) |
+| SGLANG_USE_ROCM700A | **1** | 0 |
+| SGLANG_HACK_FLASHMLA_BACKEND | (unset) | unified_kv_triton |
+| qk-rmsnorm | R1 Triton drop-in (AITER_FORCE_A8W4) | n/a (dsv4 backend path) |
+
+**DSv4 never uses R1's triton MLA path** (it uses the `dsv4` backend + sparse attention), and
+even runs fp8 KV fine. Combined with E31 (MoE bypassed, R1 still 0.82) and E13 (R1 fp8-KV decode
+broke = a triton-MLA-decode gfx1250 defect), the leading suspect is now the **R1-specific triton
+MLA attention path on gfx1250** (absorb/decode/rope/qk-norm as executed by the triton backend),
+NOT the MoE and NOT general gfx1250.
+
+Caveat on E22: E22 checked the triton MLA *softmax kernel* output vs a torch recompute using the
+SAME q + KV (0.16%). It did NOT validate the FULL MLA sublayer (q_b_proj -> absorb BMM -> rope ->
+qk-rmsnorm -> attn -> o_proj) end-to-end, nor against a "working" anchor. A systematic small bias
+upstream of / around the softmax kernel would pass E22 yet accumulate over long R1 generations.
+
+### Next (single-node on gfx1250, no cross-node)
+NOTE (user 2026-07-09): `SGLANG_USE_ROCM700A` only affects **DP mode**; we test in **TP**, so
+it is a no-op here — dropped as a suspect/test. (qk-rmsnorm was already ruled out: E13, and
+under cuda-graph decode uses the torch layernorm branch, not the Triton qk-rmsnorm, yet still 0.85.)
+KEY: gfx950 also ran R1 with `--attention-backend triton` (MLA) and got 0.932 (gfx1250.md). So
+the SAME triton MLA source scores 0.932 on gfx950 vs 0.81 on gfx1250 => it is the **gfx1250
+triton CODEGEN of the R1 MLA path** that differs. E22 checked the decode softmax *kernel* and
+the prefill MHA kernel vs torch (both 0.16%) — but E22 captured q AFTER q-production (absorb BMM
++ rope + qk-norm) and compared softmax(q,KV) both using that same q, so **E22 cannot catch an
+error in q-production**. That (forward_absorb_prepare: absorb/rope/qk-norm as lowered for
+gfx1250) is the prime unchecked suspect.
+1. Whole-MLA-sublayer numerical check on gfx1250: hook R1's attention module, compare its FULL
+   output (not just the softmax kernel) vs a torch/bf16 reference on the same inputs, per layer.
+3. Try an alternative MLA-capable attention backend for R1 on gfx1250 if one runs (aiter MLA,
+   etc.); the fused-rope decode MLA (`SGLANG_ROCM_FUSED_DECODE_MLA=1`) crashed (E21), but other
+   options may exist.
+NOTE: the gfx950 apples-to-apples emul (HANDOVER_gfx950_moe_emul_apples.md) is now OPTIONAL —
+E32 localizes the gap to R1's triton MLA path regardless of the chunked-emul equivalence.
+
+## E33. RoPE on gfx1250 is pytorch forward_native (exact) => q-production is arch-independent; only the softmax triton kernel remains  [node: H21-18 gfx1250]
+Hook (`/tmp/ropecheck/sitecustomize.py`, SGLANG_ROPE_CHECK=1, eager) wraps
+`RotaryEmbedding.forward` and compares the real output vs `forward_native` on the same inputs.
+Result: class=`DeepseekScalingRotaryEmbedding` (neox=False), **mean_rel_l2 = 0.0, worst = 0.0,
+n=6000** — EXACTLY zero => on gfx1250 this rope's `forward` dispatches to `forward_native`
+(pure pytorch); there is no separate HIP rope kernel. So **RoPE is arch-independent (pytorch)
+and exonerated.**
+
+Combined chain for R1 q-production on gfx1250 (all arch-independent):
+- qk-rmsnorm: torch (cuda-graph) / Triton (eager) — E13 equivalent.
+- q_b_proj: bf16 gemm = torch solution:0 (E22).
+- absorb (q_nope @ w_kc): torch.bmm bf16 (forward_mla.py else on gfx1250) — correct math.
+- rope: pytorch forward_native (E33, exact 0.0).
+- softmax attention: triton decode/extend kernel — the ONLY arch-specific attention op;
+  E22 measured 0.16% rel_l2 vs torch.
+Under an ideal MoE (E31 a16w4 = 0.825 on gfx1250 vs 0.93 gfx950), with q-production all
+arch-independent, the residual gfx1250-vs-gfx950 attention difference is the softmax triton
+kernel (E22 ~0.16%). If that 0.16% is a SYSTEMATIC (signed) bias not random noise, it
+accumulates over 61 layers x hundreds of decode steps into a ~0.1-scale logit shift — plausibly
+the 12% GSM8K gap. E22 only reported rel_l2 magnitude, not whether it is biased.
+
+### Next
+1. Re-run the E22 forward_decode/extend hook reporting the SIGNED/mean bias of (kernel - torch)
+   per layer over many steps — systematic (accumulates) vs zero-mean (harmless)?
+2. Softmax-kernel knobs: --triton-attention-num-kv-splits, --triton-attention-reduce-in-fp32
+   (re-confirm for MLA), split-tile size.
+3. Re-verify the a16w4 emul leaves NOTHING MoE-side unaccounted (e.g. shared expert n_shared=1).
+CAVEAT: 0.16% is small; the accumulation is a hypothesis, not yet shown.
+
+## E34. Attention replaced with pure-torch naive => attention EXONERATED (still 0.82)  [node: H21-18 gfx1250]
+Tool `/tmp/attntorch/sitecustomize.py` (SGLANG_ATTN_TORCH_DECODE / _EXTEND) monkeypatches
+`TritonAttnBackend.forward_decode`/`forward_extend` to compute attention in pure torch fp32
+(gather paged KV, softmax(qK^T*scale)V for decode; per-seq causal MHA for extend), returning
+the torch result INSTEAD of the triton-kernel output. Bypasses all triton attention kernels.
+Eager (--disable-cuda-graph), --disable-radix-cache, GSM8K 40Q:
+| config | GSM8K 40Q |
+|---|---|
+| torch DECODE only | 0.750 |
+| torch DECODE + EXTEND (all attention) | **0.825** |
+| (baseline triton, eager) | ~0.84 |
+=> Replacing ALL attention with exact torch does NOT recover accuracy (still ~0.82, == baseline
+within 40Q noise). **Attention is fully exonerated** (decode + prefill, kernel numerics not the gap).
+
+### Consolidated exoneration (gfx1250 R1 ~0.82 vs gfx950 0.93)
+- MoE: E31 bf16 emul (even a16w4 zero-quant) = 0.825.
+- Attention: E34 pure-torch decode+extend = 0.825.
+- rope: E33 pytorch forward_native (exact).
+- qk-rmsnorm: torch (cuda-graph branch) vs Triton (eager) both ~0.85 (E13/E15).
+Neither MoE nor attention nor rope nor qk-norm is the gap. Remaining un-idealized R1 path:
+**linear bf16-dequant (dense MLP L0-2, non-excluded linears), shared expert (n_shared=1),
+lm_head, embedding, inter-block RMSNorms, sampling** — or the gap is DISTRIBUTED (accumulated
+bf16 differences across the whole gfx1250 forward vs gfx950).
+
+### Next
+1. DECISIVE combined run: MoE-emul (a16w4) AND attention-torch simultaneously. Still ~0.82 =>
+   gap is definitively neither; it's the remaining path. ~0.92 => it was the two together.
+2. Shared-expert check: is n_shared=1 shared expert fused into the a8w4 MoE (emul replaced it?)
+   or a separate MLP the emul missed? If missed, it's a broad per-layer suspect.
+3. If all component-idealizations fail: the gap may be distributed bf16 accumulation — then a
+   whole-forward gfx1250-vs-(a bf16/qdq reference) per-layer logit compare is the only localizer,
+   OR accept ~0.82 as the gfx1250 real-stack number for R1 (DSv4 differs in arch/backend, not a
+   direct anchor for R1's exact numeric path).
+
+## E35. COMBO (ideal MoE + torch attention) = 0.925 => BOTH real kernels are the gap; E31/E34 single-op "exonerations" were the masking confound  [node: H21-18 gfx1250]
+User insight: an upstream/other op could keep the value the same while both are wrong.
+Ran MoE bf16-emul (a16w4, ideal) AND torch-naive attention (decode+extend) TOGETHER (combo
+sitecustomize, eager, --disable-radix-cache, mem 0.88). GSM8K 40Q = **0.925 / invalid 0.000**
+(== gfx950). Four-cell matrix:
+| MoE | attention | GSM8K 40Q |
+|---|---|---|
+| real a8w4 | real triton | ~0.81 |
+| ideal emul | real triton (E31) | 0.825 |
+| real a8w4 | torch naive (E34) | 0.825 |
+| **ideal emul** | **torch naive** | **0.925** |
+
+=> The gap is caused by **BOTH** the real gfx1250 kernels (flydsl a8w4 MoE **and** triton MLA
+softmax attention). Each real component alone holds accuracy at ~0.825 (the OTHER real kernel
+still injects error), so idealizing only ONE looks like "that op is innocent" — this is exactly
+the masking confound. **E31 ("MoE not the gap") and E34 ("attention not the gap") are BOTH
+WRONG in isolation; both kernels must be fixed.** Non-additive/threshold behavior: both-real
+~= one-ideal ~= 0.82, both-ideal = 0.925.
+- Corollary: E22's 0.16% softmax-kernel error is NOT negligible — given an ideal MoE it drops
+  0.925->0.825, so it accumulates. And E16's large-token a8w4 MoE logits_diff likewise matters.
+- Note: combo keeps the Triton qk-rmsnorm (eager) yet reaches 0.925 => qk-norm is fine; the
+  attention error that matters is the softmax decode/extend triton kernel (which torch-naive replaced).
+
+### Actionable
+Fix BOTH gfx1250 real kernels (validate END-TO-END, small-token op-tests are blind — E18/E30):
+1. triton MLA **softmax** attention (decode_attention_fwd / extend_attention_fwd) numerics on
+   gfx1250 — the torch-naive replacement recovers it, so the reference is torch SDPA over paged KV.
+2. flydsl **a8w4 grouped MoE** kernel large-token/max_m numerics (E16) — the bf16 emul recovers it.
+Either fix alone only reaches ~0.825; BOTH are needed for ~0.925. As an interim, a torch/bf16
+attention + bf16 MoE serving path would hit ~0.925 but is slow (emul ~2.4 tok/s).
+### Next verify
+- Larger N (200Q/1319Q) combo to tighten 0.925 vs 40Q noise.
+- Isolate WHICH part of attention (softmax vs the absorb/o_proj in forward_absorb_core) by
+  torch-replacing sub-steps — but torch-naive decode+extend already localizes it to the softmax
+  attention kernel (q-production is arch-independent per E33).
+
+## E36. FIX A VALIDATED: fp32 softmax-p in the P·V dot recovers the attention side (0.825 -> 0.950)  [node: H21-18 gfx1250]
+Applied FIX A: keep softmax weights `p` in fp32 for the P·V `tl.dot` (do NOT `p.to(v.dtype)`),
+using `tl.dot(p, v.to(tl.float32), out_dtype=tl.float32)`, in:
+- `triton_ops/decode_attention.py::_fwd_grouped_kernel_stage1` (MLA decode PV, ~L523)
+- `triton_ops/extend_attention.py::_fwd_kernel` prefix PV (~L482) and extend-local PV (~L587)
+NOTE: the QK `tl.dot(bf16,bf16)` already accumulates fp32 by Triton default, so QK was NOT the
+loss; the real loss was the p->bf16 downcast before P·V. `triton_attention_reduce_in_fp32`
+remains a dead flag; not needed for this fix.
+Validation (fp32 attention + MoE bf16-emul a16w4 = attention is the only real kernel; same config
+as E31's 0.825 except the fp32 PV): GSM8K 40Q = **0.950 / invalid 0.000** (== gfx950, within 40Q
+noise of the E35 combo 0.925); E31 (bf16 PV) was 0.825.
+=> FIX A works: the attention-side gap is exactly the bf16 downcast of the softmax probabilities
+in the P·V dot. Cost: fp32 PV dot is slower (measure tok/s at full speed later).
+Remaining: FIX B (flydsl a8w4 MoE kernel) to recover the MoE side without the emul.
+
+## E37. SOLVED: FIX A alone + real a8w4 MoE + cuda-graph = 0.925 (40Q) / 0.980 (200Q) at FULL SPEED  [node: H21-18 gfx1250]
+Ran the NORMAL production recipe (run_ds-r1.sh: cuda-graph ON, REAL a8w4 flydsl MoE, bf16 KV)
+with FIX A (fp32 softmax-p in the P·V dot) applied to the kernels. GSM8K 5-shot greedy:
+| Q | Accuracy | Invalid | tok/s |
+|---|---|---|---|
+| 40  | 0.925 | 0.000 | 80.7  |
+| 200 | 0.980 | 0.000 | 135.0 |
+=> **FIX A ALONE recovers R1 to >= gfx950 level at full speed. FIX B (MoE kernel) is NOT needed.**
+The entire production-path (cuda-graph) accuracy gap was the softmax-weight bf16 downcast in the
+attention P·V dot. No MoE kernel change, no emul, no slow path.
+
+CORRECTION (user caught it): the earlier "cuda-graph uses torch qk-norm" reconciliation is WRONG.
+On gfx1250 `alt_stream` is **None** (`deepseek_v2.py:2365`: Stream only if `_is_cuda or _is_musa
+or SGLANG_{NPU,ROCM}_USE_MULTI_STREAM`; run_ds-r1.sh sets none of these). So the capture-mode
+alt-stream torch-layernorm branch (`forward_mla.py:308`, guarded by `alt_stream is not None`) is
+NEVER taken; BOTH eager AND cuda-graph go to the `else` -> `_use_aiter` -> `fused_qk_rmsnorm_bf16`
+(the Triton qk-norm). So my Triton qk-norm runs in BOTH, and it is evidently FINE (0.98@200Q
+achieved with it). qk-norm is NOT the differentiator.
+So the E34 (eager, real MoE, torch-naive attn = 0.825) vs E37 (cuda-graph, real MoE, FIX-A attn =
+0.925/0.98) discrepancy is NOT explained by qk-norm. Most likely my E34 torch-naive attention hook
+was not fully equivalent to the correct fp32 attention (an imperfect Python reimpl), whereas FIX A
+is the correct in-kernel fp32 PV. This is a loose end in the eager matrix; it does NOT affect the
+VERIFIED production result: **real a8w4 MoE + FIX A + cuda-graph = 0.925 (40Q) / 0.980 (200Q).**
+- Corollary: the flydsl a8w4 MoE kernel and its E16 large-token logits_diff are NOT the
+  production accuracy gap (real MoE + FIX A = 0.98@200Q). FIX B deprioritized/unneeded for accuracy.
+- To close the loose end: run eager + real MoE + FIX A (no emul, no torch hook). If ~0.925, FIX A
+  is the fix regardless of eager/cuda-graph and E34's torch-naive hook was the imperfect variable.
+
+### FIX A (final, minimal) — the shipping change
+Keep softmax weights p in fp32 for the P·V dot (do NOT downcast p to bf16), in:
+- `sglang/.../triton_ops/decode_attention.py::_fwd_grouped_kernel_stage1` (~L523):
+  `acc += tl.dot(p, v.to(tl.float32), out_dtype=tl.float32)`
+- `sglang/.../triton_ops/extend_attention.py::_fwd_kernel` prefix (~L482) and extend-local (~L587):
+  `acc = acc * re_scale[:, None] + tl.dot(p, v.to(tl.float32), out_dtype=tl.float32) [* v_scale]`
+QK dots need no change (Triton tl.dot(bf16,bf16) already accumulates fp32). Perf: 0.98@200Q at
+135 tok/s (cuda-graph) — the fp32 PV dot cost is small.
+
+### Next
+- Confirm 1319Q for the definitive headline (old baseline 0.811 -> expect ~0.93+).
+- Measure/compare tok/s vs pre-fix baseline (perf regression from fp32 PV, if any).
+- Consider whether the eager Triton qk-rmsnorm also wants the same fp32 treatment (only matters if
+  serving eager; production uses cuda-graph + torch qk-norm and is already fixed).
+
+## E38. HEADLINE (1319Q): FIX A + real MoE + cuda-graph = 0.950 (was 0.811); beats gfx950 0.932  [node: H21-18 gfx1250]
+Full 1319-question GSM8K (5-shot greedy), production recipe (cuda-graph, real a8w4 flydsl MoE,
+bf16 KV) + FIX A (fp32 softmax-p in P·V dot):
+**Accuracy 0.950 / invalid 0.000 / 155 tok/s / 844 s.**
+vs old baseline 0.811 (E15) and gfx950 0.932. => DEFINITIVE: the fp32-PV attention fix alone
+recovers (and exceeds) gfx950-level accuracy at full speed. Case closed for the production path.
+
+## E39. Loose end closed: eager + real MoE + FIX A = 0.900 (== cuda-graph); E34 torch-naive hook was the imperfect variable  [node: H21-18 gfx1250]
+Ran eager (--disable-cuda-graph) + real a8w4 MoE + FIX A (no emul, no torch hook). GSM8K 40Q =
+**0.900 / invalid 0.000 / 48 tok/s** — same band as cuda-graph + FIX A (0.925 @40Q). So FIX A
+works in BOTH eager and cuda-graph. The E34 result (eager + real MoE + torch-naive attn = 0.825)
+is therefore explained: my E34 torch-naive attention Python hook was NOT fully equivalent to the
+correct in-kernel fp32 attention (an imperfect reimpl) — it was the odd one out, NOT eager and NOT
+qk-norm. FIX A (fp32 softmax-p in the P·V dot) is the single, correct, sufficient fix.
+
+## FINAL SUMMARY (2026-07-09, node H21-18 gfx1250)
+Root cause of the gfx1250 R1 GSM8K gap (0.81 vs gfx950 0.93): the triton MLA attention P·V dot
+downcast the softmax weights `p` to bf16 (`p.to(v.dtype)`) before `tl.dot`. Fix = keep p fp32.
+| recipe | GSM8K |
+|---|---|
+| baseline (bf16 PV) 1319Q | 0.811 |
+| FIX A, cuda-graph, real MoE, 1319Q | **0.950** (155 tok/s) |
+| FIX A, cuda-graph, real MoE, 200Q | 0.980 |
+| FIX A, cuda-graph, real MoE, 40Q | 0.925 |
+| FIX A, eager, real MoE, 40Q | 0.900 |
+FIX (shipping) — keep p fp32 in the P·V dot, no `p.to(v.dtype)`:
+- `triton_ops/decode_attention.py::_fwd_grouped_kernel_stage1`: `acc += tl.dot(p, v.to(tl.float32), out_dtype=tl.float32)`
+- `triton_ops/extend_attention.py::_fwd_kernel` prefix + extend-local: same pattern.
+No MoE kernel change, no qk-norm change, no perf regression of note (155 tok/s @1319Q cuda-graph).
+Every earlier "MoE is the gap / both kernels" lead (E16/E30/E31/E34/E35) is superseded: the MoE
+a8w4 kernel is fine for accuracy; the whole production gap was this one bf16 downcast in attention.
+
+## E40. aiter bisect fix REMOVED (reverted to ceil(log2)) — accuracy unaffected, avoids DSv4 OOB crash  [node: H21-18 gfx1250]
+Another node found the bisect `bit_length()` variant (9 iters for batch_count=256) makes the
+binary search `mid` read m_tile_map/layout_buffer[256] = OUT-OF-BOUNDS, crashing DSv4 under high
+concurrency ("E38" on that node). Since the bisect off-by-one it "fixed" is END-TO-END accuracy-
+neutral (E18/E31; the real accuracy fix is FIX A, the fp32 P·V attention change, E36-E39),
+reverted `gemm_mxscale_gfx1250.py` bisect to `max(1, math.ceil(math.log2(batch_count)))` (8 iters,
+no OOB) and re-tested WITH FIX A + real a8w4 MoE + cuda-graph:
+GSM8K 200Q = **0.950 / invalid 0.000 / 112 tok/s** (vs 0.980 with the bisect fix — same band,
+200Q noise; 1319Q-with-fix was 0.950). => **removing the bisect fix does NOT hurt accuracy.**
+(Note the harmless-ness holds with weight-shuffle ON, the working config; E25c's 0.000 was the
+shuffle-OFF/raw-weight mismatch case, unrelated.)
+=> SHIPPING: drop the aiter bisect fix (keeps DSv4 safe). Keep only: gfx1250 weight shuffle,
+AITER_GROUPED_FORCE_SPLIT_K1, and FIX A (fp32 P·V attention). The bisect off-by-one may still
+warrant a proper fix later (correct iteration count WITHOUT reading index==batch_count), but it is
+not needed for R1 accuracy.
+
+## E41. Microbench confirms: gfx1250 bf16 matmul is ~0.16-0.28% off vs fp64; fp32 is exact (~1e-6)  [node: H21-18 gfx1250]
+Robust torch/hipblas test (`/tmp/matmul_prec.py`), attention-PV distribution (A=softmax rows /
+probabilities, B=gaussian), same VALUES fed as bf16 and fp32, compared to fp64 recompute:
+| K | bf16 matmul vs fp64 | fp32 matmul vs fp64 | ratio |
+|---|---|---|---|
+| 256  | 2.87e-3 | 2.8e-7 | ~10000x |
+| 512  | 2.83e-3 | 4.0e-7 | ~7000x  |
+| 2048 | 2.89e-3 | 8.2e-7 | ~3500x  |
+"Same bf16 values, only accumulation differs" (C_bf16 vs A_bf16.double()@B_bf16.double()) = 1.65e-3
+— if bf16 matmul accumulated in true fp32 this would be ~1e-6, so **gfx1250's bf16 matmul uses a
+LOSSY accumulation** (bf16/reduced-precision, beyond input rounding). fp32 matmul is essentially
+exact (~1e-6). => bf16 path is 3500-10000x less accurate. The ~0.16-0.28% matches E22's
+attention-kernel-vs-torch 0.16%; accumulated over 61 layers x decode steps it is the GSM8K gap.
+CONFIRMS FIX A: keeping the P·V dot in fp32 avoids gfx1250's lossy bf16 matmul path.
+Caveats: used torch/hipblas (the hand-written triton WMMA microkernel hit an aperture violation /
+coredump, not pursued) — but same gfx1250 matrix units and the magnitude matches the triton
+measurement. gfx950's bf16 (MFMA) is presumably closer to fp32-accum (untestable on this node),
+consistent with "gfx950 never needed FIX A".

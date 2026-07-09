@@ -134,20 +134,41 @@ AMD_SERIALIZE_KERNEL=3 bash /tmp/run_diag.sh 2>&1 | tee /tmp/run_diag.log
 
 ## 2026-07-08 session edits (newer docker: sglang 000a61a2, aiter 8815f4b5)
 
-Model path is now `/dockerx/data/models/DeepSeek-R1-0528-MXFP4`. This docker already
-has the §6 swiglu stage1 fix and `split_k1=1` default baked in, and already B-scale
-n32k4-preshuffles for gfx1250 — but the three edits below were still missing.
-See EXPERIMENT_LOG E17-E20. (NOTE: none of these close the accuracy gap; the gap is
-NOT the MoE — E20. They are kept because each is independently correct/required.)
+Model path is now `/dockerx/data/models/DeepSeek-R1-0528-MXFP4`.
+SHIPPING code changes (updated 2026-07-09, E36-E40): **FIX A (below) is THE accuracy fix**
+(GSM8K 0.811 -> 0.950 @1319Q, full speed); plus B (weight shuffle, mandatory) and C
+(AITER_GROUPED_FORCE_SPLIT_K1). Change **A (bisect) is REMOVED** (E40: caused DSv4 OOB, and it
+was accuracy-neutral).
 
-### A. aiter FlyDSL contiguous-M bisect off-by-one (MODIFIED)
-File `aiter/aiter/ops/flydsl/kernels/gemm_mxscale_gfx1250.py` (~L3010):
+### FIX A. sglang triton MLA attention: keep softmax `p` fp32 in the P·V dot (THE ACCURACY FIX)
+The P·V dot downcast the softmax weights `p` (fp32) to bf16 before `tl.dot` -> gfx1250's bf16
+WMMA lost precision (gfx950's bf16 MFMA tolerated it, which is why gfx950 never needed this).
+Keep `p` in fp32 (promote V to fp32) so the dot runs fp32×fp32:
+File `python/sglang/srt/layers/attention/triton_ops/decode_attention.py`,
+`_fwd_grouped_kernel_stage1` (~L523):
 ```python
--  _bisect_iters = max(1, math.ceil(math.log2(batch_count)))
-+  _bisect_iters = max(1, int(batch_count).bit_length())
+-  acc += tl.dot(p.to(v.dtype), v)
++  acc += tl.dot(p, v.to(tl.float32), out_dtype=tl.float32)   # out_dtype is redundant; the fix is p stays fp32
 ```
-Real bug for power-of-two expert counts (R1 = 256). op-test contiguous 3.2e-3 ->
-3.4e-6. End-to-end neutral (does not change GSM8K).
+File `python/sglang/srt/layers/attention/triton_ops/extend_attention.py`,
+`_fwd_kernel` prefix (~L482) and extend-local (~L587):
+```python
+-  p = p.to(v.dtype)
+-  acc = acc * re_scale[:, None] + tl.dot(p, v) [* v_scale]
++  acc = acc * re_scale[:, None] + tl.dot(p, v.to(tl.float32), out_dtype=tl.float32) [* v_scale]
+```
+QK dots need NO change (Triton `tl.dot(bf16,bf16)` already accumulates fp32). Validated:
+real a8w4 MoE + cuda-graph = GSM8K 0.925(40Q)/0.980(200Q)/0.950(1319Q) @155 tok/s (E36-E39).
+`rm -rf /root/.triton/cache` after editing so Triton recompiles.
+
+### A. aiter FlyDSL contiguous-M bisect off-by-one — **REMOVED (E40), do NOT apply**
+File `aiter/aiter/ops/flydsl/kernels/gemm_mxscale_gfx1250.py` (~L3010). The `bit_length()`
+variant (9 iters for 256 experts) reads m_tile_map/layout_buffer[256] OUT-OF-BOUNDS -> crashes
+DSv4 at high concurrency (E40). The off-by-one it fixed (op-test 3.2e-3, power-of-2 expert
+counts) is **END-TO-END ACCURACY-NEUTRAL** (E18/E31; FIX A is the real accuracy fix). KEEP the
+original safe `_bisect_iters = max(1, math.ceil(math.log2(batch_count)))` (8 iters, no OOB).
+(A proper bisect that counts correctly WITHOUT reading index==batch_count could be done later,
+but is NOT needed for R1 accuracy.)
 
 ### B. sglang quark MoE weight shuffle on gfx1250 (MODIFIED — MANDATORY)
 File `python/sglang/srt/layers/quantization/quark/schemes/quark_w4a4_mxfp4_moe.py`.
@@ -185,5 +206,13 @@ illegal-address path), so the env is required to force the fused path.
 
 ### run_ds-r1.sh
 `--model-path /dockerx/data/models/DeepSeek-R1-0528-MXFP4`; add
-`SGLANG_MOE_SHUFFLE_GFX1250=1`. Remember to `rm -rf /root/.flydsl/cache` after the
-bisect edit so FlyDSL recompiles.
+`SGLANG_MOE_SHUFFLE_GFX1250=1`; keep `AITER_FORCE_A8W4=1`, `AITER_GROUPED_FORCE_SPLIT_K1=1`,
+`--kv-cache-dtype auto`, `--attention-backend triton`, cuda-graph ON.
+After editing FIX A: `rm -rf /root/.triton/cache` so Triton recompiles the attention kernels.
+(No flydsl edit now that the bisect fix is removed.)
+
+### Summary of the SHIPPING set (2026-07-09)
+1. **FIX A** — fp32 `p` in the P·V dot (decode + extend). THE accuracy fix (0.811 -> 0.950).
+2. **B** — gfx1250 weight shuffle in quark_w4a4_mxfp4_moe.py (MANDATORY, else 0.000 garbage).
+3. **C** — AITER_GROUPED_FORCE_SPLIT_K1 env in grouped_moe_gfx1250.py (avoid token=1 illegal-addr).
+4. run_ds-r1.sh knobs above. Bisect fix (old A) = REMOVED.

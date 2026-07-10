@@ -1416,3 +1416,72 @@ choice** (e.g., the gfx1250 triton MLA path downcasts P·V / accumulates in bf16
 path keeps fp32), not the matmul unit's raw precision. Next: microbench the ACTUAL attention
 kernel per arch (force fp32 vs bf16 output/accum), or diff the two archs' triton MLA codegen for
 where the P·V dtype differs — do NOT rely on the torch/hipblas proxy for the accumulation claim.
+
+## E43. fp8 KV cache FIXED on gfx1250 (overturns §4.7/E13); root cause = query downcast to fp8, NOT fp8 gemm  [node: H21-18 gfx1250]
+Image `henryx/xsgl:v0.5.14-gfx1250-rocm-nightlies-20260709-trial-3` (sglang 3923a34d, aiter 9af05b91),
+production fixes pre-baked. bf16-KV baseline reproduced (1319Q 0.951). Investigated `--kv-cache-dtype
+fp8_e4m3` which SKILL §4.7/E13 recorded as broken (decode -> token-0/empty, GSM8K 0).
+
+ROOT CAUSE (two spots, same class of bug): the triton MLA attention kernels **downcast the query to
+fp8** when the KV cache is fp8, then do fp8×fp8 — `q.to(K_Buffer.dtype)`. MLA's post-absorb q needs
+bf16 precision; forcing it to fp8 e4m3 (3-bit mantissa) wrecks the qk logits -> softmax garbage.
+1. `decode_attention.py::_fwd_grouped_kernel_stage1`: `q_k = q.to(K_Buffer.dtype.element_ty)` (decode).
+2. `extend_attention.py` prefix loops (2 kernels × {nope,rope} = 4 dots): `tl.dot(q.to(k.dtype), k)`,
+   `tl.dot(qpe.to(kpe.dtype), kpe)`. Fires ONLY when **radix cache reuses a prefix** (prefill then
+   reads the cached fp8 KV via the extend kernel) — the blind spot in §4.7's "prefill never reads fp8".
+FIX (both files; no-op for bf16 KV): keep q native, **upcast fp8 K to q's dtype**: `tl.dot(q, k.to(q.dtype))`.
+
+fp8 GEMM IS NOT BROKEN on gfx1250 (answers the standing "is gfx1250 fp8 gemm abnormal?" worry):
+single-tile triton microbench fp8×fp8 dot vs exact-fp8 fp64 ref = **1.1e-7** (bf16 = 2.3e-3). The
+matmul is correct; the bug is the q→fp8 **cast of an operand**, not the dot. "fp8 gemm fine" and
+"upcast K to bf16" are NOT contradictory: KV stays STORED in fp8 (memory saved); we only avoid
+degrading the QUERY to fp8 by doing the dot in bf16. Offline decode-kernel harness (real sglang
+kernel, synthetic MLA) is correct for fp8 at seq≤2048 / bs≤32 / splits≤16 — kernel math never the issue.
+WHY gfx950 (0.941) survives on IDENTICAL code, gfx1250 (0.000) collapses — TRIGGER confirmed, exact
+mechanism NOT pinned (honest status; two hypotheses tested + REFUTED). Kernels are byte-identical
+across archs (verified `git show 000a61a2:...` == 3923a34d for the `q.to(k.dtype)` lines) — NOT a
+version diff, NOT arch-gated ("different path" claim RETRACTED). The `q.to(fp8)` downcast is the
+trigger (removing it fixes gfx1250 0.000->0.949) and is gfx1250-specific (gfx950 same code = 0.941).
+REFUTED mechanisms (do not re-chase):
+ (a) overflow->NaN: gfx1250 cast DOES NaN for >448 (measured 449->448 ok, 500->NaN), BUT live-probed
+     real R1 query never reaches 448 (|q|max ~276 extend / ~330 decode, over448 count = 0). So
+     overflow is NOT the trigger for normal prompts. ("overflow is the mechanism" RETRACTED.)
+ (b) fp8 dot wrong at large magnitude: single-tile microbench at |a|max=332 (real q scale) = 3e-7
+     correct; only |a|>448 NaNs. fp8 matmul is fine at the real operating point.
+=> fp8 GEMM on gfx1250 is confirmed fine; the trigger is the q->fp8 downcast (gfx1250-specific); the
+exact low-level reason (gfx950 tolerates identical downcast, q<448, isolated dot correct) is UNPINNED.
+
+CROSS-ARCH CONTROL COMPLETE (gfx950 smci355, results_gfx950-smci355 tests 1/2/3): (1) bf16->fp8 cast
+overflow gfx950 == gfx1250 EXACTLY (449->448, 500+->NaN, ~464 thresh) -> overflow is NOT the diff;
+(2) triton fp8xfp8 dot gfx950 correct to |a|max=320 (1.3e-5; gfx1250 3e-7, gfx950 even slightly LESS
+precise) -> dot semantics SAME; (3) gfx950 real kernel unmodified q->fp8 + fp8 KV = 1319Q 0.941 (good).
+=> the fp8 cast/saturate is IDENTICAL on both archs; the gfx1250 crash is NOT the cast semantics.
+
+## ROOT CAUSE PINNED: gfx1250 triton tl.dot(fp8,fp8) is BROKEN for contraction dim K>=128
+Decisive on gfx1250: (a) A/B in the REAL decode kernel (constexpr DOWNCAST_Q toggle threaded to
+_fwd_grouped_kernel_stage1, host-side env), realistic q (|q|max<=330, no cast overflow) vs torch ref:
+UPCAST-K (fix) rel_l2 ~1e-3 correct; **DOWNCAST-Q (fp8xfp8 dot) = NaN at EVERY config incl qmax=30 &
+splits=1** (=> not overflow, not multi-split). (b) single-tile fp8xfp8 K-sweep, small in-range vals:
+K=64 -> 0.0 correct; **K=128 -> 3.2e34; K=256 -> 4.9e36; K=512 -> 3.1e36 (all GARBAGE)**; bf16 K=512
+-> 0.0. AMD kargs (nonkdim16/kpack2/ns1) irrelevant.
+=> On gfx1250 `tl.dot(fp8, fp8)` silently returns ~1e34+ garbage once K>=128 (K=64 fine; bf16 fine at
+all K). MLA nope QK dot is K=512 -> downcasting q to fp8 there = garbage -> softmax(inf) -> NaN ->
+degenerate decode. This is the SINGLE root cause of both bug#1 (decode) and bug#2 (extend prefix).
+The earlier "overflow->NaN" and "multi-split" leads were BOTH red herrings (retracted). gfx950 is
+unaffected because its fp8 tl.dot at K=512 is correct (real kernel w/ identical q->fp8 = 0.941) => a
+gfx1250-specific triton/ROCm fp8-MFMA codegen bug for large-K fp8 matmul, NOT the fp8 ISA cast.
+FIX (both files, no-op for bf16 KV): keep q bf16, upcast fp8 K to bf16 before the dot. E2E fp8 KV
+1319Q 0.949. GFX1250 DEV RULE: never `tl.dot(fp8,fp8)` with K>=128 on gfx1250 (upcast to bf16, or
+tile K<=64, or use a validated scaled-fp8 gemm); worth a minimal upstream triton repro (K=64 vs 128).
+
+VALIDATION (fp8 KV, FULL production recipe: radix ON + cuda-graph ON, no workaround flags):
+40Q 0.950 / **1319Q 0.949** / invalid 0.000 / **182 tok/s** == bf16 (0.951 / 178 tok/s). fp8 KV now
+accuracy-neutral AND full speed; halves KV-cache memory on gfx1250.
+
+RED HERRING (honesty): first mis-attributed the residual break to the multi-split (num_kv_splits>1)
+path — the "working" validation script also carried `--disable-radix-cache`. Clean single-variable
+tests (radix OFF + splits DEFAULT = 0.900; splits=1 + radix ON = 0.000) showed **radix cache** was the
+real trigger -> extend prefix fp8 read. A num_kv_splits=1 backend gate was tried then reverted.
+
+Shipping: 2 file edits (decode_attention.py, extend_attention.py), both no-op for bf16. See
+results_gfx1250-H21-18.md for the full run log.

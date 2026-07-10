@@ -20,8 +20,47 @@ Single entry point / handover snapshot. Last updated **2026-07-09**.
 > **Shipping code changes = gfx1250 weight shuffle + AITER_GROUPED_FORCE_SPLIT_K1 + FIX A (fp32
 > P·V attention). NOT the bisect fix.**
 
-Read this first, then EXPERIMENT_LOG.md (E17-E40) for detail, CHANGES.md for the exact
+Read this first, then EXPERIMENT_LOG.md (E17-E43) for detail, CHANGES.md for the exact
 code edits, HANDOVER_crossnode_dump.md for the next experiment.
+
+> **★ UPDATE 2026-07-10 (E43, node H21-18 gfx1250): fp8 KV cache is FIXED & usable — SKILL §4.7
+> "fp8 KV broken, use bf16" is SUPERSEDED.** New image `henryx/xsgl:v0.5.14-...-20260709-trial-3`
+> (sglang 3923a34d, aiter 9af05b91) reproduces bf16 baseline (1319Q 0.951). Root cause of the fp8-KV
+> decode crash, PINNED: **gfx1250 triton `tl.dot(fp8,fp8)` returns garbage (~1e34) for contraction
+> dim K>=128** (K=64 fine; bf16 fine at all K) — a gfx1250-specific fp8-MFMA codegen bug (gfx950's
+> fp8 dot at K=512 is correct -> gfx950 fp8 KV = 0.941, same code). MLA nope QK dot is K=512 and the
+> triton kernels downcast q to fp8 to match the fp8 KV cache -> garbage -> softmax(inf) -> NaN ->
+> degenerate decode. Two spots: `decode_attention.py::_fwd_grouped_kernel_stage1` (decode) and
+> `extend_attention.py` prefix loops (fires on radix-cache prefix reuse). **FIX (both files, no-op
+> for bf16 KV): keep q bf16, upcast fp8 K to bf16 in the dot.** Validated E2E fp8 KV: 40Q 0.950 /
+> 1319Q **0.949** (== bf16 0.951), full recipe (radix + cuda-graph, NO workaround flags), 182 tok/s,
+> halves KV memory. RED HERRINGS ruled out (all retracted): overflow->NaN (real |q|max ~330 < 448),
+> multi-split (fails at splits=1 too), fp8 cast semantics (identical gfx950==gfx1250), fp8 gemm at
+> small K (correct 1e-7). Upstream triton/ROCm repro: `artifacts/triton_fp8_dot_largek_gfx1250_repro.py`
+> + `artifacts/BUGREPORT_triton_fp8_dot_largek_gfx1250.md`.
+> **gfx1250 DEV RULE: never `tl.dot(a_fp8,b_fp8)` with K>=128 (upcast to bf16 / tile K<=64 / scaled-fp8
+> gemm); bf16 tl.dot unaffected.** See EXPERIMENT_LOG E43 + results_gfx1250-H21-18.md.
+>
+> **FIX A (fp32 P·V) is NOT a codegen bug — it is genuine bf16 precision (checked E43).** Triton
+> `tl.dot` P·V (p=softmax rows, v=gaussian) on gfx1250: bf16xbf16 = ~2.4e-3 (normal bf16 output
+> rounding), STABLE across K=16..512, no garbage; fp32xfp32 = ~1e-7. So the original code's downcast
+> of the softmax weights `p` to bf16 loses ~0.2-0.4%/weight, which ACCUMULATES over long CoT
+> (0.85->0.925); keeping p fp32 fixes it. Categorically different from the fp8 K>=128 defect (which
+> returns ~1e34 garbage): FIX A = a dtype/accumulation-precision choice, the fp8 bug = a broken
+> instruction. gfx1250 bf16 tl.dot is numerically well-behaved.
+> **⚠️ CONTRADICTION — RESOLVED via candidate (b): FIX A is NOT the lever on this image.** The
+> "genuine bf16 precision" story could not explain why gfx950 didn't need FIX A. Direct single-var
+> A/B on gfx1250 (this image, sglang 3923a34d): toggle ONLY the P·V p-dtype (fp32 vs bf16) in
+> decode+extend, everything else identical, bf16 KV, production recipe:
+>   FIX-A ON (p fp32): 200Q 0.960, 1319Q 0.951.   FIX-A OFF (p bf16): 200Q 0.965, **1319Q 0.948**.
+> => reverting FIX A does NOT drop accuracy (0.948 vs 0.951 = noise), vs the historical claim of
+> 0.85 (off) -> 0.925 (on). So on THIS stack **p-fp32 is accuracy-neutral — FIX A is not the lever**;
+> the historical 0.85->0.925 attribution (E36/E37/E39) was a CONFOUND (that saga's masking/emul
+> setup) or fixed by the newer sglang/aiter. This dissolves the gfx950 contradiction: nobody needs
+> FIX A on this image, so there is no gfx950-vs-gfx1250 puzzle. (FIX A left in place — it is
+> accuracy-neutral and fp32 P·V is safe; it could be dropped for a small perf gain. The fp8-KV
+> upcast fixes are the ones that matter.) Candidate (a) — whether gfx950 even downcasts p — is now
+> moot for accuracy but a gfx950 agent prompt was written to confirm the code path anyway.
 
 ## ⚠️ MULTI-NODE CONVENTION (several machines share this dir)
 Multiple nodes run these experiments and write to these SAME md files — concurrent edits can

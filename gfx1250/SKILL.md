@@ -226,12 +226,24 @@ out 4.4). The decode-only difference vs the working MHA prefill is the MLA-absor
 attention **reading the accumulated KV cache**, which was **fp8_e4m3**
 (`--kv-cache-dtype fp8_e4m3`).
 
-FIX: use bf16 KV cache -> `--kv-cache-dtype auto`. Decode immediately becomes
-coherent (" Paris. Paris is located in the northern-central part of the country
-...") and GSM8K jumps to ~0.80 (eager) with invalid 0.000. The fp8-KV decode read
-path (triton MLA decode on gfx1250) is broken; bf16 KV costs ~2x KV memory (fine at
-~432 GB VRAM). This is a decode-read issue: prefill (MHA, no prefix) never reads the
-fp8 cache so it looked fine.
+FIX (interim, 2026-07-07): use bf16 KV cache -> `--kv-cache-dtype auto`. Decode becomes
+coherent and GSM8K jumps to ~0.80 (eager) with invalid 0.000.
+
+**UPDATE 2026-07-10 (E43, node H21-18): fp8 KV cache is now FIXED and usable — this §4.7
+"fp8 KV is broken, use bf16" is SUPERSEDED.** Root cause (pinned): on gfx1250 triton
+`tl.dot(fp8, fp8)` returns GARBAGE (~1e34) for contraction dim **K >= 128** (K=64 fine;
+bf16 fine at all K) — a gfx1250-specific fp8-MFMA codegen bug (gfx950 fp8 dot at K=512 is
+correct, scores 0.941). The MLA nope QK dot is K=512, and the triton MLA kernels downcast
+q to fp8 to match an fp8 KV cache (`q.to(K_Buffer.dtype)`) -> fp8xfp8 K=512 -> garbage ->
+softmax(inf) -> NaN -> degenerate decode. Two spots: `decode_attention.py::_fwd_grouped_
+kernel_stage1` (decode) and `extend_attention.py` prefix loops (fires when radix cache
+reuses a prefix — the blind spot behind "prefill never reads the fp8 cache"). FIX: keep q
+in bf16 and upcast the fp8 K to bf16 in the dot (`tl.dot(q, k.to(q.dtype))`); no-op for
+bf16 KV. Validated: fp8 KV GSM8K 1319Q **0.949** == bf16 0.951, full speed, full recipe
+(radix + cuda-graph, no workaround flags). Halves KV memory. See EXPERIMENT_LOG E43 +
+results_gfx1250-H21-18.md; upstream repro in artifacts/triton_fp8_dot_largek_gfx1250_repro.py.
+**gfx1250 DEV RULE: never `tl.dot(a_fp8, b_fp8)` with contraction K>=128 — upcast to bf16,
+tile K<=64, or use a validated scaled-fp8 gemm. bf16 tl.dot is unaffected.**
 
 ### 4.8 CUDA graph now works (previously crashed)
 
@@ -244,6 +256,37 @@ them only when diagnosing a new async GPU fault. NOTE: under capture mode
 `get_is_capture_mode()` is True, so `forward_absorb_prepare` takes the alt-stream +
 torch `q_a_layernorm`/`kv_a_layernorm` branch (not the Triton qk-rmsnorm) — both are
 verified good.
+
+### 4.9 Two triton-dtype issues in the MLA attention, and what class each is (E36/E43)
+
+Two separate fixes live in `decode_attention.py` / `extend_attention.py`. They look similar
+(both about a dtype in a `tl.dot`) but are FUNDAMENTALLY different classes — do not conflate:
+
+- **fp8 KV read = a gfx1250 CODEGEN BUG (a broken instruction).** `tl.dot(fp8, fp8)` on gfx1250
+  returns ~1e34 GARBAGE for contraction dim **K >= 128** (K=64 fine; bf16 fine at all K). The MLA
+  nope dot is K=512; the kernels downcast q to fp8 to match an fp8 KV cache -> garbage -> NaN ->
+  degenerate decode (§4.7 UPDATE). FIX = keep q bf16, upcast the fp8 K to bf16 (`tl.dot(q,
+  k.to(q.dtype))`). gfx1250 DEV RULE: never `tl.dot(a_fp8,b_fp8)` with K>=128. Repro/report in
+  `artifacts/triton_fp8_dot_largek_gfx1250_repro.py`.
+
+- **FIX A (fp32 P·V) = a PRECISION choice, NOT codegen.** The original code downcast the softmax
+  weights `p` to bf16 before `tl.dot(p, v)`. The gfx1250 bf16 P·V `tl.dot` is numerically normal
+  (rel_l2 ~2.4e-3, stable across K=16..512, no garbage — E43), so this is not a broken instruction;
+  it is ordinary bf16 rounding of `p` (~0.2-0.4%/weight) that accumulates over long CoT. Keeping p
+  fp32 (`tl.dot(p, v.to(tl.float32), out_dtype=tl.float32)`) was credited with ~0.85 -> ~0.925.
+  **⚠️ BUT on THIS image FIX A is accuracy-neutral — it is NOT the lever (E43 A/B).** Single-var
+  A/B on gfx1250 (toggle only P·V p dtype, else identical, bf16 KV, prod recipe): p-fp32 (on) =
+  1319Q 0.951; p-bf16 (off) = 1319Q **0.948** (200Q 0.965 vs 0.960) — reverting FIX A does NOT drop
+  accuracy. So the historical 0.85->0.925 attribution (E36/E37/E39) was a CONFOUND (that saga's
+  masking/emul) or was fixed by the newer sglang(3923a34d)/aiter(9af05b91). This also dissolves the
+  gfx950 puzzle (why gfx950 "didn't need" FIX A): nobody needs it on this stack. FIX A is left in
+  place (neutral + fp32 P·V is safe; droppable for a small perf gain). The fp8-KV upcast fixes above
+  are the ones that actually matter. See STATUS.md + results_gfx1250-H21-18.md.
+  NOTE — the A/B was run on **bf16 KV** (the correct carrier: `v` is bf16 so FIX-A-off = `p.to(bf16)`
+  cleanly isolates the p fp32-vs-bf16 precision variable). **On fp8 KV the P·V dot MUST stay fp32:**
+  there `v = tl.trans(k)` is fp8, so an FIX-A-off `p.to(v.dtype)` would downcast p to fp8 and, since
+  the P·V contraction (seq) can be >=128, hit the fp8 `tl.dot` K>=128 garbage bug (§4.7/§4.9 above).
+  So the fp32 P·V form is REQUIRED on fp8 KV — not for accuracy, but to avoid the fp8 codegen bug.
 
 ---
 

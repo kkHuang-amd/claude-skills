@@ -258,6 +258,218 @@ Same layout as the ON best-of table above; conc 2 is tp8 (unaffected by the flag
 
 ## Open / next
 - EP/deepep + TBO on B200 (only way to test TBO; could lift the dp numbers).
+  → **EP/deepep tested 2026-07-13, see update below — big win at conc≥8.** TBO still open.
 - conc>32 or longer context would start pressuring the dp swa pool (87k/rank).
 - shared-expert-local PoC (`SE_LOCAL=on`) not benchmarked here (kept the
   validated-correct 2-flag dp set); worth a perf check.
+
+---
+
+# UPDATE 2026-07-13 — rerun on current image + DeepEP/mega-MoE path
+
+Rerun of this 70k/300 study on the **current** image, and finally testing the
+**tp+dp+DeepEP (mega-MoE, EP=8)** path that the "Open / next" above flagged as
+the most promising untested lever. DeepEP recipe adapted from the Lane A
+launcher `b200/run_sgl_dsv4_pro_b200.sh MODE=dp8` (see
+`dsv4_pro_b200_sglang_benchmark.md`).
+
+## Environment drift vs the 2026-06-25 run
+- **sglang**: the `/sgl-workspace/sglang-upstream` PYTHONPATH pin is **gone**; the
+  default installed tree `/sgl-workspace/sglang` is now `f63458b` (2026-07-09),
+  **0.5.15**, and already carries the DP work — so **no PYTHONPATH pin needed**.
+- **Model path**: now `/dockerx/raid/models/deepseek-ai/DeepSeek-V4-Pro` (the old
+  flat `/dockerx/raid/models--deepseek-ai--DeepSeek-V4-Pro` path is gone).
+- Same client methodology (sglang-oai, ratio 1.0, inf rate, np=conc×4, warm=conc×1).
+- All configs: **0 retract, 0 OOM, all requests successful.**
+
+## Result — total (input+output) tok/s, client medians
+
+| conc | best tp8/dp8 (rerun) | deepep EP=8 (rerun) | deepep vs dp8 | 2026-06-25 baseline |
+|---:|---:|---:|:--:|---:|
+| 2  | **16,420** (tp8) | 11,396 | — (dp idles) | 15,969 |
+| 4  | 17,811 (dp8) | **18,956** | **+6.4%** | 21,885 |
+| 8  | 34,744 (dp8) | **43,353** | **+24.8%** | 34,234 |
+| 16 | 43,108 (dp8) | **56,986** | **+32.2%** | 43,576 |
+| 32 | 46,544 (dp8) | **65,892** | **+41.6%** | 47,065 |
+
+deepep column = the **`--stream-interval 1` rerun** (see note below). All configs
+use per-token streaming here, so numbers are directly comparable.
+
+Latency detail (rerun; deepep = stream-interval 1):
+
+| cfg | conc | total tok/s | TTFT(ms) | TPOT(ms) | ITL(ms) | E2E(ms) |
+|:--|---:|---:|---:|---:|---:|---:|
+| tp8    | 2  | 16,420 | 4,877  | 12.05 | 10.80 | 8,542  |
+| dp8    | 4  | 17,811 | 10,628 | 16.75 | 16.45 | 15,760 |
+| dp8    | 8  | 34,744 | 10,909 | 17.66 | 16.71 | 16,163 |
+| dp8    | 16 | 43,108 | 15,867 | 34.51 | 17.96 | 25,553 |
+| dp8    | 32 | 46,544 | 24,038 | 73.68 | 20.06 | 49,807 |
+| deepep | 2  | 11,396 | 7,681  | 14.92 | 29.43 | 12,341 |
+| deepep | 4  | 18,956 | 9,790  | 15.98 | 30.90 | 14,750 |
+| deepep | 8  | 43,353 | 7,595  | 16.73 | 32.85 | 12,892 |
+| deepep | 16 | 56,986 | 10,756 | 29.81 | 35.87 | 19,301 |
+| deepep | 32 | 65,892 | 16,824 | 59.27 | 39.66 | 33,842 |
+
+## Best-of table (fastest per concurrency) — client medians
+
+Winner by TTT (total input+output tok/s) at each concurrency. `TP,DP,EP`: `8,` =
+plain TP8; `8,8,8` = TP8+DP-attn+DeepEP(EP=8). `Interactivity = 1000 / Median ITL`.
+
+| Input_len | output_len | TP,DP,EP | Concurrency | TTT (tok/s) | Median E2EL (ms) | Median TTFT (ms) | Median ITL (ms) | Interactivity (tok/s/user) |
+|---:|---:|:--|---:|---:|---:|---:|---:|---:|
+| 70000 | 300 | 8,    | 2  | 16,420.00 | 8,542.00  | 4,877.00  | 10.80 | 92.59 |
+| 70000 | 300 | 8,8,8 | 4  | 18,956.00 | 14,750.00 | 9,790.00  | 30.90 | 32.36 |
+| 70000 | 300 | 8,8,8 | 8  | 43,353.00 | 12,892.00 | 7,595.00  | 32.85 | 30.44 |
+| 70000 | 300 | 8,8,8 | 16 | 56,986.00 | 19,301.00 | 10,756.00 | 35.87 | 27.88 |
+| 70000 | 300 | 8,8,8 | 32 | 65,892.00 | 33,842.00 | 16,824.00 | 39.66 | 25.21 |
+
+## Findings
+1. **2026-06-25 dp8/flashinfer_mxfp4 baseline reproduces** on 0.5.15: conc 8/16/32
+   within ~1–2% (34.7k/43.1k/46.5k vs 34.2k/43.6k/47.1k); conc 2 tp8 16.4k ≈ 16.0k.
+   Only conc 4 came in low (17.8k vs 21.9k) — small-sample (16 prompts) noise.
+2. **DeepEP / mega-MoE (EP=8) wins big at high concurrency**: conc 32 **+41.6%**
+   (65.9k vs 46.5k), conc 16 **+32.2%**, conc 8 **+24.8%**, with **lower TTFT/E2E**
+   at conc 8/16/32 and **better TPOT at conc 32** (59 vs 74 ms). This confirms the
+   old hypothesis that EP was the biggest remaining throughput lever.
+3. **DeepEP loses only at conc 2** (11.4k vs tp8 16.4k) — DP/EP idles ranks +
+   all2all overhead when there is too little work. From **conc 4 up, deepep wins**
+   (conc 4 is close, +6.4%, within noise; the gap widens sharply with concurrency).
+4. **stream-interval matters**: the Lane A deepep launcher hardcodes
+   `--stream-interval 20` (flushes ~20 tokens/SSE event), which makes client ITL
+   per-burst (~600–790 ms — not comparable) AND measured ~13–19% *lower* TTT at
+   conc 8/16. Rerunning with **`--stream-interval 1`** (override via `SGL_EXTRA_ARGS`,
+   argparse takes the last value) gives per-token ITL (~29–40 ms, comparable to dp8)
+   and higher/cleaner throughput. **All deepep numbers above are the si=1 rerun.**
+5. deepep at conc 32 is **not yet saturated** (throughput still climbing) — peak is
+   likely higher at conc 48/64. TBO (now feasible on the deepep backend) untested.
+
+## Per-concurrency fastest-throughput recipe (current image)
+
+`MODEL=/dockerx/raid/models/deepseek-ai/DeepSeek-V4-Pro`. Scripts in
+`useful-scripts/benchmarking/dsv4/` (`b200/` for the deepep launcher).
+
+| conc | winner | server command |
+|---:|:--|:--|
+| 2  | tp8    | `MODE=tp8 CHUNK=32768 MEM=0.90 MODEL=$MODEL bash run_sgl_dsv4_70k_b200.sh` |
+| 4/8/16/32 | deepep | `MODE=dp8 CONC=32 MEM=0.85 MODEL=$MODEL SERVED_MODEL_NAME=$MODEL SGL_EXTRA_ARGS='--kv-cache-dtype fp8_e4m3 --context-length 73728 --disable-radix-cache --stream-interval 1' bash b200/run_sgl_dsv4_pro_b200.sh` |
+
+(conc 4 deepep 18,956 barely edges dp8 17,811 — within noise; dp8 via
+`MODE=tp8dp8 CHUNK=16384 SWA=0.1 MEM=0.80 DELAYER=off bash run_sgl_dsv4_70k_b200.sh`
+is an equivalent choice at conc 4. **Note the `--stream-interval 1`** override — the
+launcher defaults to 20, which hurts measured TTT and makes ITL per-burst.)
+
+## Fully-expanded commands (verbatim from the run; no wrapper scripts)
+
+`export MODEL=/dockerx/raid/models/deepseek-ai/DeepSeek-V4-Pro` for all.
+
+### conc 2 → tp8 (16,420 tok/s)
+env:
+```bash
+export SGLANG_JIT_DEEPGEMM_PRECOMPILE=0
+export SGLANG_OPT_SWA_SPLIT_LEAF_ON_INSERT=1
+export SGLANG_OPT_USE_JIT_NORM=1
+export SGLANG_OPT_USE_JIT_INDEXER_METADATA=1
+export SGLANG_OPT_USE_TOPK_V2=1
+export SGLANG_OPT_USE_CUSTOM_ALL_REDUCE_V2=1
+```
+server:
+```bash
+sglang serve --model-path $MODEL --host 0.0.0.0 --port 8000 --trust-remote-code \
+  --tp 8 --disable-radix-cache --max-running-requests 64 --mem-fraction-static 0.90 \
+  --swa-full-tokens-ratio 0.1 --moe-runner-backend flashinfer_mxfp4 \
+  --chunked-prefill-size 32768 --disable-flashinfer-autotune \
+  --kv-cache-dtype fp8_e4m3 --context-length 73728 --cuda-graph-max-bs 64
+```
+client:
+```bash
+python3 -m sglang.bench_serving --backend sglang-oai --base-url http://127.0.0.1:8000 \
+  --model $MODEL --dataset-name random \
+  --random-input-len 70000 --random-output-len 300 --random-range-ratio 1.0 \
+  --num-prompts 8 --max-concurrency 2 --request-rate inf --warmup-requests 2 \
+  --output-file isl70000_osl300_c2.jsonl
+```
+
+### conc 4 / 8 / 16 / 32 → deepep (18,956 / 43,353 / 56,986 / 65,892 tok/s)
+Same server for all four; only the client `--max-concurrency` / `--num-prompts` (=conc×4) / `--warmup-requests` (=conc) change.
+
+env:
+```bash
+export PYTHONNOUSERSITE=1
+export TORCH_CUDA_ARCH_LIST=10.0
+export SGLANG_JIT_DEEPGEMM_FAST_WARMUP=1
+export SGLANG_OPT_SWA_SPLIT_LEAF_ON_INSERT=1
+export SGLANG_OPT_USE_JIT_NORM=1
+export SGLANG_OPT_USE_JIT_INDEXER_METADATA=1
+export SGLANG_OPT_USE_TOPK_V2=1
+export SGLANG_OPT_USE_CUSTOM_ALL_REDUCE_V2=1
+export SGLANG_OPT_USE_DEEPGEMM_MEGA_MOE=1
+export SGLANG_OPT_FIX_HASH_MEGA_MOE=1
+export SGLANG_OPT_USE_FAST_MASK_EP=1
+export SGLANG_OPT_FIX_MEGA_MOE_MEMORY=1
+export SGLANG_OPT_DEEPGEMM_MEGA_MOE_NUM_MAX_TOKENS_PER_RANK=4096
+export SGLANG_OPT_FIX_NEXTN_MEGA_MOE=1
+export SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=0
+```
+server:
+```bash
+python3 -m sglang.launch_server --model-path $MODEL --served-model-name $MODEL \
+  --host 0.0.0.0 --port 8000 --trust-remote-code \
+  --tp 8 --dp 8 --tokenizer-worker-num 8 \
+  --enable-dp-attention --enable-dp-attention-local-control-broadcast \
+  --incremental-streaming-output --dist-init-addr 127.0.0.1:10000 \
+  --ep-size 8 --moe-a2a-backend deepep \
+  --deepep-config '{"normal_dispatch":{"num_sms":96},"normal_combine":{"num_sms":96}}' \
+  --mem-fraction-static 0.85 --swa-full-tokens-ratio 0.1 \
+  --max-running-requests 64 --cuda-graph-max-bs 32 --chunked-prefill-size 32768 \
+  --tool-call-parser deepseekv4 --reasoning-parser deepseek-v4 \
+  --watchdog-timeout 1800 --weight-loader-prefetch-checkpoints --enable-metrics \
+  --kv-cache-dtype fp8_e4m3 --context-length 73728 --disable-radix-cache --stream-interval 1
+```
+client (per conc):
+```bash
+# conc 4
+python3 -m sglang.bench_serving --backend sglang-oai --base-url http://127.0.0.1:8000 \
+  --model $MODEL --dataset-name random \
+  --random-input-len 70000 --random-output-len 300 --random-range-ratio 1.0 \
+  --num-prompts 16 --max-concurrency 4 --request-rate inf --warmup-requests 4 \
+  --output-file isl70000_osl300_c4.jsonl
+# conc 8
+python3 -m sglang.bench_serving --backend sglang-oai --base-url http://127.0.0.1:8000 \
+  --model $MODEL --dataset-name random \
+  --random-input-len 70000 --random-output-len 300 --random-range-ratio 1.0 \
+  --num-prompts 32 --max-concurrency 8 --request-rate inf --warmup-requests 8 \
+  --output-file isl70000_osl300_c8.jsonl
+# conc 16
+python3 -m sglang.bench_serving --backend sglang-oai --base-url http://127.0.0.1:8000 \
+  --model $MODEL --dataset-name random \
+  --random-input-len 70000 --random-output-len 300 --random-range-ratio 1.0 \
+  --num-prompts 64 --max-concurrency 16 --request-rate inf --warmup-requests 16 \
+  --output-file isl70000_osl300_c16.jsonl
+# conc 32
+python3 -m sglang.bench_serving --backend sglang-oai --base-url http://127.0.0.1:8000 \
+  --model $MODEL --dataset-name random \
+  --random-input-len 70000 --random-output-len 300 --random-range-ratio 1.0 \
+  --num-prompts 128 --max-concurrency 32 --request-rate inf --warmup-requests 32 \
+  --output-file isl70000_osl300_c32.jsonl
+```
+
+### conc 4 alternative → dp8 (17,811 tok/s; ≈ tied with deepep at conc 4)
+env: the 6 tp8 vars above **plus** `SGLANG_DP_USE_REDUCE_SCATTER=1` and `SGLANG_DP_USE_GATHERV=1`.
+server:
+```bash
+sglang serve --model-path $MODEL --host 0.0.0.0 --port 8000 --trust-remote-code \
+  --tp 8 --dp 8 --enable-dp-attention \
+  --disable-radix-cache --max-running-requests 64 --mem-fraction-static 0.80 \
+  --swa-full-tokens-ratio 0.1 --moe-runner-backend flashinfer_mxfp4 \
+  --chunked-prefill-size 131072 --disable-flashinfer-autotune \
+  --kv-cache-dtype fp8_e4m3 --context-length 73728 --cuda-graph-max-bs 64
+```
+(client same as conc 4 above.)
+
+## Artifacts (rerun)
+- Full writeup + raw data: `/dockerx/raid/home/wunhuang/workspace/dsv4_70k_rerun_2026-07-13/`
+  (`RESULTS_70k300_b200_rerun.md`, `server_config{A,B}.log`, `server_deepep.log`
+  (si=20), `server_deepep_si1.log` (si=1), `client_{tp8,dp8,deepep,deepep_si1}.log`,
+  `bench_results/{tp8,dp8,deepep,deepep_si1}/*.jsonl`, `extract.py`).
+- deepep si=20 vs si=1 TTT (conc 2/4/8/16/32): 10.8k/17.1k/38.4k/47.8k/64.1k →
+  11.4k/19.0k/43.4k/57.0k/65.9k. si=1 is the reported result.

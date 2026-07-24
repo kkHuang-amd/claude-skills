@@ -1,0 +1,409 @@
+diff --git a/kernels/mega_moe/mega_moe.py b/kernels/mega_moe/mega_moe.py
+index c511f8e..0ab5978 100644
+--- a/kernels/mega_moe/mega_moe.py
++++ b/kernels/mega_moe/mega_moe.py
+@@ -405,6 +405,7 @@ class MegaMoE:
+         enable_fused_stage1: bool = True,
+         enable_fused_stage2: bool = True,
+         gate_mode=None,
++        decode_cap: int = 0,
+     ):
+         if quant not in ("a8w4", "a4w4"):
+             raise ValueError(f"MegaMoE quant must be 'a8w4' or 'a4w4', got {quant!r}")
+@@ -421,6 +422,11 @@ class MegaMoE:
+         self.mtpr = int(max_tok_per_rank)
+         self.enable_fused_stage1 = bool(enable_fused_stage1)
+         self.enable_fused_stage2 = bool(enable_fused_stage2)
++        # Single-instance dual-mode: a 2nd fixed-slot (decode) stage-1 kernel + disp-table
++        # built over the SAME comb_op buffers (no 2nd comb_op -> no shared-heap coexistence
++        # hang). Selected at run() via decode=. 0 = disabled (single/compact mode only).
++        self._decode_cap = int(decode_cap)
++        self._s1_mega_dec = None
+         # gate-up mode default: INTERLEAVE(g1u1) for a8w4, SEPARATED for a4w4 (the caller's
+         # w1/w1_scale shuffle MUST match; INTERLEAVE -> shuffle_weight_w4/shuffle_scale_w4 gate_up=True).
+         self.gate_mode = (
+@@ -634,6 +640,53 @@ class MegaMoE:
+             if dist.is_initialized():
+                 dist.barrier()
+ 
++        # Optional 2nd (decode) fixed-slot kernel, built over the SAME comb_op buffers (NO 2nd
++        # comb_op -> avoids the shared-heap coexistence hang). Only meaningful when the primary is
++        # compact (large mtpr); a small decode cap uses the fast 1-round fixed-slot dispatch. Its
++        # num_valid_max is sized for decode_cap and MUST fit inside the (larger, compact-sized) op
++        # buffers we reuse. Different fuse_cap -> distinct module name -> a separate compiled kernel.
++        if self._decode_cap > 0 and self._s1_compact:
++            _dec_unit = int(self.sort_block_m)
++            _dec_ll_cap = ((self.world_size * self._decode_cap + _dec_unit - 1) // _dec_unit) * _dec_unit
++            self._s1_nvm_dec = self.epr * _dec_ll_cap + 256
++            self._s1_max_blocks_dec = (self._s1_nvm_dec + _dec_unit - 1) // _dec_unit
++            assert self._s1_nvm_dec <= self._s1_nvm, (
++                f"[mega] decode nvm {self._s1_nvm_dec} exceeds compact op nvm {self._s1_nvm}; "
++                f"lower decode_cap={self._decode_cap}"
++            )
++            for pe in range(self.world_size):
++                if self.rank == pe:
++                    self._s1_mega_dec = compile_fused_moe_gemm1(
++                        model_dim=self.model_dim, inter_dim=self.inter_dim, experts=self.experts,
++                        topk=1, tile_m=self._s1_unit_size, tile_n=self._s1_tile_n, tile_k=tile_k,
++                        a_dtype=self.a2_dtype, b_dtype="fp4", out_dtype=out_dtype,
++                        gate_mode=self.gate_mode, waves_per_eu=waves_per_eu, use_async_copy=use_async_copy,
++                        b_nt=self._s1_b_nt, slice_k=self._s1_slice_k, xcd_swizzle=self._s1_xcd,
++                        fuse_dispatch=self.mega_scheme, fuse_npes=self.world_size, fuse_topk=self.topk,
++                        fuse_cap=_dec_ll_cap, fuse_mtpr=self._decode_cap,
++                        fuse_scale_dim=self._s1_scale_dim, fuse_scale_type_size=1,
++                        rank=self.rank, experts_per_rank=self.epr, compact_dispatch=False,
++                    )
++                if dist.is_initialized():
++                    dist.barrier()
++            # Decode-mode's OWN coordination flags: these carry cross-launch protocol/epoch state,
++            # so sharing them with the compact path lets a decode capture/run corrupt the compact
++            # flags -> deadlock. Give decode its own set (symmetric ones allocated lockstep across
++            # ranks). Payload/output buffers (rx_em/srcmap_em/sorted_*/num_valid/sw_atom) stay shared
++            # (fully overwritten each launch; only one mode runs per launch).
++            self._s1_running_dec = op._sym((self.epr,), torch.int32)
++            self._s1_ll_count_dec = op._sym((self.epr,), torch.int32)
++            self._s1_done2_dec = op._sym((self.world_size,), torch.int32)
++            self._s1_recv_num_dec = op._sym((self.world_size,), torch.int32)
++            self._s1_dest_ctr_dec = torch.zeros(self.world_size, dtype=torch.int32, device=self.dev)
++            self._s1_gb1_dec = torch.zeros(1, dtype=torch.int64, device=self.dev)
++            self._s1_meta_dec = torch.zeros(1, dtype=torch.int32, device=self.dev)
++            self._s1_p2p_running_dec = op._p2p_table(self._s1_running_dec)
++            self._s1_p2p_done2_dec = op._p2p_table(self._s1_done2_dec)
++            self._s1_p2p_recv_num_dec = op._p2p_table(self._s1_recv_num_dec)
++            torch.cuda.synchronize()
++            ms.shmem_barrier_all()
++
+         # Views into op buffers (A-input + raw A-scale + metadata the GEMM consumes).
+         v = op._ll_views()
+         self._s1_rx = v["rx_em"]
+@@ -687,30 +740,48 @@ class MegaMoE:
+             wts_buf=self._s1_sw_atom,
+         )
+ 
+-    def _build_disp_table(self):
++    def _disp_tbl(self, compact, dec=False):
+         op = self._s1_op
++        # Coordination flags carry cross-launch protocol/epoch state -> the decode (fixed-slot)
++        # path uses its OWN set (self._s1_*_dec) so a decode capture/run can't corrupt the compact
++        # path's flags. Payload/output buffers below are shared (overwritten each launch).
++        if dec:
++            gb1, running, done2, ll_count = (
++                self._s1_gb1_dec, self._s1_running_dec, self._s1_done2_dec, self._s1_ll_count_dec)
++            p2p_running, p2p_done2 = self._s1_p2p_running_dec, self._s1_p2p_done2_dec
++            meta = self._s1_meta_dec
++            # total_recv MUST stay shared: stage-2 combine reads op.total_recv natively.
++            total_recv = self._s1_trecv_buf if self._s1_trecv_buf is not None else op.total_recv
++            dest_ctr = self._s1_dest_ctr_dec
++            recv_num, p2p_recv_num = self._s1_recv_num_dec, self._s1_p2p_recv_num_dec
++        else:
++            gb1, running, done2, ll_count = op.gb1, op.running, op.done2, op.ll_count
++            p2p_running, p2p_done2 = op.p2p_running, op.p2p_done2
++            meta = self._s1_meta
++            total_recv = self._s1_trecv_buf if self._s1_trecv_buf is not None else op.total_recv
++            dest_ctr, recv_num, p2p_recv_num = op.dest_ctr, op.recv_num, op.p2p_recv_num
+         tbl = [
+             0,
+             0,
+             0,
+             0,  # 0-3 inputs (lazy)
+-            op.gb1.data_ptr(),
+-            op.running.data_ptr(),
+-            op.done2.data_ptr(),
+-            op.ll_count.data_ptr(),  # 4-7
++            gb1.data_ptr(),
++            running.data_ptr(),
++            done2.data_ptr(),
++            ll_count.data_ptr(),  # 4-7
+             op.p2p_rx_em.data_ptr(),
+             op.p2p_scale_em.data_ptr(),
+             op.p2p_idx_em.data_ptr(),
+             op.p2p_wts_em.data_ptr(),
+             op.p2p_srcmap_em.data_ptr(),
+-            op.p2p_running.data_ptr(),
+-            op.p2p_done2.data_ptr(),  # 8-14
++            p2p_running.data_ptr(),
++            p2p_done2.data_ptr(),  # 8-14
+             op.sorted_expert_ids.data_ptr(),
+             op.tile_row_base.data_ptr(),
+             op.num_valid.data_ptr(),  # 15-17
+-            self._s1_meta.data_ptr(),
++            meta.data_ptr(),
+         ]  # 18 metadata-ready flag
+-        if self._s1_compact:
++        if compact:
+             # 19-35: compact count-first extras
+             tbl += [
+                 op.compact_base.data_ptr(),
+@@ -746,27 +817,48 @@ class MegaMoE:
+             tbl += [
+                 op.srcmap_em.data_ptr(),  # 19 LOCAL srcmap (k_slot<<24|src_global)
+                 self._s1_sw_atom.data_ptr(),  # 20 compact sorted_weights out
+-                (self._s1_trecv_buf if self._s1_trecv_buf is not None else op.total_recv).data_ptr(),
+-                op.dest_ctr.data_ptr(),  # 21 total_recv | 22 dest_ctr(local)
+-                op.recv_num.data_ptr(),
+-                op.p2p_recv_num.data_ptr(),  # 23 recv_num(local) | 24 p2p_recv_num
++                total_recv.data_ptr(),
++                dest_ctr.data_ptr(),  # 21 total_recv | 22 dest_ctr(local)
++                recv_num.data_ptr(),
++                p2p_recv_num.data_ptr(),  # 23 recv_num(local) | 24 p2p_recv_num
+                 self._s1_wts_sorted.data_ptr(),
+             ]  # 25 sorted-row weights out
++        return tbl
++
++    def _build_disp_table(self):
++        # Primary (compact prefill) dispatch-arg table; plus a decode (fixed-slot) table over the
++        # SAME op buffers when the 2nd kernel was built. Only ONE runs per launch (see _run).
++        tbl = self._disp_tbl(self._s1_compact)
+         self._s1_disp = torch.tensor(tbl, dtype=torch.int64, device=self.dev)
+         self._s1_disp_host = torch.tensor(tbl, dtype=torch.int64)
++        if self._s1_mega_dec is not None:
++            tbl_dec = self._disp_tbl(False, dec=True)
++            self._s1_disp_dec = torch.tensor(tbl_dec, dtype=torch.int64, device=self.dev)
++            self._s1_disp_dec_host = torch.tensor(tbl_dec, dtype=torch.int64)
+ 
+     def _s1_agv(self, t):
+         return t.view(torch.uint8) if self.a2_dtype == "fp4" else t
+ 
+-    def _run_fused_stage1(self, x, wts, scales, topk_ids, stream=None) -> "Stage1Output":
++    def _run_fused_stage1(self, x, wts, scales, topk_ids, stream=None, decode=False) -> "Stage1Output":
+         """Run the WHOLE fused stage-1 (dispatch + group-GEMM) in ONE launch.
+ 
+-        Returns the stable ``Stage1Output`` (its buffers are overwritten here).
++        ``decode=True`` selects the 2nd fixed-slot (small-cap) kernel + disp-table built over the
++        SAME comb_op buffers; else the primary (compact/prefill) kernel. Only ONE runs per launch,
++        so the shared op buffers/flags never race. Returns the stable ``Stage1Output``.
+         """
+         if stream is None:
+             stream = fx.Stream(torch.cuda.current_stream())
+         cur_tok = int(x.shape[0])
+-        assert cur_tok <= self.mtpr, f"[mega] cur_tok={cur_tok} > max_tok_per_rank={self.mtpr}"
++        use_dec = bool(decode) and (self._s1_mega_dec is not None)
++        if use_dec:
++            kern, disp = self._s1_mega_dec, self._s1_disp_dec
++            nvm, max_blocks, compact_mode, cap = (
++                self._s1_nvm_dec, self._s1_max_blocks_dec, False, self._decode_cap)
++        else:
++            kern, disp = self._s1_mega, self._s1_disp
++            nvm, max_blocks, compact_mode, cap = (
++                self._s1_nvm, self._s1_max_blocks, self._s1_compact, self.mtpr)
++        assert cur_tok <= cap, f"[mega] cur_tok={cur_tok} > cap={cap} (decode={use_dec})"
+         xc = x.contiguous()
+         wc = wts.contiguous()
+         ic = topk_ids.to(torch.int32).contiguous()
+@@ -774,21 +866,26 @@ class MegaMoE:
+         op = self._s1_op
+ 
+         pd_ptr = 0
+-        # total_recv accumulates in-kernel each launch -> zero first (graph-safe).
++        # total_recv accumulates in-kernel each launch -> zero first (graph-safe). Shared across
++        # modes (stage-2 combine reads op.total_recv); zeroed here so per-launch accumulation is clean.
+         (self._s1_trecv_buf if self._s1_trecv_buf is not None else op.total_recv).zero_()
+-        er_ptr = op.ll_count.data_ptr() if (self.mega_scheme == "fixedslot" and not self._s1_compact) else 0
+-        if self._s1_compact:
++        if use_dec:
++            # decode uses its OWN ll_count (er_ptr must match disp-table idx 7 = _s1_ll_count_dec).
++            er_ptr = self._s1_ll_count_dec.data_ptr() if self.mega_scheme == "fixedslot" else 0
++        else:
++            er_ptr = op.ll_count.data_ptr() if (self.mega_scheme == "fixedslot" and not compact_mode) else 0
++        if compact_mode:
+             op.local_hist.zero_()
+             op.local_cursor.zero_()
+         a_mat = self._s1_agv(self._s1_rx)
+-        if self._s1_compact:
++        if compact_mode:
+             sorted_arg = self._s1_trb
+             se_arg = self._s1_se
+         else:
+             sorted_arg = self._s1_sti
+             se_arg = self._s1_se_atom
+         wt_arg = op.wts_em
+-        self._s1_mega(
++        kern(
+             self._s1_out,
+             a_mat,
+             self._s1_w1,
+@@ -800,13 +897,13 @@ class MegaMoE:
+             self._s1_nv,
+             self._s1_bias,
+             self._s1_osd,
+-            fx.Int32(self._s1_nvm),
++            fx.Int32(nvm),
+             fx.Int32(self.inter_dim * 2),
+             fx.Int32(self.model_dim),
+-            fx.Int32(self._s1_max_blocks),
++            fx.Int32(max_blocks),
+             fx.Int64(pd_ptr),
+             fx.Int64(er_ptr),
+-            fx.Int64(self._s1_disp.data_ptr()),
++            fx.Int64(disp.data_ptr()),
+             fx.Int32(cur_tok),
+             fx.Int64(xc.data_ptr()),
+             fx.Int64(ic.data_ptr()),
+@@ -1269,11 +1366,12 @@ class MegaMoE:
+             )
+         return out_tok[:run_tokens] if slice_output else out_tok
+ 
+-    def forward(self, x_bf16, wts, topk_ids, *, stream=None, slice_output: bool = True):
++    def forward(self, x_bf16, wts, topk_ids, *, stream=None, slice_output: bool = True, decode: bool = False):
+         """Full MoE layer: bf16 activation in -> stage1 (fused or non-fused) -> stage2 -> bf16 out.
+ 
+         Fused stage-1 quantizes internally then runs the megakernel; non-fused stage-1 bf16-dispatches
+-        then recv-quantizes + moe_sorting + GEMM1.
++        then recv-quantizes + moe_sorting + GEMM1. ``decode=True`` uses the fixed-slot decode kernel
++        (dual-mode); the caller MUST pass the same value on every EP rank (collective dispatch).
+         """
+         run_tokens = int(x_bf16.shape[0])
+         if run_tokens > self.mtpr:
+@@ -1282,7 +1380,7 @@ class MegaMoE:
+         ic = topk_ids.to(torch.int32).contiguous()
+         if self.enable_fused_stage1:
+             x_q, scales = self.quantize(x_bf16[:run_tokens])
+-            s1 = self._run_fused_stage1(x_q, wc, scales, ic, stream=stream)
++            s1 = self._run_fused_stage1(x_q, wc, scales, ic, stream=stream, decode=decode)
+         else:
+             s1 = self._run_nonfused_stage1(x_bf16[:run_tokens].contiguous(), wc, ic)
+         return self._run_stage2(s1, run_tokens, stream, slice_output)
+@@ -1290,9 +1388,12 @@ class MegaMoE:
+     # bf16 in, bf16 out; primary entry.
+     forward_bf16 = forward
+ 
+-    def forward_prequant(self, x_q, scales, wts, topk_ids, *, stream=None, slice_output: bool = True):
++    def forward_prequant(self, x_q, scales, wts, topk_ids, *, stream=None, slice_output: bool = True,
++                         decode: bool = False):
+         """Pre-quantized fast path (fp8/fp4 + e8m0 scale in). Requires fused stage-1 (which consumes
+-        x_q directly); for non-fused stage-1 use ``forward(x_bf16, ...)`` (bf16 dispatch)."""
++        x_q directly); for non-fused stage-1 use ``forward(x_bf16, ...)`` (bf16 dispatch).
++        ``decode=True`` uses the fixed-slot decode kernel; caller MUST pass the same value on every
++        EP rank (collective dispatch)."""
+         if not self.enable_fused_stage1:
+             raise ValueError(
+                 "forward_prequant requires enable_fused_stage1=True (pre-quantized input feeds the "
+@@ -1303,7 +1404,7 @@ class MegaMoE:
+             raise ValueError(f"run_tokens={run_tokens} > max_tok_per_rank={self.mtpr}")
+         wc = wts.contiguous()
+         ic = topk_ids.to(torch.int32).contiguous()
+-        s1 = self._run_fused_stage1(x_q, wc, scales, ic, stream=stream)
++        s1 = self._run_fused_stage1(x_q, wc, scales, ic, stream=stream, decode=decode)
+         return self._run_stage2(s1, run_tokens, stream, slice_output)
+ 
+     __call__ = forward
+diff --git a/tests/kernels/test_mega_moe.py b/tests/kernels/test_mega_moe.py
+index 426ee9f..7ef8838 100644
+--- a/tests/kernels/test_mega_moe.py
++++ b/tests/kernels/test_mega_moe.py
+@@ -411,12 +411,14 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
+     if rank == 0 and (not (_s1_fused and _s2_fused) or _mega_gate_mode != "separated"):
+         _info(rank, f"[full-e2e] MegaMoE modes: stage1_fused={_s1_fused} stage2_fused={_s2_fused} "
+                     f"gate_mode={_mega_gate_mode}")
++    _dec_cap_build = int(getattr(args, "hang_decode_mtpr", 512)) if int(getattr(args, "hang_iters", 0)) > 0 else 0
+     moe = MegaMoE(
+         rank=rank, world_size=world, model_dim=model_dim, inter_dim=inter_dim,
+         experts=experts, topk=topk, quant=args.quant, w1=_w1_arg_mega, w1_scale=_w1s_arg_mega,
+         w2=w2_kernel, w2_scale=w2_scale_1d, max_tok_per_rank=mtpr,
+         gemm2_tile_m=_tm2_mega, gemm2_tile_n=tn2, gemm2_tile_k=tk2,
+-        enable_fused_stage1=_s1_fused, enable_fused_stage2=_s2_fused, gate_mode=_mega_gate_mode)
++        enable_fused_stage1=_s1_fused, enable_fused_stage2=_s2_fused, gate_mode=_mega_gate_mode,
++        decode_cap=_dec_cap_build)
+     torch.cuda.synchronize(); ms.shmem_barrier_all()
+ 
+     _mega_out_holder = {}
+@@ -430,6 +432,67 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
+     _mega_body(); torch.cuda.synchronize(); ms.shmem_barrier_all()
+     out_mega = _mega_out_holder["o"][:run_tokens].float().cpu().numpy().copy()
+ 
++    # ===================== 5b. SINGLE-INSTANCE dual-mode (approach A) test =====================
++    # ONE MegaMoE built with decode_cap>0 has BOTH a compact(prefill) and a fixed-slot(decode)
++    # stage-1 kernel over the SAME comb_op buffers. Alternate forward_prequant(decode=False/True)
++    # on the SAME instance: validates no-hang + decode-output correctness (vs single-shot).
++    _hang_iters = int(getattr(args, "hang_iters", 0))
++    if _hang_iters > 0:
++        import time as _time
++        _dmtpr = int(getattr(args, "hang_decode_mtpr", 512))
++        _dtok = min(_dmtpr, run_tokens, int(getattr(args, "hang_decode_tokens", 64)))
++        _has_dec = getattr(moe, "_s1_mega_dec", None) is not None
++        _info(rank, f"[dual-mode] SINGLE instance mtpr={mtpr} decode_cap={_dmtpr} (dec_kernel_built={_has_dec}); "
++                    f"alternate prefill(tok={run_tokens},decode=F) <-> decode(tok={_dtok},decode=T) x{_hang_iters}")
++        _xd, _sd = x_q[:_dtok].contiguous(), x_sc[:_dtok].contiguous()
++        _wd, _id = wc[:_dtok].contiguous(), ic[:_dtok].contiguous()
++        # single-shot warmup each mode (jit compile); keep decode ref for the corruption check.
++        _o_dec0 = moe.forward_prequant(_xd, _sd, _wd, _id, decode=True)[:_dtok].float().cpu().numpy().copy()
++        torch.cuda.synchronize()
++        _ = moe.forward_prequant(x_q, x_sc, wc, ic, decode=False); torch.cuda.synchronize()
++        ms.shmem_barrier_all()
++        _info(rank, "[dual-mode] warmup BOTH modes on the SAME instance OK; entering alternating loop")
++        _od = None
++        _diverge = int(getattr(args, "hang_diverge", -1))
++        for _i in range(_hang_iters):
++            _t0 = _time.time()
++            if _diverge >= 0 and _i == _diverge:
++                # FORCE cross-rank mode divergence: rank0 -> prefill(compact), others -> decode(fixed-slot),
++                # SIMULTANEOUSLY. stage-1 dispatch is a cross-PE collective over ALL ranks; picking different
++                # modes makes them wait on DIFFERENT shmem flags (fixed-slot recv_num vs compact done2) ->
++                # rendezvous deadlock. Host prints prove it: all ranks print RETURNED (async launch) but none
++                # print SURVIVED (torch.cuda.synchronize blocks on the GPU-side spin).
++                _mode_dec = (rank != 0)
++                _info(rank, f"[dual-mode] *** iter {_i}: FORCING DIVERGENCE rank={rank} decode={_mode_dec} "
++                            f"(rank0=prefill/compact, others=decode/fixedslot) ***")
++                ms.shmem_barrier_all()
++                if _mode_dec:
++                    _od = moe.forward_prequant(_xd, _sd, _wd, _id, decode=True)
++                else:
++                    _ = moe.forward_prequant(x_q, x_sc, wc, ic, decode=False)
++                _info(rank, f"[dual-mode] rank={rank} divergent forward RETURNED (async launch ok); calling synchronize...")
++                torch.cuda.synchronize()
++                _info(rank, f"[dual-mode] rank={rank} SURVIVED divergence (post-sync) -- NO deadlock")
++                ms.shmem_barrier_all()
++                if rank == 0:
++                    print("[DUAL-MODE-DIVERGE] SURVIVED (no hang) -- divergence hypothesis NOT reproduced", flush=True)
++                return dict(dual_mode_ok=True, diverge_survived=True)
++            _od = moe.forward_prequant(_xd, _sd, _wd, _id, decode=True); torch.cuda.synchronize()
++            _ = moe.forward_prequant(x_q, x_sc, wc, ic, decode=False); torch.cuda.synchronize()
++            if rank == 0 and (_i % 5 == 0 or _i == _hang_iters - 1):
++                _info(rank, f"[dual-mode]   iter {_i} ok ({(_time.time()-_t0)*1e3:.1f} ms/pair)")
++        ms.shmem_barrier_all()
++        _od_np = _od[:_dtok].float().cpu().numpy()
++        _finite = bool(_np.isfinite(_od_np).all())
++        _corrupt = _relL2(_od_np, _o_dec0)   # alternating decode vs its own single-shot -> should be ~0
++        _ok = _finite and (_corrupt < 1e-3)
++        _ok_all = _all_max(dev, 0.0 if _ok else 1.0) < 0.5
++        if rank == 0:
++            print(f"[DUAL-MODE] {args.network} {args.quant} prefill_bs={run_tokens} decode_bs={_dtok} "
++                  f"dec_kernel={_has_dec} -> {'OK' if _ok_all else 'CORRUPT'} (NO HANG, {_hang_iters} iters); "
++                  f"decode finite={_finite} corrupt_relL2={_corrupt:.3e}", flush=True)
++        return dict(dual_mode_ok=True, dual_mode_corrupt=_corrupt, dual_mode_finite=_finite)
++
+     # ============ 6. ATOM-bf16 baseline: bf16 dispatch -> recv-quant -> sort -> gemm1 -> fused stage2 ============
+     cfg_a = FlyDSLDispatchCombineConfig(
+         rank=rank, world_size=world, hidden_dim=model_dim, max_num_inp_token_per_rank=mtpr,
+@@ -695,6 +758,10 @@ def run_one(args, rank, world, dev):
+     epr = experts // world
+ 
+     mtpr = max(16, run_tokens)
++    if int(getattr(args, "mtpr", 0)) > 0:
++        mtpr = int(args.mtpr)  # override: reproduce large-mtpr + few-token (decode-in-serving)
++        if mtpr < run_tokens or (mtpr & (mtpr - 1)) != 0:
++            raise SystemExit(f"--mtpr={mtpr} must be a power of two and >= tokens={run_tokens}")
+     T = _prepare(dev, quant=args.quant, tokens=run_tokens, model_dim=model_dim,
+                  inter_dim=inter_dim, experts=experts, topk=topk, seed=args.seed, rank=rank,
+                  world=world, keep_ref=False)
+@@ -720,6 +787,20 @@ def main():
+     p.add_argument("--network", type=str, default="v4_flash", choices=list(NETWORKS))
+     p.add_argument("--quant", type=str, default="a8w4", choices=["a8w4", "a4w4"])
+     p.add_argument("--tokens", type=int, default=64)
++    p.add_argument("--mtpr", type=int, default=0,
++                   help="override max_tok_per_rank (pow2, >=tokens); decode-in-serving repro.")
++    p.add_argument("--hang-iters", type=int, default=0,
++                   help="dual-instance coordination test: build a 2nd (decode) MegaMoE with "
++                        "--hang-decode-mtpr and ALTERNATE decode<->prefill forwards N iters, "
++                        "checking for hang + decode-output corruption. 0=off.")
++    p.add_argument("--hang-decode-mtpr", type=int, default=512,
++                   help="max_tok_per_rank for the 2nd (decode) instance in the --hang-iters test.")
++    p.add_argument("--hang-decode-tokens", type=int, default=64,
++                   help="token count fed to the decode instance in the --hang-iters test.")
++    p.add_argument("--hang-diverge", type=int, default=-1,
++                   help="force cross-rank MODE divergence at this iter of the --hang-iters loop: rank0 runs "
++                        "prefill(compact) while ranks 1..N-1 run decode(fixed-slot) SIMULTANEOUSLY, to "
++                        "reproduce the cross-PE rendezvous deadlock. -1=off (default).")
+     p.add_argument("--topk", type=int, default=-1,
+                    help="-1 (default) = use the network's native topk (r1_v3=8, v4_*=6); >0 overrides")
+     p.add_argument("--waves-per-eu", type=int, default=4)

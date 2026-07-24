@@ -1,0 +1,768 @@
+diff --git a/aiter/fused_moe.py b/aiter/fused_moe.py
+index f9cbea93b..a01d3ab11 100644
+--- a/aiter/fused_moe.py
++++ b/aiter/fused_moe.py
+@@ -552,6 +552,45 @@ def fused_moe_(
+     if grouped_a8w4_out is not None:
+         return grouped_a8w4_out
+ 
++    # Opt-in gfx950 masked (deep_gemm-style) a8w4 MoE (default off; no-op unless
++    # AITER_GFX950_MASKED_MOE=1). See ops/flydsl/grouped_moe_gfx950.py.
++    if is_flydsl_available():
++        try:
++            from aiter.ops.flydsl.grouped_moe_gfx950 import (
++                _maybe_grouped_gfx950_masked_moe,
++            )
++        except ImportError:
++            _maybe_grouped_gfx950_masked_moe = None
++        if _maybe_grouped_gfx950_masked_moe is not None:
++            _gfx950_masked_out = _maybe_grouped_gfx950_masked_moe(
++                hidden_states,
++                w1,
++                w2,
++                topk_weight,
++                topk_ids,
++                E=E,
++                model_dim=model_dim,
++                inter_dim=inter_dim,
++                dtype=dtype,
++                activation=activation,
++                quant_type=quant_type,
++                q_dtype_a=q_dtype_a,
++                q_dtype_w=q_dtype_w,
++                isG1U1=isG1U1,
++                doweight_stage1=doweight_stage1,
++                w1_scale=w1_scale,
++                w2_scale=w2_scale,
++                expert_mask=expert_mask,
++                hidden_pad=hidden_pad,
++                intermediate_pad=intermediate_pad,
++                bias1=bias1,
++                bias2=bias2,
++                gate_mode=gate_mode,
++                swiglu_limit=swiglu_limit,
++            )
++            if _gfx950_masked_out is not None:
++                return _gfx950_masked_out
++
+     metadata = get_2stage_cfgs(
+         get_padded_M(M),  # consider token_num > 1024 as prefill
+         model_dim,
+diff --git a/aiter/ops/flydsl/grouped_moe_gfx1250.py b/aiter/ops/flydsl/grouped_moe_gfx1250.py
+index 2fc0e6504..4fc18824e 100644
+--- a/aiter/ops/flydsl/grouped_moe_gfx1250.py
++++ b/aiter/ops/flydsl/grouped_moe_gfx1250.py
+@@ -1158,6 +1158,17 @@ def _get_compiled_route_maps():
+     return build_moe_route_maps_module()
+ 
+ 
++@functools.cache
++def _get_compiled_route_maps_guarded():
++    """Compile and cache the BOUNDS-GUARDED atomic route kernel (cuda-graph-safe:
++    skips e>=experts / slot>=max_m instead of OOB-storing)."""
++    from aiter.ops.flydsl.kernels.moe_route_maps import (
++        build_moe_route_maps_guarded_module,
++    )
++
++    return build_moe_route_maps_guarded_module()
++
++
+ @functools.cache
+ def _get_compiled_contiguous_psum():
+     """Compile and cache the contiguous M-tile prefix-sum kernel."""
+diff --git a/aiter/ops/flydsl/kernels/mixed_moe_gemm_2stage.py b/aiter/ops/flydsl/kernels/mixed_moe_gemm_2stage.py
+index f5ed73d35..ed633c127 100644
+--- a/aiter/ops/flydsl/kernels/mixed_moe_gemm_2stage.py
++++ b/aiter/ops/flydsl/kernels/mixed_moe_gemm_2stage.py
+@@ -96,8 +96,26 @@ def compile_mixed_moe_gemm1(
+     a_scale_one: bool = False,
+     xcd_swizzle: int = 0,
+     k_wave: int = 1,
++    grouped_masked_m: bool = False,
++    max_m: int = 0,
+ ):
+-    """Compile stage1 kernel: act(X @ W_gate.T, X @ W_up.T) -> [tokens*topk, inter_dim]."""
++    """Compile stage1 kernel: act(X @ W_gate.T, X @ W_up.T) -> [tokens*topk, inter_dim].
++
++    grouped_masked_m: deep_gemm-style masked path (gfx950). When True, the input/
++    output are expert-major ``[E, max_m, K]`` (per-expert stride ``max_m``) and the
++    ``arg_sorted_token_ids`` slot is REPURPOSED to carry ``masked_m[E]`` (per-expert
++    live token count). Block ``bx`` maps to (expert = bx // m_tiles_per_expert,
++    local row = (bx % m_tiles_per_expert) * sort_block_m); tiles with
++    ``bx_m >= masked_m[expert]`` early-exit. No sorted_token_ids gather. This makes
++    decode compute scale with real per-expert tokens instead of the padded recv
++    buffer (see also gemm_mxscale_gfx1250.py:694). max_m = static per-expert row
++    upper bound (cuda-graph safe)."""
++    if grouped_masked_m and max_m <= 0:
++        raise ValueError("grouped_masked_m requires max_m > 0")
++    if grouped_masked_m and (max_m % 32) != 0:
++        # per-expert scale rows must be 32-block aligned so expert*max_m splits
++        # cleanly into the mxfp8 per-1x32 scale blocks (see a_scale_row below).
++        raise ValueError(f"grouped_masked_m requires max_m % 32 == 0, got {max_m}")
+     gpu_arch = get_hip_arch()
+     allocator_pong = SmemAllocator(None, arch=gpu_arch, global_sym_name="smem0")
+     allocator_ping = SmemAllocator(None, arch=gpu_arch, global_sym_name="smem1")
+@@ -113,6 +131,14 @@ def compile_mixed_moe_gemm1(
+     is_f8_b = b_dtype == "fp8"
+ 
+     sort_block_m = max(32, tile_m)
++    if grouped_masked_m and (max_m % sort_block_m) != 0:
++        # tiles must not straddle expert boundaries in the [E, max_m, K] buffer.
++        raise ValueError(
++            f"grouped_masked_m requires max_m % sort_block_m == 0 "
++            f"(max_m={max_m}, sort_block_m={sort_block_m})"
++        )
++    # masked path: static #M-tiles per expert (cuda-graph safe upper bound)
++    m_tiles_per_expert = (max_m // sort_block_m) if grouped_masked_m else 0
+     num_waves = min(4, tile_n // 32)
+     # accumulators are reduced in LDS before the epilogue. k_wave=1 keeps the
+     num_n_waves = num_waves
+@@ -215,9 +241,10 @@ def compile_mixed_moe_gemm1(
+     gui_tag = "_gui" if gate_up_interleave else ""
+     as1_tag = "_as1" if a_scale_one else ""
+     xcd_tag = f"_xcd{xcd_swizzle}" if xcd_swizzle > 0 else ""
++    masked_tag = f"_maskm{max_m}" if grouped_masked_m else ""
+     module_name = (
+         f"mfma_moe1_silu_mul_a{a_dtype}_w{b_dtype}_{out_s}"
+-        f"_t{tile_m}x{tile_n}x{tile_k}_pm{persist_m}{fp4q_tag}{fp8q_tag}{sort_tag}{async_tag}{sk_tag}{kw_tag}{go_tag}{gui_tag}{as1_tag}{xcd_tag}_v32"
++        f"_t{tile_m}x{tile_n}x{tile_k}_pm{persist_m}{fp4q_tag}{fp8q_tag}{sort_tag}{async_tag}{sk_tag}{kw_tag}{go_tag}{gui_tag}{as1_tag}{xcd_tag}{masked_tag}_v32"
+     ).replace("-", "_")
+ 
+     cshuffle_elem_bytes = 4 if need_quant else (4 if out_is_f32 else 2)
+@@ -431,7 +458,14 @@ def compile_mixed_moe_gemm1(
+             )
+             layout_b = b_layout.layout_b
+ 
+-            sorted_m = size_expert_ids_in * arith.constant(sort_block_m, index=True)
++            if const_expr(grouped_masked_m):
++                # masked scale-x is expert-major [E, max_m, K//32]: total rows =
++                # experts*max_m (contiguous). stride_n0 only depends on c_k, so the
++                # preshuffle stride is unchanged; only the row-count (buffer size /
++                # layout bound) differs from the sorted path.
++                sorted_m = arith.constant(experts * max_m, index=True)
++            else:
++                sorted_m = size_expert_ids_in * arith.constant(sort_block_m, index=True)
+             layout_a_scale = make_preshuffle_scale_layout(
+                 arith, c_mn=sorted_m, c_k=arith.constant(model_dim, index=True)
+             )
+@@ -616,17 +650,38 @@ def compile_mixed_moe_gemm1(
+             for_ip.__enter__()
+             mi_p = for_persist.induction_variable
+             bx = bx_persist * c_pm + mi_p
+-            bx_m = bx * arith.constant(sort_block_m, index=True)
++            if const_expr(grouped_masked_m):
++                # masked: bx = flat (expert, m-tile). expert = bx // m_tiles_per_expert,
++                # local row = (bx % m_tiles_per_expert) * sort_block_m. valid count =
++                # masked_m[expert], read from the repurposed arg_sorted_token_ids slot.
++                c_mtpe = arith.constant(m_tiles_per_expert, index=True)
++                expert_idx = bx // c_mtpe
++                m_tile_local = bx - expert_idx * c_mtpe
++                bx_m = m_tile_local * arith.constant(sort_block_m, index=True)
++                bx_m_i32 = arith.index_cast(T.i32, bx_m)
++                expert_i32 = arith.index_cast(T.i32, expert_idx)
++                masked_rsrc = ptr_buffer_resource(
++                    arg_sorted_token_ids, arith.constant(experts * 4, type=T.i32)
++                )
++                valid_m_i32 = buffer_ops.buffer_load(
++                    masked_rsrc, expert_idx, vec_width=1, dtype=T.i32
++                )
++                blk_valid = arith.cmpi(CmpIPredicate.ult, bx_m_i32, valid_m_i32)
++                exp_valid = arith.cmpi(
++                    CmpIPredicate.ult, expert_i32, arith.constant(experts, type=T.i32)
++                )
++            else:
++                bx_m = bx * arith.constant(sort_block_m, index=True)
+ 
+-            bx_m_i32 = arith.index_cast(T.i32, bx_m)
+-            blk_valid = arith.cmpi(CmpIPredicate.ult, bx_m_i32, num_valid_i32)
+-            expert_i32 = buffer_ops.buffer_load(
+-                expert_rsrc, bx, vec_width=1, dtype=T.i32
+-            )
+-            expert_idx = arith.index_cast(ir.IndexType.get(), expert_i32)
+-            exp_valid = arith.cmpi(
+-                CmpIPredicate.ult, expert_i32, arith.constant(experts, type=T.i32)
+-            )
++                bx_m_i32 = arith.index_cast(T.i32, bx_m)
++                blk_valid = arith.cmpi(CmpIPredicate.ult, bx_m_i32, num_valid_i32)
++                expert_i32 = buffer_ops.buffer_load(
++                    expert_rsrc, bx, vec_width=1, dtype=T.i32
++                )
++                expert_idx = arith.index_cast(ir.IndexType.get(), expert_i32)
++                exp_valid = arith.cmpi(
++                    CmpIPredicate.ult, expert_i32, arith.constant(experts, type=T.i32)
++                )
+ 
+             def moe_gemm1_body():
+                 nonlocal k_base_idx, lds_x_pong, lds_x_ping
+@@ -683,24 +738,33 @@ def compile_mixed_moe_gemm1(
+                 x_col_local_i32 = []
+                 x_row_local = []
+ 
++                if const_expr(grouped_masked_m):
++                    c_maxm_x = arith.constant(max_m, index=True)
++                    expert_row_base = expert_idx * c_maxm_x + bx_m
+                 for i in range_constexpr(num_x_loads):
+                     row_local, col_local_i32 = x_tile_chunk_coord_i32(i)
+                     x_row_local.append(row_local)
+                     x_col_local_i32.append(col_local_i32)
+ 
+-                    sorted_row_i = bx_m + row_local
+-                    fused_i = buffer_ops.buffer_load(
+-                        sorted_rsrc, sorted_row_i, vec_width=1, dtype=T.i32
+-                    )
+-                    t_i32 = arith.andi(fused_i, mask24)
+-                    s_i32 = arith.shrui(fused_i, arith.constant(24))
+-                    t_valid = arith.cmpi(CmpIPredicate.ult, t_i32, tokens_i32)
+-                    s_valid = arith.cmpi(CmpIPredicate.ult, s_i32, topk_i32)
+-                    ts_valid = arith.andi(t_valid, s_valid)
+-                    t_safe = arith.select(ts_valid, t_i32, arith.constant(0))
++                    if const_expr(grouped_masked_m):
++                        # expert-major [E, max_m, K]: row = expert*max_m + bx_m + row_local
++                        # (no sorted_token_ids gather; padded rows are masked by blk_valid)
++                        masked_row = expert_row_base + row_local
++                        x_row_base_div4.append(masked_row * c_k_div4)
++                    else:
++                        sorted_row_i = bx_m + row_local
++                        fused_i = buffer_ops.buffer_load(
++                            sorted_rsrc, sorted_row_i, vec_width=1, dtype=T.i32
++                        )
++                        t_i32 = arith.andi(fused_i, mask24)
++                        s_i32 = arith.shrui(fused_i, arith.constant(24))
++                        t_valid = arith.cmpi(CmpIPredicate.ult, t_i32, tokens_i32)
++                        s_valid = arith.cmpi(CmpIPredicate.ult, s_i32, topk_i32)
++                        ts_valid = arith.andi(t_valid, s_valid)
++                        t_safe = arith.select(ts_valid, t_i32, arith.constant(0))
+ 
+-                    t_idx = arith.index_cast(ir.IndexType.get(), t_safe)
+-                    x_row_base_div4.append(t_idx * c_k_div4)
++                        t_idx = arith.index_cast(ir.IndexType.get(), t_safe)
++                        x_row_base_div4.append(t_idx * c_k_div4)
+ 
+                 def load_x_tile(base_k):
+                     base_k_div4 = (
+@@ -916,8 +980,15 @@ def compile_mixed_moe_gemm1(
+ 
+                 if const_expr(not a_scale_one):
+                     a_scale_bases = []
++                    if const_expr(grouped_masked_m):
++                        # expert-major [E, max_m, K//32]: scale row = expert*max_m + bx_m.
++                        # max_m is a multiple of sort_block_m (>=32), so the /32 block
++                        # index splits cleanly per expert.
++                        a_scale_row = expert_idx * arith.constant(max_m, index=True) + bx_m
++                    else:
++                        a_scale_row = bx_m
+                     for mi in range_constexpr(m_repeat_packed):
+-                        a_mni = mi + bx_m // scale_mn_pack // 16
++                        a_mni = mi + a_scale_row // scale_mn_pack // 16
+                         a_scale_bases.append(
+                             a_mni * layout_a_scale.stride_n0 + scale_lane_elem
+                         )
+@@ -1717,17 +1788,20 @@ def compile_mixed_moe_gemm1(
+                 a_scale_pong, gate_bs_pong, up_bs_pong = prefetch_ab_scale_tile(
+                     k0_scale
+                 )
+-                c_tile_m_idx = arith.constant(tile_m, index=True)
+-                tid_in_range = arith.cmpi(CmpIPredicate.ult, tx, c_tile_m_idx)
+-                if_tid = scf.IfOp(tid_in_range)
+-                with ir.InsertionPoint(if_tid.then_block):
+-                    tid_row = bx_m + tx
+-                    tid_val = buffer_ops.buffer_load(
+-                        sorted_rsrc, tid_row, vec_width=1, dtype=T.i32
+-                    )
+-                    tid_vec1 = vector.from_elements(T.vec(1, T.i32), [tid_val])
+-                    vector.store(tid_vec1, lds_tid, [tx])
+-                    scf.YieldOp([])
++                # masked path: no sorted_token_ids gather (output is expert-major,
++                # precompute_row derives the row directly), so skip the lds_tid load.
++                if const_expr(not grouped_masked_m):
++                    c_tile_m_idx = arith.constant(tile_m, index=True)
++                    tid_in_range = arith.cmpi(CmpIPredicate.ult, tx, c_tile_m_idx)
++                    if_tid = scf.IfOp(tid_in_range)
++                    with ir.InsertionPoint(if_tid.then_block):
++                        tid_row = bx_m + tx
++                        tid_val = buffer_ops.buffer_load(
++                            sorted_rsrc, tid_row, vec_width=1, dtype=T.i32
++                        )
++                        tid_vec1 = vector.from_elements(T.vec(1, T.i32), [tid_val])
++                        vector.store(tid_vec1, lds_tid, [tx])
++                        scf.YieldOp([])
+ 
+                 acc_gate = [acc_init] * num_acc_n * m_repeat
+                 acc_up = (
+@@ -2203,6 +2277,25 @@ def compile_mixed_moe_gemm1(
+                 )
+ 
+                 def precompute_row(*, row_local, row):
++                    if const_expr(grouped_masked_m):
++                        # masked expert-major output [E, max_m, inter]: the global
++                        # row = expert*max_m + (bx_m + row_local); valid iff the
++                        # local row (bx_m + row_local) < masked_m[expert]. No token
++                        # scatter and no lds_tid read.
++                        row_i32 = arith.index_cast(T.i32, row)
++                        row_valid = arith.cmpi(
++                            CmpIPredicate.ult, row_i32, valid_m_i32
++                        )
++                        global_row = (
++                            expert_idx * arith.constant(max_m, index=True) + row
++                        )
++                        row_byte_base = out_base_idx + global_row * arith.constant(
++                            out_row_stride, index=True
++                        )
++                        return (
++                            (arith.constant(0, type=T.i32), row_byte_base),
++                            row_valid,
++                        )
+                     fused2 = memref.load(lds_tid, [row_local])
+                     row_i32 = arith.index_cast(T.i32, row)
+                     row_valid0 = arith.cmpi(CmpIPredicate.ult, row_i32, num_valid_i32)
+@@ -2453,7 +2546,19 @@ def compile_mixed_moe_gemm1(
+                             )
+                             if_scale = scf.IfOp(is_scale_writer)
+                             with ir.InsertionPoint(if_scale.then_block):
+-                                row_i32_s = arith.index_cast(T.i32, row)
++                                # masked: scale row must be the GLOBAL expert-major
++                                # row (expert*max_m + row), matching the output-data
++                                # store (precompute_row). Using the local `row` here
++                                # made every expert collide on rows [0,max_m) -> a2
++                                # scale misaligned vs stage2's read (#fused-a2 bug).
++                                if const_expr(grouped_masked_m):
++                                    row_for_scale = (
++                                        expert_idx * arith.constant(max_m, index=True)
++                                        + row
++                                    )
++                                else:
++                                    row_for_scale = row
++                                row_i32_s = arith.index_cast(T.i32, row_for_scale)
+                                 col_s_i32 = col_g0_i32 >> c5_i32
+                                 d0 = row_i32_s >> c5_i32
+                                 d1 = (row_i32_s >> c4_i32) & c1_i32
+@@ -2826,6 +2931,8 @@ def compile_mixed_moe_gemm1(
+         gate_mode,
+         a_scale_one,
+         xcd_swizzle,
++        grouped_masked_m,
++        max_m,
+     )
+ 
+     @flyc.jit
+@@ -2932,14 +3039,51 @@ def compile_mixed_moe_gemm2(
+     cu_num_mul: int = 1,
+     b_nt: int = 0,
+     xcd_swizzle: int = 0,
++    grouped_masked_m: bool = False,
++    max_m: int = 0,
+ ):
+-    """Compile stage2 kernel (moe_gemm2): A2 @ W2.T -> [tokens, model_dim], atomic-add."""
++    """Compile stage2 kernel (moe_gemm2): A2 @ W2.T -> [tokens, model_dim], atomic-add.
++
++    grouped_masked_m: deep_gemm-style masked path (gfx950), the stage2 analogue of
++    ``compile_mixed_moe_gemm1``'s masked mode. Input (stage1 output) is expert-major
++    ``[E, max_m, inter]`` and the output is expert-major ``[E, max_m, model_dim]``
++    (NO token scatter / combine -- the weighted un-permute happens in a later combine
++    pass). ``arg_sorted_token_ids`` is REPURPOSED to carry ``masked_m[E]``. Requires
++    ``accumulate=False`` (plain store; each grouped row is unique), ``persist_m > 0``
++    (non-persistent scheduler), and ``sort_block_m == tile_m``."""
+     del b_nt
+     _sort_block_m = tile_m if sort_block_m <= 0 else sort_block_m
+     if const_expr(_sort_block_m != tile_m and _sort_block_m % tile_m != 0):
+         raise ValueError(
+             f"sort_block_m ({_sort_block_m}) must be a multiple of tile_m ({tile_m})"
+         )
++    if grouped_masked_m:
++        if max_m <= 0:
++            raise ValueError("grouped_masked_m requires max_m > 0")
++        if (max_m % 32) != 0:
++            raise ValueError(f"grouped_masked_m requires max_m % 32 == 0, got {max_m}")
++        if (max_m % tile_m) != 0:
++            raise ValueError(
++                f"grouped_masked_m requires max_m % tile_m == 0 "
++                f"(max_m={max_m}, tile_m={tile_m})"
++            )
++        if _sort_block_m != tile_m:
++            raise ValueError("grouped_masked_m requires sort_block_m == tile_m")
++        # accumulate=True under grouped_masked_m => FUSED combine (masked_combine):
++        # stage2 un-permutes to token-major out[M,model_dim] via row_to_token
++        # (arg_expert_ids slot) + row_weight (arg_sorted_weights slot) with atomic
++        # accumulate, instead of writing the grouped [E,max_m] buffer.
++        # ===== DEAD-END / DO NOT RELY ON (kept for diagnostics) =====
++        # This masked_combine epilogue is BUGGY: it misreads the masked MFMA acc
++        # under e_vec=2 -> out[r] = c[r%tile_m]*s2[r] (data-independent per-tile-row
++        # scalar). The canonical path does combine via a SEPARATE gather_reduce
++        # (grouped_moe_gfx1250 does the same), so this fusion is not used. Fixing
++        # needs the acc-extraction / e_vec=2 column-iteration in c_shuffle_epilog
++        # write_row_to_lds. See MORI_EP_DECODE_ROOTCAUSE.md + /tmp/dbg_combine.py.
++        # accumulate=False keeps the plain grouped store (combine done by gather_reduce).
++        if persist_m <= 0:
++            raise ValueError("grouped_masked_m requires persist_m > 0 (non-persistent)")
++    m_tiles_per_expert = (max_m // tile_m) if grouped_masked_m else 0
+ 
+     r139_xdma_first = bool(
+         use_async_copy
+@@ -3082,10 +3226,11 @@ def compile_mixed_moe_gemm2(
+     cumul_tag = f"_cumul{int(cu_num_mul)}" if int(cu_num_mul) != 1 else ""
+     xcd_tag = f"_xcd{xcd_swizzle}" if xcd_swizzle > 0 else ""
+     acc_tag = "" if accumulate else "_acc0"
++    masked_tag = f"_maskm{max_m}" if grouped_masked_m else ""
+     module_name = (
+         f"mfma_moe2_a{a_dtype}_w{b_dtype}_{out_s}_{epilog_tag}"
+         f"_t{tile_m}x{tile_n}x{tile_k}"
+-        f"_vscale_fix3_fp4opt_v1{pm_tag}{sbm_tag}{wpe_tag}{async_tag}{cumul_tag}{xcd_tag}{acc_tag}"
++        f"_vscale_fix3_fp4opt_v1{pm_tag}{sbm_tag}{wpe_tag}{async_tag}{cumul_tag}{xcd_tag}{acc_tag}{masked_tag}"
+     ).replace("-", "_")
+     lds_x_bytes = 2 * int(tile_m) * int(lds_stride) * int(a_elem_bytes)
+     lds_out_bytes = 2 * int(tile_m) * int(tile_n) if _use_cshuffle_epilog else 0
+@@ -3296,7 +3441,12 @@ def compile_mixed_moe_gemm2(
+             if const_expr(is_f4_a or is_f8_a):
+                 # #3476: use 256-padded K/32 to match host scale padding.
+                 kblk = arith.constant(scale_kblk_padded, index=True)
+-                sx_nbytes_idx = num_valid_idx * kblk
++                if const_expr(grouped_masked_m):
++                    # masked A-scale is expert-major [E*max_m, inter//32] (padded).
++                    sx_rows = arith.constant(experts * max_m, index=True)
++                    sx_nbytes_idx = sx_rows * kblk
++                else:
++                    sx_nbytes_idx = num_valid_idx * kblk
+                 sx_nbytes_i32 = arith.index_cast(T.i32, sx_nbytes_idx)
+                 sx_rsrc = ptr_buffer_resource(arg_scale_x, sx_nbytes_i32)
+             else:
+@@ -3328,6 +3478,16 @@ def compile_mixed_moe_gemm2(
+             eid_nbytes_idx = sort_blocks_ub * arith.constant(4, index=True)
+             eid_nbytes_i32 = arith.index_cast(T.i32, eid_nbytes_idx)
+             expert_rsrc = ptr_buffer_resource(arg_expert_ids, eid_nbytes_i32)
++            # masked_combine: arg_expert_ids slot carries row_to_token[E*max_m]
++            # (grouped row -> output token). Needs a full E*max_m-sized resource
++            # (expert_rsrc above is only ~E*max_m/tile_m).
++            row2tok_rsrc = None
++            if const_expr(grouped_masked_m and accumulate):
++                r2t_nbytes_i32 = arith.index_cast(
++                    T.i32,
++                    arith.constant(experts * max_m * 4, index=True),
++                )
++                row2tok_rsrc = ptr_buffer_resource(arg_expert_ids, r2t_nbytes_i32)
+             bias_rsrc = (
+                 ptr_buffer_resource(arg_bias, bias_nbytes) if enable_bias else None
+             )
+@@ -3375,34 +3535,67 @@ def compile_mixed_moe_gemm2(
+                 prev_expert_b_base = for_persist.inner_iter_args[1]
+                 bx = bx_persist * arith.constant(persist_m, index=True) + mi_p
+ 
+-            bx_m = bx * arith.constant(tile_m, index=True)
++            tokens_i32_guard = arith.index_cast(T.i32, tokens_in)
++            if const_expr(grouped_masked_m):
++                # masked: bx = flat (expert, m-tile). expert = bx // m_tiles_per_expert,
++                # local row = (bx % m_tiles_per_expert) * tile_m; masked_m[expert] (read
++                # from the repurposed arg_sorted_token_ids slot) is the live count.
++                c_mtpe = arith.constant(m_tiles_per_expert, index=True)
++                expert_idx = bx // c_mtpe
++                m_tile_local = bx - expert_idx * c_mtpe
++                bx_m = m_tile_local * arith.constant(tile_m, index=True)
++                bx_m_i32 = arith.index_cast(T.i32, bx_m)
++                expert_i32 = arith.index_cast(T.i32, expert_idx)
++                masked_rsrc = ptr_buffer_resource(
++                    arg_sorted_token_ids, arith.constant(experts * 4, type=T.i32)
++                )
++                valid_m_i32 = buffer_ops.buffer_load(
++                    masked_rsrc, expert_idx, vec_width=1, dtype=T.i32
++                )
++                blk_valid = arith.cmpi(CmpIPredicate.ult, bx_m_i32, valid_m_i32)
++                exp_valid = arith.cmpi(
++                    CmpIPredicate.ult, expert_i32, arith.constant(experts, type=T.i32)
++                )
++                expert_b_base = expert_idx * arith.constant(expert_b_stride, index=True)
++                tile_has_tokens = arith.constant(
++                    1, type=ir.IntegerType.get_signless(1)
++                )
++            else:
++                bx_m = bx * arith.constant(tile_m, index=True)
+ 
+-            bx_m_i32 = arith.index_cast(T.i32, bx_m)
+-            blk_valid = arith.cmpi(CmpIPredicate.ult, bx_m_i32, num_valid_i32)
++                bx_m_i32 = arith.index_cast(T.i32, bx_m)
++                blk_valid = arith.cmpi(CmpIPredicate.ult, bx_m_i32, num_valid_i32)
+ 
+-            sort_blk = _div_pow2(bx_m, _sort_block_m)
+-            expert_i32 = buffer_ops.buffer_load(
+-                expert_rsrc, sort_blk, vec_width=1, dtype=T.i32
+-            )
+-            expert_idx = arith.index_cast(T.index, expert_i32)
+-            exp_valid = arith.cmpi(
+-                CmpIPredicate.ult, expert_i32, arith.constant(experts, type=T.i32)
+-            )
++                sort_blk = _div_pow2(bx_m, _sort_block_m)
++                expert_i32 = buffer_ops.buffer_load(
++                    expert_rsrc, sort_blk, vec_width=1, dtype=T.i32
++                )
++                expert_idx = arith.index_cast(T.index, expert_i32)
++                exp_valid = arith.cmpi(
++                    CmpIPredicate.ult, expert_i32, arith.constant(experts, type=T.i32)
++                )
+ 
+-            if const_expr(persistent):
+-                expert_b_base = expert_idx * arith.constant(expert_b_stride, index=True)
+-            else:
+-                delta_expert = arith.subi(expert_i32, prev_expert_i32)
+-                delta_expert_idx = arith.index_cast(ir.IndexType.get(), delta_expert)
+-                delta_b = delta_expert_idx * arith.constant(expert_b_stride, index=True)
+-                expert_b_base = prev_expert_b_base + delta_b
++                if const_expr(persistent):
++                    expert_b_base = expert_idx * arith.constant(
++                        expert_b_stride, index=True
++                    )
++                else:
++                    delta_expert = arith.subi(expert_i32, prev_expert_i32)
++                    delta_expert_idx = arith.index_cast(
++                        ir.IndexType.get(), delta_expert
++                    )
++                    delta_b = delta_expert_idx * arith.constant(
++                        expert_b_stride, index=True
++                    )
++                    expert_b_base = prev_expert_b_base + delta_b
+ 
+-            first_tok = buffer_ops.buffer_load(
+-                sorted_rsrc, bx_m, vec_width=1, dtype=T.i32
+-            )
+-            first_tid = arith.andi(first_tok, arith.constant(0xFFFFFF, type=T.i32))
+-            tokens_i32_guard = arith.index_cast(T.i32, tokens_in)
+-            tile_has_tokens = arith.cmpi(CmpIPredicate.ult, first_tid, tokens_i32_guard)
++                first_tok = buffer_ops.buffer_load(
++                    sorted_rsrc, bx_m, vec_width=1, dtype=T.i32
++                )
++                first_tid = arith.andi(first_tok, arith.constant(0xFFFFFF, type=T.i32))
++                tile_has_tokens = arith.cmpi(
++                    CmpIPredicate.ult, first_tid, tokens_i32_guard
++                )
+ 
+             if const_expr(pack_M < scale_pack_m):
+                 m_off = _mod_pow2(_div_pow2(bx_m, 16), scale_pack_m)
+@@ -3511,7 +3704,16 @@ def compile_mixed_moe_gemm2(
+                     x_row_local.append(row_local)
+                     x_col_local_i32.append(col_local_i32)
+ 
+-                    if const_expr(i < num_x_addr_loads):
++                    if const_expr(grouped_masked_m):
++                        # expert-major [E, max_m, inter]: row = expert*max_m + bx_m +
++                        # row_local (no sorted_token_ids gather; padded rows masked).
++                        masked_row = (
++                            expert_idx * arith.constant(max_m, index=True)
++                            + bx_m
++                            + row_local
++                        )
++                        x_row_base_div4.append(masked_row * c_k_div4)
++                    elif const_expr(i < num_x_addr_loads):
+                         sorted_row_i = bx_m + row_local
+                         fused_i = buffer_ops.buffer_load(
+                             sorted_rsrc, sorted_row_i, vec_width=1, dtype=T.i32
+@@ -3750,6 +3952,12 @@ def compile_mixed_moe_gemm2(
+                             b_scale_tile.append(scale)
+                     return b_scale_tile
+ 
++                if const_expr(grouped_masked_m):
++                    # expert-major A-scale row = expert*max_m + bx_m (block-indexed /32)
++                    a_scale_row = expert_idx * arith.constant(max_m, index=True) + bx_m
++                else:
++                    a_scale_row = bx_m
++
+                 def load_a_scale_tile(base_k, k_shift_bits=0):
+                     a_scale_tile = []
+                     for ku in range_constexpr(k_unroll_packed):
+@@ -3759,7 +3967,7 @@ def compile_mixed_moe_gemm2(
+                                 sx_rsrc,
+                                 layout_a_scale,
+                                 ku + base_k,
+-                                mi + _div_pow2(_div_pow2(bx_m, scale_pack_m), 16),
++                                mi + _div_pow2(_div_pow2(a_scale_row, scale_pack_m), 16),
+                             )
+                             scale = apply_k_shift(scale, k_shift_bits)
+                             a_scale_tile.append(scale)
+@@ -4254,7 +4462,7 @@ def compile_mixed_moe_gemm2(
+                             vector.store(tw_vec1, lds_tw, [tx], alignment=4)
+                         scf.YieldOp([])
+ 
+-                if const_expr(not r216_defer_tid):
++                if const_expr(not r216_defer_tid and not grouped_masked_m):
+                     emit_tid_lds_prologue()
+ 
+                 k0 = arith.index(0)
+@@ -4279,7 +4487,7 @@ def compile_mixed_moe_gemm2(
+                 elif const_expr(not use_async_copy):
+                     x_regs0 = load_x_tile(k0)
+                     store_x_tile_to_lds(x_regs0, lds_base_cur)
+-                if const_expr(r216_defer_tid):
++                if const_expr(r216_defer_tid and not grouped_masked_m):
+                     emit_tid_lds_prologue()
+                     rocdl.sched_barrier(0)
+                 gpu.barrier()
+@@ -4530,6 +4738,15 @@ def compile_mixed_moe_gemm2(
+                         tw_idx = (mi * 4) + ii
+                         if const_expr(tw_pf is not None):
+                             tw = tw_pf[tw_idx]
++                        elif const_expr(grouped_masked_m):
++                            # masked_combine: row_weight indexed by GLOBAL row
++                            # (expert*max_m + local row), matching row_to_token.
++                            grow_w = (
++                                expert_idx * arith.constant(max_m, index=True) + row
++                            )
++                            tw = buffer_ops.buffer_load(
++                                sorted_w_rsrc, grow_w, vec_width=1, dtype=f32
++                            )
+                         else:
+                             tw = buffer_ops.buffer_load(
+                                 sorted_w_rsrc, row, vec_width=1, dtype=f32
+@@ -4555,6 +4772,10 @@ def compile_mixed_moe_gemm2(
+                         vector.store(v1, lds_out, [lds_idx], alignment=2)
+ 
+                 row_stride_bytes_py = int(model_dim) * int(out_elem_bytes)
++                # masked_combine also uses the buffer-atomic path (raw_ptr buffer
++                # atomic_fadd handles bf16; a plain llvm AtomicRMWOp fadd on bf16 is
++                # unsupported -> garbage). precompute_row returns a resource-relative
++                # byte offset (token*row_stride), OOB sentinel for invalid rows.
+                 use_buf_atomic = bool(accumulate) and (row_stride_bytes_py <= 16384)
+                 out_elem_bytes_i32 = (
+                     arith.constant(int(out_elem_bytes), type=T.i32)
+@@ -4563,6 +4784,41 @@ def compile_mixed_moe_gemm2(
+                 )
+ 
+                 def precompute_row(*, row_local, row):
++                    if const_expr(grouped_masked_m):
++                        # global row = expert*max_m + (bx_m + row_local); valid iff
++                        # local row < masked_m[expert].
++                        row_i32 = arith.index_cast(T.i32, row)
++                        row_valid = arith.cmpi(
++                            CmpIPredicate.ult, row_i32, valid_m_i32
++                        )
++                        global_row = (
++                            expert_idx * arith.constant(max_m, index=True) + row
++                        )
++                        if const_expr(accumulate):
++                            # masked_combine: un-permute to token-major out[M,model_dim]
++                            # via row_to_token[global_row], buffer-atomic accumulate the
++                            # topk contributions. Invalid rows -> OOB byte offset so the
++                            # buffer atomic drops them (mirrors the non-masked path).
++                            tok_i32 = buffer_ops.buffer_load(
++                                row2tok_rsrc, global_row, vec_width=1, dtype=T.i32
++                            )
++                            off_valid = tok_i32 * arith.constant(
++                                model_dim * out_elem_bytes, type=T.i32
++                            )
++                            row_byte_off_i32 = arith.select(
++                                row_valid,
++                                off_valid,
++                                arith.constant(0x7FFF0000, type=T.i32),
++                            )
++                            return ((None, None, row_byte_off_i32), None)
++                        # plain grouped store [E,max_m,model_dim] (combine later).
++                        row_byte_base = out_base_idx + global_row * arith.constant(
++                            model_dim * out_elem_bytes, index=True
++                        )
++                        return (
++                            (arith.constant(0, type=T.i32), row_byte_base, None),
++                            row_valid,
++                        )
+                     if const_expr(use_buf_atomic):
+                         row_byte_off_i32 = memref.load(lds_tid, [row_local])
+                         return (
+@@ -4714,6 +4970,8 @@ def compile_mixed_moe_gemm2(
+         waves_per_eu,
+         use_async_copy,
+         xcd_swizzle,
++        grouped_masked_m,
++        max_m,
+     )
+ 
+     @flyc.jit
+diff --git a/aiter/ops/flydsl/kernels/moe_route_maps.py b/aiter/ops/flydsl/kernels/moe_route_maps.py
+index 2e8cd5859..e07c0d18a 100644
+--- a/aiter/ops/flydsl/kernels/moe_route_maps.py
++++ b/aiter/ops/flydsl/kernels/moe_route_maps.py
+@@ -96,6 +96,91 @@ def build_moe_route_maps_module():
+     return launch_route_maps
+ 
+ 
++def build_moe_route_maps_guarded_module():
++    """Like build_moe_route_maps but BOUNDS-GUARDED: skips slots whose expert is
++    out of range (``e >= experts``) or whose per-expert slot overflows
++    (``slot >= max_m``). Required under cuda-graph capture, where the unguarded
++    kernel's OOB buffer stores fault instead of being silently dropped. Invalid /
++    overflow slots write nothing (caller pre-zeros topids_to_rows)."""
++
++    @flyc.kernel(name="moe_route_maps_guarded")
++    def route_maps_guarded_kernel(
++        topk_ids: fx.Tensor,  # (numel,) int32, expert id per route
++        atomic_buffer: fx.Tensor,  # (experts,) int32, init 0
++        topids_to_rows: fx.Tensor,  # (numel,) int32 out (pre-zeroed)
++        rows_to_tokens: fx.Tensor,  # (experts*max_m,) int32 out (pre-filled -1)
++        numel: Int32,
++        topk: Int32,
++        max_m: Int32,
++        experts: Int32,
++    ):
++        i32 = T.i32
++        route = ArithValue(fx.block_idx.x) * arith.constant(
++            BLOCK_THREADS, type=i32
++        ) + ArithValue(fx.thread_idx.x)
++        in_range = arith.cmpi(CmpIPredicate.ult, route, ArithValue(numel))
++        _if = scf.IfOp(in_range)
++        with ir.InsertionPoint(_if.then_block):
++            topk_rsrc = buffer_ops.create_buffer_resource(topk_ids, max_size=True)
++            c_rsrc = buffer_ops.create_buffer_resource(topids_to_rows, max_size=True)
++            a_rsrc = buffer_ops.create_buffer_resource(rows_to_tokens, max_size=True)
++
++            e = buffer_ops.buffer_load(topk_rsrc, route, vec_width=1, dtype=i32)
++            # guard: only real experts (e < experts) touch the atomic / stores.
++            e_ok = arith.cmpi(CmpIPredicate.slt, e, ArithValue(experts))
++            _ife = scf.IfOp(e_ok)
++            with ir.InsertionPoint(_ife.then_block):
++                base_idx = buffer_ops.extract_base_index(atomic_buffer, address_space=1)
++                e_idx = arith.index_cast(T.index, e)
++                addr = fx.Index(base_idx) + fx.Index(e_idx) * fx.Index(4)
++                ptr = buffer_ops.create_llvm_ptr(addr, address_space=1)
++                ptr = ptr._value if hasattr(ptr, "_value") else ptr
++                slot = llvm.AtomicRMWOp(
++                    llvm.AtomicBinOp.add,
++                    ptr,
++                    arith.constant(1, type=i32),
++                    llvm.AtomicOrdering.monotonic,
++                    syncscope="agent",
++                    alignment=4,
++                ).result
++                # guard: only store when slot < max_m (no overflow spill).
++                slot_ok = arith.cmpi(CmpIPredicate.slt, ArithValue(slot), ArithValue(max_m))
++                _ifs = scf.IfOp(slot_ok)
++                with ir.InsertionPoint(_ifs.then_block):
++                    row = ArithValue(slot) + ArithValue(e) * ArithValue(max_m)
++                    buffer_ops.buffer_store(row, c_rsrc, route)
++                    token = arith.divui(route, ArithValue(topk))
++                    buffer_ops.buffer_store(token, a_rsrc, row)
++                    scf.YieldOp([])
++                scf.YieldOp([])
++            scf.YieldOp([])
++
++    @flyc.jit
++    def launch_route_maps_guarded(
++        topk_ids: fx.Tensor,
++        atomic_buffer: fx.Tensor,
++        topids_to_rows: fx.Tensor,
++        rows_to_tokens: fx.Tensor,
++        numel: fx.Int32,
++        topk: fx.Int32,
++        max_m: fx.Int32,
++        experts: fx.Int32,
++        grid_blocks: fx.Int32,
++        stream: fx.Stream = fx.Stream(None),
++    ):
++        gx = arith.index_cast(T.index, grid_blocks)
++        route_maps_guarded_kernel(
++            topk_ids, atomic_buffer, topids_to_rows, rows_to_tokens,
++            numel, topk, max_m, experts,
++        ).launch(
++            grid=(gx, 1, 1),
++            block=(BLOCK_THREADS, 1, 1),
++            stream=stream,
++        )
++
++    return launch_route_maps_guarded
++
++
+ def build_moe_topids_to_rows_module():
+     """JIT launcher: builds topids_to_rows only (no rows_to_tokens inverse)."""
+ 

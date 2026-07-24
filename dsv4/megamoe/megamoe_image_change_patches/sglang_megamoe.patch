@@ -1,0 +1,155 @@
+diff --git a/python/sglang/jit_kernel/include/sgl_kernel/utils.cuh b/python/sglang/jit_kernel/include/sgl_kernel/utils.cuh
+index 684475117..1a4ad0c93 100644
+--- a/python/sglang/jit_kernel/include/sgl_kernel/utils.cuh
++++ b/python/sglang/jit_kernel/include/sgl_kernel/utils.cuh
+@@ -242,6 +242,21 @@ inline void RuntimeDeviceCheck(DebugInfo location = {}) {
+   return RuntimeDeviceCheck(::cudaGetLastError(), location);
+ }
+ 
++inline int getSMVersion(int device_id) {
++  int sm_major = 0;
++  int sm_minor = 0;
++#if defined(USE_ROCM) || defined(__HIP_PLATFORM_AMD__)
++  // ROCm/HIP: cuda* device-attr APIs/enums are not shimmed in this JIT include
++  // context; use the HIP equivalents directly.
++  hipDeviceGetAttribute(&sm_major, hipDeviceAttributeComputeCapabilityMajor, device_id);
++  hipDeviceGetAttribute(&sm_minor, hipDeviceAttributeComputeCapabilityMinor, device_id);
++#else
++  RuntimeDeviceCheck(cudaDeviceGetAttribute(&sm_major, cudaDevAttrComputeCapabilityMajor, device_id));
++  RuntimeDeviceCheck(cudaDeviceGetAttribute(&sm_minor, cudaDevAttrComputeCapabilityMinor, device_id));
++#endif
++  return sm_major * 10 + sm_minor;
++}
++
+ inline auto alloc_workspace_tensor(size_t required_bytes, DLDevice device) -> tvm::ffi::Tensor {
+   if (required_bytes == 0) return {};
+   DLDataType u8 = {kDLUInt, 8, 1};
+diff --git a/python/sglang/srt/configs/cohere2_moe.py b/python/sglang/srt/configs/cohere2_moe.py
+index cd470bd69..6a9dd9a87 100644
+--- a/python/sglang/srt/configs/cohere2_moe.py
++++ b/python/sglang/srt/configs/cohere2_moe.py
+@@ -4,12 +4,12 @@
+ from transformers.configuration_utils import PreTrainedConfig
+ from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+ 
+-try:
+-    from huggingface_hub.dataclasses import strict
+-except ImportError:  # older huggingface_hub
+-
+-    def strict(cls):  # type: ignore[misc]
+-        return cls
++# NOTE(local): huggingface_hub>=1.x's @strict requires the target to be a
++# @dataclass and rejects inherited validate_* methods, which crashes the import
++# of this non-dataclass config. Use a no-op strict (it only adds runtime field
++# validation). Not for upstream; re-apply after any repo sync (SKILL §2a).
++def strict(cls):  # type: ignore[misc]
++    return cls
+ 
+ 
+ @strict
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+index 6ff55e01d..c3be90a1c 100644
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -947,6 +947,19 @@ class Envs:
+     SGLANG_OPT_DEEPGEMM_MEGA_MOE_USE_MXF4_KIND = EnvBool(False)
+     SGLANG_OPT_FIX_MEGA_MOE_MEMORY = EnvBool(False)
+ 
++    # AMD FlyDSL Mega MoE (gfx950 / a8w4). Alternative backend to the DeepGEMM
++    # mega-moe above: routes DeepseekV2MoE through FlyDSL's fused MegaMoE over mori
++    # intranode a2a. Requires --moe-a2a-backend megamoe; this flag selects the
++    # FlyDSL implementation over DeepGEMM's.
++    SGLANG_AMD_USE_FLYDSL_MEGA_MOE = EnvBool(False)
++    # max_tok_per_rank for the FlyDSL MegaMoE symmetric buffers. MUST be power of 2.
++    SGLANG_AMD_FLYDSL_MEGA_MOE_MTPR = EnvInt(8192)
++    # Directory of the FlyDSL workspace providing `kernels.moe.mega_moe`. Falls
++    # back to $ATOM_FLYDSL_KERNELS_PATH when empty.
++    SGLANG_AMD_FLYDSL_KERNELS_PATH = EnvStr("")
++    # Force the FlyDSL MegaMoE act/weight quant ("a4w4"/"a8w4"). Empty = per-layer.
++    SGLANG_AMD_FLYDSL_MEGA_QUANT = EnvStr("")
++
+     # TopK
+     SGLANG_OPT_USE_FUSED_HASH_TOPK = EnvBool(True)
+     SGLANG_OPT_USE_JIT_KERNEL_FUSED_TOPK = EnvBool(True)
+diff --git a/python/sglang/srt/layers/moe/mega_moe.py b/python/sglang/srt/layers/moe/mega_moe.py
+index cad7ea92b..f8f9d65bb 100644
+--- a/python/sglang/srt/layers/moe/mega_moe.py
++++ b/python/sglang/srt/layers/moe/mega_moe.py
+@@ -39,6 +39,11 @@ _MEGA_MOE_SYMM_BUFFER: dict = {}
+ _MEGA_MOE_DG_ENV_APPLIED = False
+ 
+ 
++def _use_amd_flydsl_mega_moe() -> bool:
++    """Select the AMD FlyDSL MegaMoE backend over the default DeepGEMM one."""
++    return envs.SGLANG_AMD_USE_FLYDSL_MEGA_MOE.get()
++
++
+ def _apply_mega_moe_dg_env() -> None:
+     """Forward sglang's FP4/MXF4 opt-in flags to DeepGEMM via env vars.
+ 
+@@ -95,6 +100,10 @@ def _get_mega_moe_symm_buffer(
+ 
+ 
+ def should_use_mega_moe(moe: DeepseekV2MoE, hidden_states: torch.Tensor) -> bool:
++    if _use_amd_flydsl_mega_moe():
++        from sglang.srt.layers.moe import mega_moe_flydsl
++
++        return mega_moe_flydsl.should_use_mega_moe(moe, hidden_states)
+     if not get_moe_a2a_backend().is_megamoe():
+         return False
+     if not getattr(moe.experts, "_mega_moe_weights_built", False):
+@@ -117,6 +126,13 @@ def forward_mega_moe(
+     forward_batch: Optional[ForwardBatch] = None,
+     input_ids_global: Optional[torch.Tensor] = None,
+ ) -> torch.Tensor:
++    if _use_amd_flydsl_mega_moe():
++        from sglang.srt.layers.moe import mega_moe_flydsl
++
++        return mega_moe_flydsl.forward_mega_moe(
++            moe, hidden_states, forward_batch, input_ids_global
++        )
++
+     num_tokens = hidden_states.shape[0]
+ 
+     sbo_overlap_flag = (
+@@ -299,6 +315,11 @@ def _transpose_mega_moe_sf_for_utccp(sf: torch.Tensor) -> torch.Tensor:
+ 
+ 
+ def build_mega_moe_experts_weights(experts) -> None:
++    if _use_amd_flydsl_mega_moe():
++        from sglang.srt.layers.moe import mega_moe_flydsl
++
++        return mega_moe_flydsl.build_mega_moe_experts_weights(experts)
++
+     from deep_gemm import (
+         transform_sf_into_required_layout,
+         transform_weights_for_mega_moe,
+diff --git a/python/sglang/srt/layers/quantization/fp8.py b/python/sglang/srt/layers/quantization/fp8.py
+index fc920d84e..9e501b610 100644
+--- a/python/sglang/srt/layers/quantization/fp8.py
++++ b/python/sglang/srt/layers/quantization/fp8.py
+@@ -1314,6 +1314,24 @@ class Fp8MoEMethod(FusedMoEMethodBase):
+             layer.w2_input_scale = None
+ 
+     def process_weights_after_loading_block_quant(self, layer: Module) -> None:
++        # FlyDSL MegaMoE (AMD) short-circuit — MUST precede the aiter-native MXFP4
++        # path below (which returns after aiter's shuffle, making the megamoe build
++        # hook unreachable). Gated on the FlyDSL flag so the DeepGEMM megamoe path
++        # (and non-AMD) are unaffected. Wires V4's Fp8MoEMethod fp4-experts into
++        # the FlyDSL MegaMoE weight build.
++        if (
++            self.is_fp4_expert
++            and get_moe_a2a_backend().is_megamoe()
++            and envs.SGLANG_AMD_USE_FLYDSL_MEGA_MOE.get()
++        ):
++            fp4_weight_dtype = _require_fp4_dtype() if _use_aiter else torch.int8
++            layer.w13_weight.data = layer.w13_weight.data.view(fp4_weight_dtype)
++            layer.w2_weight.data = layer.w2_weight.data.view(fp4_weight_dtype)
++            from sglang.srt.layers.moe.mega_moe import build_mega_moe_experts_weights
++
++            build_mega_moe_experts_weights(layer)
++            return
++
+         # AMD FP4 experts: use aiter's native MXFP4 MoE path
+         if _use_aiter and self.is_fp4_expert:
+             gu_intv = envs.SGLANG_USE_AITER_MOE_GU_ITLV.get()

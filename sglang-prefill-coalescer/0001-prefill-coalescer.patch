@@ -1,0 +1,1532 @@
+From aa9547b986bb972b6dba2787411750e216854218 Mon Sep 17 00:00:00 2001
+From: wunhuang <wunhuang@amd.com>
+Date: Mon, 20 Jul 2026 03:28:18 +0000
+Subject: [PATCH] feat: prefill coalescer for DP-attention (faithful ATOM port)
+
+Port ATOM's cross-DP-rank prefill coalescer (ROCm/ATOM#1611) into SGLang's
+DP-attention scheduler. Rewrites PrefillDelayer as a tick-based FIRE/HOLD
+state machine evaluated every scheduler tick on every DP rank in lockstep via
+one cross-DP all_gather, replacing the previous slot/queue-ratio negotiation.
+
+Decision (on the SUM/OR-reduced per-rank state):
+  - must-fire bounds: no-decode, KV high/low watermark, end-to-end TTFT queue
+    guard (max_queue_ms), single-hold ttft_max_ticks, partial_max_ticks
+  - alignment gate: HOLD while any DP rank lacks prefill (anti-skew) so all
+    ranks enter prefill together and the MoE collective stays aligned
+  - fill target: FIRE once SUM(pending) >= target_fill * (n_prefillable *
+    max_prefill_tokens)
+  - stall give-up: FIRE if aggregate pending stops growing for stall_ticks
+
+Integrated in Scheduler.get_new_batch_prefill (called every tick before any
+early return, preserving lockstep); removes the per-request delayer checks in
+PrefillAdder. New server args: --prefill-delayer-target-fill,
+--prefill-delayer-max-queue-ms, --prefill-delayer-{ttft,partial,stall}-* ,
+--prefill-delayer-kv-high-watermark.
+
+Validated on DeepSeek-V4-Pro (8xMI355X, TBO+DPA dp8, 1k/1k c1024):
+  - gsm8k (full 1319): ON 0.939 vs OFF 0.931 -- no accuracy regression
+  - throughput A/B (random, request-rate inf):
+      uniform  (range-ratio 1.0): ~neutral (prefill already batches full)
+      fragmented (range-ratio 0.3): OFF 15,747 -> ON 20,571 tok/s (+30.6%),
+        matching ATOM's own coalescer on the same workload (+35.1%)
+The gain requires a fragmented / uneven-length DP workload (many small
+prefills); uniform simultaneous arrival shows no gain, as expected.
+
+Unit tests rewritten for the new state machine (alignment gate, fill target,
+must-fire bounds, stall give-up) in test_prefill_delayer.py.
+---
+ python/sglang/srt/managers/prefill_delayer.py | 581 ++++++++----------
+ python/sglang/srt/managers/schedule_policy.py |  22 -
+ python/sglang/srt/managers/scheduler.py       |  74 ++-
+ python/sglang/srt/server_args.py              |  52 ++
+ .../scheduler/test_prefill_delayer.py         | 490 ++++++---------
+ 5 files changed, 565 insertions(+), 654 deletions(-)
+
+diff --git a/python/sglang/srt/managers/prefill_delayer.py b/python/sglang/srt/managers/prefill_delayer.py
+index d775a35c9..e1c5697cc 100644
+--- a/python/sglang/srt/managers/prefill_delayer.py
++++ b/python/sglang/srt/managers/prefill_delayer.py
+@@ -1,8 +1,56 @@
+-import dataclasses
++"""
++PrefillDelayer — a cross-DP-rank prefill *coalescer* for SGLang.
++
++This is a faithful port of ATOM's prefill coalescer (ROCm/ATOM#1611) to
++SGLang's DP-attention scheduler. Under DP-attention each rank schedules
++independently; left alone, ranks fire many prefill forwards that each carry
++only a handful of tokens. Every prefill forward has ~fixed cost (kernel
++launch, pad-to-shape, the lockstep MoE all-to-all), so a nearly-empty forward
++wastes most of that cost.
++
++The delayer's single job: hold back prefill admission until the accumulated
++prefill is worth a forward, then release -- Nagle's algorithm for prefill.
++While it holds, decode keeps running; TTFT is bounded so a held request never
++starves. Crucially it preserves cross-DP phase alignment: it only releases
++when every rank is prefill-ready (so all ranks enter prefill together and the
++MoE collective stays aligned), except when a must-fire bound forces release.
++
++Decision (evaluated every tick, on every rank, in lockstep). Each rank reports
++local state; a single cross-DP all_gather reduces it; then every rank computes
++the SAME FIRE/HOLD from the reduced values:
++
++  n_prefillable   = #DP ranks with admittable prefill
++  G_pending       = total pending prefill tokens across ranks
++  G_running_dec   = total decode seqs across ranks
++  any_kv_high/low = any prefillable rank at/above / below a KV watermark
++  any_partial     = any rank mid-chunked-prefill
++  any_queue_hot   = any rank's oldest waiting prefill aged past max_queue_ms
++
++  if n_prefillable == 0:                          FIRE   # nothing to do
++  # -- must-fire bounds (release even if unaligned / underfilled) --
++  if G_running_dec == 0:                          FIRE   # no decode to hide the wait
++  if any_kv_high or any_kv_low:                   FIRE   # KV pressure / starvation
++  if any_queue_hot:                               FIRE   # end-to-end TTFT SLA guard
++  if hold_ticks >= ttft_max_ticks:                FIRE   # single-hold TTFT bound
++  if any_partial and hold_ticks >= partial_max_ticks: FIRE
++  # -- alignment gate: never fire while some rank lacks prefill (anti-skew) --
++  if n_prefillable < dp_size:                     HOLD
++  # -- goal: fire once the aggregate fills a worthwhile forward --
++  fill = G_pending / (n_prefillable * budget)
++  if fill >= target_fill:                         FIRE
++  # -- adaptive give-up: queue stopped growing, waiting longer is futile --
++  if G_pending <= prev_G_pending: stall += 1 else stall = 0
++  if stall >= stall_ticks:                        FIRE
++  HOLD
++
++All timing is tick-based (hold_ticks), deterministic across ranks. The one
++wall-clock input (oldest_waiting_age_ms) is compared to the threshold locally
++on each rank (disjoint request sets) and only the OR crosses the collective,
++so ranks never diverge on a timeout boundary.
++"""
++
+ import logging
+-import time
+-from dataclasses import dataclass, field
+-from typing import TYPE_CHECKING, NamedTuple, Optional
++from typing import TYPE_CHECKING, Optional
+ 
+ import torch
+ 
+@@ -16,28 +64,15 @@ _DEBUG_LOG = get_bool_env_var("SGLANG_PREFILL_DELAYER_DEBUG_LOG")
+ 
+ logger = logging.getLogger(__name__)
+ 
+-
+-@dataclass(frozen=True)
+-class _State:
+-    delayed_count: int = 0
+-    start_time: float = field(default_factory=time.perf_counter)
+-
+-    def bump_delayed_count(self) -> "_State":
+-        return dataclasses.replace(self, delayed_count=self.delayed_count + 1)
+-
+-
+-class _NegotiateOutput(NamedTuple):
+-    next_state: Optional[_State]
+-    input_estimation: str
+-    output_allow: bool
+-    output_reason: str
+-    num_prefillable: int
+-    num_token_watermark_force_allow: int
+-    # Accumulated wait of the prefill being released on this pass. Carried
+-    # explicitly because `next_state` is None on every release path and thus
+-    # cannot convey it to the metrics observation.
+-    wait_forward_passes: int = 0
+-    wait_seconds: float = 0.0
++# Local-info tensor slot layout (per rank, gathered across DP ranks).
++_F_PREFILLABLE = 0
++_F_PENDING = 1
++_F_RUNNING_DEC = 2
++_F_KV_HIGH = 3
++_F_KV_LOW = 4
++_F_PARTIAL = 5
++_F_QUEUE_HOT = 6
++_N_FIELDS = 7
+ 
+ 
+ class PrefillDelayer:
+@@ -47,38 +82,39 @@ class PrefillDelayer:
+         attn_tp_size: int,
+         cpu_group,
+         server_args,
+-        max_delay_passes: int,
+-        token_usage_low_watermark: Optional[float],
++        max_prefill_tokens: int,
+         metrics_collector: Optional["SchedulerMetricsCollector"] = None,
+         device: Optional["torch.device"] = "cpu",
+         device_group=None,
+     ):
+-        self._max_delay_passes = max_delay_passes
+-        self._token_usage_low_watermark = token_usage_low_watermark
+-        # Queue-based trigger is opt-in: activates only when queue_min_ratio
+-        # is explicitly set. Additive with the slot-based trigger.
+-        self._queue_min_ratio = server_args.prefill_delayer_queue_min_ratio
+-        # Fall back to 5000ms if unset; this is a local safety cap, not a
+-        # semantic default, so we don't surface it via ServerArgs.
+-        self._max_delay_ms = server_args.prefill_delayer_max_delay_ms
+-        if self._max_delay_ms is None:
+-            self._max_delay_ms = 5000.0
+-        self._queue_trigger_enabled = self._queue_min_ratio is not None
+-        logger.info(
+-            f"PrefillDelayer initialized with "
+-            f"max_delay_passes={self._max_delay_passes} "
+-            f"token_usage_low_watermark={self._token_usage_low_watermark} "
+-            f"queue_min_ratio={self._queue_min_ratio} "
+-            f"max_delay_ms={self._max_delay_ms} "
+-            f"queue_trigger_enabled={self._queue_trigger_enabled}"
+-        )
+         self.dp_size = dp_size
+         self.enable_dp_attention = server_args.enable_dp_attention
+-        dp_size_dim = dp_size if self.enable_dp_attention else 1
++        self.max_num_batched_tokens = max_prefill_tokens
++
++        # Coalescer knobs (ATOM taxonomy). target_fill in (0, 1]; tick bounds >= 1.
++        target_fill = server_args.prefill_delayer_target_fill
++        if target_fill is None:
++            target_fill = 0.7
++        self.target_fill = min(max(float(target_fill), 0.05), 1.0)
++        self.ttft_max_ticks = self._clamp_ticks(
++            "ttft_max_ticks", server_args.prefill_delayer_ttft_max_ticks
++        )
++        self.partial_max_ticks = self._clamp_ticks(
++            "partial_max_ticks", server_args.prefill_delayer_partial_max_ticks
++        )
++        self.stall_ticks = self._clamp_ticks(
++            "stall_ticks", server_args.prefill_delayer_stall_ticks
++        )
++        self.kv_high_watermark = server_args.prefill_delayer_kv_high_watermark
++        self.token_usage_low_watermark = (
++            server_args.prefill_delayer_token_usage_low_watermark
++        )
++        # TTFT SLA guard threshold (ms); None disables it.
++        self.max_queue_ms = server_args.prefill_delayer_max_queue_ms
+ 
+-        # Mirror scheduler_dp_attn_mixin's NCCL all-gather path: when the
+-        # env flag is on (or overlap scheduling is disabled), ride the NCCL
+-        # device group on `device` instead of gloo on CPU.
++        # Mirror scheduler_dp_attn_mixin's NCCL all-gather path: when the env
++        # flag is on (or overlap scheduling is disabled), ride the NCCL device
++        # group on `device` instead of gloo on CPU.
+         use_nccl = (
+             server_args.disable_overlap_schedule
+             or envs.SGLANG_NCCL_ALL_GATHER_IN_OVERLAP_SCHEDULER_SYNC_BATCH.get()
+@@ -93,228 +129,153 @@ class PrefillDelayer:
+             self._gather_group = cpu_group
+             self._gather_device = "cpu"
+ 
+-        # Fields packed per rank into the all-gather tensor: prefillable,
+-        # token_watermark_force_allow, running_batch, max_prefill_bs,
+-        # waiting_queue_len.
++        dp_size_dim = dp_size if self.enable_dp_attention else 1
+         self._global_info_buffer = torch.empty(
+-            (dp_size_dim, attn_tp_size, 5),
++            (dp_size_dim, attn_tp_size, _N_FIELDS),
+             dtype=torch.int64,
+             device=self._gather_device,
+         )
+ 
+         self._metrics_collector = metrics_collector
+ 
+-        self._curr_state: Optional[_State] = None
+-        self.skip_first_delayer = True
++        # Episode state. All ticks decide FIRE/HOLD in lockstep, so these evolve
++        # identically on every rank (deterministic).
++        self._hold_ticks = 0
++        self._stall_count = 0
++        self._prev_pending = -1
++        # First call fires immediately to seed the initial decode batch build-up.
++        self._first = True
+ 
+         assert (
+             not server_args.disable_overlap_schedule
+         ), "To use PrefillDelayer, disable_overlap_schedule must be False."
+ 
+-    def _negotiate_should_allow_prefill(
+-        self,
+-        local_prefillable: bool,
+-        token_usage: float,
+-        running_batch: int = 0,
+-        max_prefill_bs: int = 0,
+-        max_running_requests: int = 0,
+-        waiting_queue_len: int = 0,
+-    ) -> _NegotiateOutput:
+-        out = self._negotiate_should_allow_prefill_pure(
+-            prev_state=self._curr_state,
+-            local_prefillable=local_prefillable,
+-            token_usage=token_usage,
+-            running_batch=running_batch,
+-            max_prefill_bs=max_prefill_bs,
+-            max_running_requests=max_running_requests,
+-            waiting_queue_len=waiting_queue_len,
++        logger.info(
++            f"PrefillDelayer(coalescer) initialized: dp_size={dp_size} "
++            f"max_num_batched_tokens={self.max_num_batched_tokens} "
++            f"target_fill={self.target_fill} "
++            f"ttft_max_ticks={self.ttft_max_ticks} "
++            f"partial_max_ticks={self.partial_max_ticks} "
++            f"stall_ticks={self.stall_ticks} "
++            f"kv_high_watermark={self.kv_high_watermark} "
++            f"token_usage_low_watermark={self.token_usage_low_watermark} "
++            f"max_queue_ms={self.max_queue_ms}"
+         )
+-        self._curr_state = out.next_state
+-        return out
+ 
+-    # (Almost) pure function, do not modify self state
+-    def _negotiate_should_allow_prefill_pure(
+-        self,
+-        prev_state: Optional[_State],
+-        local_prefillable: bool,
+-        token_usage: float,
+-        running_batch: int = 0,
+-        max_prefill_bs: int = 0,
+-        max_running_requests: int = 0,
+-        waiting_queue_len: int = 0,
+-    ) -> _NegotiateOutput:
+-        # Compute local states
+-        local_token_watermark_force_allow = (
+-            local_prefillable
+-            and ((x := self._token_usage_low_watermark) is not None)
+-            and (token_usage < x)
+-        )
++    @staticmethod
++    def _clamp_ticks(name: str, value: int) -> int:
++        if value is None or value < 1:
++            logger.warning(
++                f"{name}={value} < 1 would fire on the first tick (bound "
++                "disabled); clamping to 1."
++            )
++            return 1
++        return value
+ 
+-        # Gather global states
+-        tp0_info = self._gather_info(
+-            local_prefillable=local_prefillable,
+-            local_token_watermark_force_allow=local_token_watermark_force_allow,
+-            running_batch=running_batch,
+-            max_prefill_bs=max_prefill_bs,
+-            waiting_queue_len=waiting_queue_len,
+-        )
+-        global_prefillable = tp0_info[:, 0]
+-        global_token_watermark_force_allow = tp0_info[:, 1]
+-        global_running_batch = tp0_info[:, 2]
+-        global_max_prefill_bs = tp0_info[:, 3]
+-        global_waiting_queue_len = tp0_info[:, 4]
+-
+-        # Compute derived global states
+-        if global_prefillable.min().item() > 0:
+-            prefillable_status = "all"
+-        elif global_prefillable.max().item() == 0:
+-            prefillable_status = "none"
+-        else:
+-            prefillable_status = "mixed"
+-        global_exists_token_watermark_force_allow = (
+-            global_token_watermark_force_allow.max().item() > 0
+-        )
+-        debug_info = dict(
+-            input_estimation=prefillable_status,
+-            num_prefillable=global_prefillable.sum().item(),
+-            num_token_watermark_force_allow=global_token_watermark_force_allow.sum().item(),
++    def should_allow_prefill(
++        self,
++        prefillable: bool,
++        pending_tokens: int,
++        running_decode_batch: int = 0,
++        kv_usage: float = 0.0,
++        has_partial: bool = False,
++        oldest_waiting_age_ms: float = 0.0,
++    ) -> bool:
++        """Return True iff this rank may admit new prefills this tick (FIRE).
++
++        MUST be called every tick on every DP rank (it runs a cross-DP
++        all_gather) so ranks stay in lockstep.
++        """
++        # First call fires unconditionally (one-time warmup seed).
++        if self._first:
++            self._first = False
++            self._reset()
++            return True
++
++        low = self.token_usage_low_watermark
++        kv_high = prefillable and kv_usage >= self.kv_high_watermark
++        kv_low = prefillable and low is not None and kv_usage < low
++        queue_hot = (
++            prefillable
++            and self.max_queue_ms is not None
++            and oldest_waiting_age_ms >= self.max_queue_ms
+         )
+ 
+-        # Wait accumulated so far, taken from prev_state. Release paths attach
+-        # this so the wait histograms observe the real value; delay paths leave
+-        # the defaults (0) since the wait isn't finished and isn't observed.
+-        wait_info = dict(
+-            wait_forward_passes=prev_state.delayed_count if prev_state else 0,
+-            wait_seconds=(
+-                (time.perf_counter() - prev_state.start_time) if prev_state else 0.0
+-            ),
++        (
++            n_prefillable,
++            g_pending,
++            g_running_dec,
++            any_kv_high,
++            any_kv_low,
++            any_partial,
++            any_queue_hot,
++        ) = self._gather_reduce(
++            prefillable=prefillable,
++            pending_tokens=pending_tokens,
++            running_decode_batch=running_decode_batch,
++            kv_high=kv_high,
++            kv_low=kv_low,
++            has_partial=has_partial,
++            queue_hot=queue_hot,
+         )
+ 
+-        # Compute outputs
+-        if prefillable_status == "all":
+-            # Safety valve: low KV usage means GPU is underutilized, skip
+-            # delay. Mirrors the check in the "mixed" branch.
+-            if global_exists_token_watermark_force_allow:
+-                return _NegotiateOutput(
+-                    next_state=None,
+-                    output_allow=True,
+-                    output_reason="token_watermark",
+-                    **debug_info,
+-                    **wait_info,
+-                )
+-
+-            if not self.enable_dp_attention:
+-                max_running_requests = (
+-                    max_running_requests + self.dp_size - 1
+-                ) // self.dp_size
+-
+-            global_running_batch_max = int(global_running_batch.max().item())
+-            global_max_prefill_bs_max = int(global_max_prefill_bs.max().item())
+-            global_waiting_queue_max = int(global_waiting_queue_len.max().item())
+-
+-            # Queue-based trigger: delay prefill until the waiting queue
+-            # reaches queue_min = min(running_req * ratio, max_prefill_bs),
+-            # capped by a wall-clock timeout to bound worst-case TTFT.
+-            # Targets workloads where decode requests finish one-at-a-time
+-            # and fragment prefill into many tiny batches.
+-            queue_condition = False
+-            if self._queue_trigger_enabled and global_running_batch_max > 0:
+-                queue_min_effective = min(
+-                    int(global_running_batch_max * self._queue_min_ratio),
+-                    global_max_prefill_bs_max,
+-                )
+-                queue_condition = (
+-                    queue_min_effective > 0
+-                    and global_waiting_queue_max < queue_min_effective
+-                )
+-                if queue_condition and prev_state is not None:
+-                    elapsed_ms = (time.perf_counter() - prev_state.start_time) * 1000.0
+-                    if elapsed_ms >= self._max_delay_ms:
+-                        queue_condition = False
+-
+-            slot_condition = (
+-                max_running_requests - global_running_batch_max
+-                < global_max_prefill_bs_max
+-            )
+-
+-            if slot_condition or queue_condition:
+-                # When the "max_decode_bs - running_bs < max_prefill_bs" condition is met,
+-                # the first merge_batch causes the decoding to fail to reach the maximum batch size.
+-                if self.skip_first_delayer:
+-                    self.skip_first_delayer = False
+-                    pass
+-                else:
+-                    next_state = prev_state or _State()
+-                    next_state = next_state.bump_delayed_count()
+-                    return _NegotiateOutput(
+-                        next_state=next_state,
+-                        output_allow=False,
+-                        output_reason="delay",
+-                        **debug_info,
+-                    )
+-            exist_previous_wait = prev_state is not None
+-            return _NegotiateOutput(
+-                next_state=None,
+-                output_allow=True,
+-                output_reason="wait_success" if exist_previous_wait else "no_wait",
+-                **debug_info,
+-                **wait_info,
+-            )
+-        elif prefillable_status == "none":
+-            return _NegotiateOutput(
+-                next_state=None,
+-                # It does not matter whether we allow or not, thus we allow for simplicity
+-                output_allow=True,
+-                output_reason="",
+-                **debug_info,
+-                **wait_info,
+-            )
+-        elif prefillable_status == "mixed":
+-            if global_exists_token_watermark_force_allow:
+-                return _NegotiateOutput(
+-                    next_state=None,
+-                    output_allow=True,
+-                    output_reason="token_watermark",
+-                    **debug_info,
+-                    **wait_info,
+-                )
+-
+-            prev_delayed_count = prev_state.delayed_count if prev_state else 0
+-            if prev_delayed_count < self._max_delay_passes - 1:
+-                next_state = prev_state or _State()
+-                next_state = next_state.bump_delayed_count()
+-                return _NegotiateOutput(
+-                    next_state=next_state,
+-                    output_allow=False,
+-                    output_reason="delay",
+-                    **debug_info,
+-                )
+-            else:
+-                return _NegotiateOutput(
+-                    next_state=None,
+-                    output_allow=True,
+-                    output_reason="wait_timeout",
+-                    **debug_info,
+-                    **wait_info,
+-                )
++        # Nothing to prefill anywhere -> allow (vacuous), reset the episode.
++        if n_prefillable == 0:
++            self._reset()
++            return self._observe(True, "vacuous", n_prefillable)
++
++        # ---- must-fire bounds (release even if unaligned / underfilled) ----
++        if g_running_dec == 0:
++            return self._fire("nodecode", n_prefillable)
++        if any_kv_high or any_kv_low:
++            return self._fire("kv", n_prefillable)
++        if any_queue_hot:
++            return self._fire("queue_ms", n_prefillable)
++        if self._hold_ticks >= self.ttft_max_ticks:
++            return self._fire("ttft", n_prefillable)
++        if any_partial and self._hold_ticks >= self.partial_max_ticks:
++            return self._fire("partial", n_prefillable)
++
++        # ---- alignment gate: never fire while a rank lacks prefill (anti-skew) ----
++        if n_prefillable < self.dp_size:
++            return self._hold(n_prefillable)
++
++        # ---- goal: fire once the aggregate fills a worthwhile forward ----
++        budget = n_prefillable * self.max_num_batched_tokens
++        fill = g_pending / budget if budget > 0 else 1.0
++        if fill >= self.target_fill:
++            return self._fire("fill", n_prefillable)
++
++        # ---- adaptive give-up: queue stopped growing -> waiting is futile ----
++        if g_pending <= self._prev_pending:
++            self._stall_count += 1
+         else:
+-            raise NotImplementedError
++            self._stall_count = 0
++        self._prev_pending = g_pending
++        if self._stall_count >= self.stall_ticks:
++            return self._fire("stall", n_prefillable)
++
++        return self._hold(n_prefillable)
+ 
+-    def _gather_info(
++    def _gather_reduce(
+         self,
+-        local_prefillable: bool,
+-        local_token_watermark_force_allow: bool,
+-        running_batch: int = 0,
+-        max_prefill_bs: int = 0,
+-        waiting_queue_len: int = 0,
++        prefillable: bool,
++        pending_tokens: int,
++        running_decode_batch: int,
++        kv_high: bool,
++        kv_low: bool,
++        has_partial: bool,
++        queue_hot: bool,
+     ):
+         local_info = torch.tensor(
+             [
+-                int(local_prefillable),
+-                int(local_token_watermark_force_allow),
+-                running_batch,
+-                max_prefill_bs,
+-                waiting_queue_len,
++                int(prefillable),
++                int(pending_tokens),
++                int(running_decode_batch),
++                int(kv_high),
++                int(kv_low),
++                int(has_partial),
++                int(queue_hot),
+             ],
+             device=self._gather_device,
+             dtype=torch.int64,
+@@ -324,83 +285,63 @@ class PrefillDelayer:
+             local_info,
+             group=self._gather_group,
+         )
++        # One row per DP rank (attn-tp rank 0 represents each DP group).
+         tp0_info = self._global_info_buffer[:, 0, :]
+-        return tp0_info
+-
+-
+-class PrefillDelayerSinglePassExecutor:
+-    def __init__(self, prefill_delayer: PrefillDelayer, token_usage: float):
+-        self._prefill_delayer = prefill_delayer
+-        self._token_usage = token_usage
+-        self._result: Optional[_NegotiateOutput] = None
+-
+-    @property
+-    def _called(self) -> bool:
+-        return self._result is not None
+-
+-    def finalize(self, *, actual_prefill: bool):
+-        if not self._called:
+-            self.negotiate_should_allow_prefill(local_prefillable=False)
+-
+-        _record_single_pass_result(
+-            actual_execution=actual_prefill,
+-            output=self._result,
+-            metrics_collector=self._prefill_delayer._metrics_collector,
++        n_prefillable = int(tp0_info[:, _F_PREFILLABLE].sum().item())
++        g_pending = int(tp0_info[:, _F_PENDING].sum().item())
++        g_running_dec = int(tp0_info[:, _F_RUNNING_DEC].sum().item())
++        any_kv_high = tp0_info[:, _F_KV_HIGH].max().item() > 0
++        any_kv_low = tp0_info[:, _F_KV_LOW].max().item() > 0
++        any_partial = tp0_info[:, _F_PARTIAL].max().item() > 0
++        any_queue_hot = tp0_info[:, _F_QUEUE_HOT].max().item() > 0
++        return (
++            n_prefillable,
++            g_pending,
++            g_running_dec,
++            any_kv_high,
++            any_kv_low,
++            any_partial,
++            any_queue_hot,
+         )
+ 
+-    def negotiate_should_allow_prefill(
+-        self,
+-        local_prefillable: bool,
+-        running_batch: int = 0,
+-        max_prefill_bs: int = 0,
+-        max_running_requests: int = 0,
+-        waiting_queue_len: int = 0,
+-    ) -> bool:
+-        if not self._called:
+-            self._result = self._prefill_delayer._negotiate_should_allow_prefill(
+-                local_prefillable=local_prefillable,
+-                token_usage=self._token_usage,
+-                running_batch=running_batch,
+-                max_prefill_bs=max_prefill_bs,
+-                max_running_requests=max_running_requests,
+-                waiting_queue_len=waiting_queue_len,
++    def _fire(self, reason: str, n_prefillable: int) -> bool:
++        hold_ticks = self._hold_ticks
++        self._reset()
++        if _DEBUG_LOG:
++            logger.info(
++                f"[PrefillDelayer] FIRE ({reason}): n_prefillable={n_prefillable} "
++                f"hold_ticks={hold_ticks}"
+             )
+-        return self._result.output_allow
++        return self._observe(True, reason, n_prefillable, forward_passes=hold_ticks)
+ 
+-
+-def _record_single_pass_result(
+-    actual_execution: bool,
+-    output: _NegotiateOutput,
+-    metrics_collector: Optional["SchedulerMetricsCollector"],
+-) -> None:
+-    if _DEBUG_LOG:
+-        if output.output_allow and (output.output_reason == "wait_timeout"):
++    def _hold(self, n_prefillable: int) -> bool:
++        self._hold_ticks += 1
++        if _DEBUG_LOG:
+             logger.info(
+-                f"PrefillDelayer timeout thus not forbid prefill "
+-                f"(num_prefillable={output.num_prefillable}, "
+-                f"actual_execution={actual_execution})"
++                f"[PrefillDelayer] HOLD: n_prefillable={n_prefillable} "
++                f"hold_ticks={self._hold_ticks} stall={self._stall_count}"
+             )
+-        elif output.output_allow and (output.output_reason == "token_watermark"):
+-            logger.info(
+-                f"PrefillDelayer force allow prefill due to low watermark. "
+-                f"(num_prefillable={output.num_prefillable}, "
+-                f"num_token_watermark_force_allow={output.num_token_watermark_force_allow}, "
+-                f"actual_execution={actual_execution})"
++        return self._observe(False, "delay", n_prefillable)
++
++    def _reset(self) -> None:
++        self._hold_ticks = 0
++        self._stall_count = 0
++        self._prev_pending = -1
++
++    def _observe(
++        self,
++        output_allow: bool,
++        output_reason: str,
++        n_prefillable: int,
++        forward_passes: int = 0,
++    ) -> bool:
++        if self._metrics_collector is not None:
++            self._metrics_collector.observe_prefill_delayer_outcome(
++                forward_passes=forward_passes,
++                wait_seconds=0.0,
++                input_estimation=str(n_prefillable),
++                output_allow=output_allow,
++                output_reason=output_reason,
++                actual_execution=output_allow,
+             )
+-        else:
+-            assert output.output_reason in {
+-                "",
+-                "wait_success",
+-                "no_wait",
+-                "delay",
+-            }
+-
+-    if metrics_collector is not None:
+-        metrics_collector.observe_prefill_delayer_outcome(
+-            forward_passes=output.wait_forward_passes,
+-            wait_seconds=output.wait_seconds,
+-            input_estimation=output.input_estimation,
+-            output_allow=output.output_allow,
+-            output_reason=output.output_reason,
+-            actual_execution=actual_execution,
+-        )
++        return output_allow
+diff --git a/python/sglang/srt/managers/schedule_policy.py b/python/sglang/srt/managers/schedule_policy.py
+index c1f359599..bf5402f13 100644
+--- a/python/sglang/srt/managers/schedule_policy.py
++++ b/python/sglang/srt/managers/schedule_policy.py
+@@ -4,7 +4,6 @@ import logging
+ from array import array
+ 
+ from sglang.srt.environ import envs
+-from sglang.srt.managers.prefill_delayer import PrefillDelayerSinglePassExecutor
+ from sglang.srt.utils import get_bool_env_var
+ 
+ _ROUTING_KEY_POLICY_DEBUG_LOG = get_bool_env_var("SGLANG_ROUTING_KEY_POLICY_DEBUG_LOG")
+@@ -453,7 +452,6 @@ class PrefillAdder:
+         max_prefill_bs: int = 0,
+         max_running_requests: Optional[int] = None,
+         prefill_max_requests: Optional[int] = None,
+-        prefill_delayer_single_pass: Optional[PrefillDelayerSinglePassExecutor] = None,
+         dllm_config: Optional[DllmConfig] = None,
+         waiting_queue_len: int = 0,
+     ):
+@@ -541,10 +539,7 @@ class PrefillAdder:
+         self.max_running_requests = max_running_requests
+         self.prefill_context_parallel_enabled = is_prefill_context_parallel_enabled()
+         self.prefill_max_requests = prefill_max_requests
+-        self.prefill_delayer_single_pass = prefill_delayer_single_pass
+         self.max_prefill_bs = max_prefill_bs
+-        # Snapshot of scheduler waiting_queue length at the start of this
+-        # prefill pass. Used by PrefillDelayer's queue-based trigger.
+         self.waiting_queue_len = waiting_queue_len
+ 
+     def _init_dllm_meta(self, dllm_config: DllmConfig):
+@@ -922,13 +917,6 @@ class PrefillAdder:
+                     return AddReqResult.NO_TOKEN
+                 tokens_freed += tokens_occupied
+ 
+-        if (self.prefill_delayer_single_pass is not None) and (
+-            not self.prefill_delayer_single_pass.negotiate_should_allow_prefill(
+-                local_prefillable=True
+-            )
+-        ):
+-            return AddReqResult.OTHER
+-
+         if self.dllm_config is not None:
+             if self.rem_dllm_tokens <= 0:
+                 return AddReqResult.OTHER
+@@ -976,16 +964,6 @@ class PrefillAdder:
+     def add_one_req(
+         self, req: Req, has_chunked_req: bool, truncation_align_size: Optional[int]
+     ):
+-        if (self.prefill_delayer_single_pass is not None) and (
+-            not self.prefill_delayer_single_pass.negotiate_should_allow_prefill(
+-                local_prefillable=True,
+-                running_batch=self.running_batch.batch_size(),
+-                max_prefill_bs=self.max_prefill_bs,
+-                max_running_requests=self.max_running_requests,
+-                waiting_queue_len=self.waiting_queue_len,
+-            )
+-        ):
+-            return AddReqResult.OTHER
+         # TODO support cp with multiple requests
+         # Enabling context parallelism currently presents precision issues;
+         # therefore, the prefill-batch setting is temporarily set to 1.
+diff --git a/python/sglang/srt/managers/scheduler.py b/python/sglang/srt/managers/scheduler.py
+index 8d025d71e..eaf2d15d0 100644
+--- a/python/sglang/srt/managers/scheduler.py
++++ b/python/sglang/srt/managers/scheduler.py
+@@ -158,10 +158,7 @@ from sglang.srt.managers.overlap_utils import (
+     decide_needs_cpu_seq_lens,
+     resolve_forward_inputs,
+ )
+-from sglang.srt.managers.prefill_delayer import (
+-    PrefillDelayer,
+-    PrefillDelayerSinglePassExecutor,
+-)
++from sglang.srt.managers.prefill_delayer import PrefillDelayer
+ from sglang.srt.managers.schedule_batch import (
+     FINISH_ABORT,
+     MultimodalInputs,
+@@ -1061,8 +1058,7 @@ class Scheduler(
+                         if self.metrics_reporter.enable_metrics
+                         else None
+                     ),
+-                    max_delay_passes=self.server_args.prefill_delayer_max_delay_passes,
+-                    token_usage_low_watermark=self.server_args.prefill_delayer_token_usage_low_watermark,
++                    max_prefill_tokens=self.max_prefill_tokens,
+                     device=self.tp_group.device,
+                 )
+ 
+@@ -2793,29 +2789,64 @@ class Scheduler(
+         return res
+ 
+     def get_new_batch_prefill(self, running_batch: ScheduleBatch) -> NextBatchPlan:
+-        prefill_delayer_single_pass = None
+-        if self.prefill_delayer:
+-            # Get max usage across all pools for prefill delay decision
+-            max_pool_usage = (
+-                self.pool_stats_observer.get_pool_stats().get_max_pool_usage()
+-            )
+-            prefill_delayer_single_pass = PrefillDelayerSinglePassExecutor(
+-                self.prefill_delayer, token_usage=max_pool_usage
+-            )
++        # Prefill coalescer (ATOM-style). MUST run every tick on every DP rank
++        # (it does a cross-DP all_gather) so ranks stay in lockstep -- hence
++        # before any early-return inside _get_new_batch_prefill_raw. A veto here
++        # holds prefill admission this tick and falls through to decode.
++        if self.prefill_delayer is not None:
++            if not self.prefill_delayer.should_allow_prefill(
++                **self._prefill_delayer_inputs(running_batch)
++            ):
++                return NextBatchPlan(batch_to_run=None, running_batch=running_batch)
+ 
+         ret, running_batch = self._get_new_batch_prefill_raw(
+-            prefill_delayer_single_pass=prefill_delayer_single_pass,
+-            running_batch=running_batch,
++            running_batch=running_batch
+         )
+ 
+-        if self.prefill_delayer:
+-            prefill_delayer_single_pass.finalize(actual_prefill=ret is not None)
+-
+         return NextBatchPlan(batch_to_run=ret, running_batch=running_batch)
+ 
++    def _prefill_delayer_inputs(self, running_batch: ScheduleBatch) -> dict:
++        """Snapshot this rank's local coalescer signals for should_allow_prefill."""
++        running_bs = len(running_batch.reqs)
++        can_alloc = self.get_num_allocatable_reqs(running_bs) > 0
++        prefillable = (
++            len(self.waiting_queue) > 0 and can_alloc
++        ) or self.chunked_req is not None
++
++        # pending = fresh waiting new-tokens + resumable partial's remaining,
++        # capped at the per-forward token budget: the coalescer's fill signal.
++        pending_tokens = sum(len(r.origin_input_ids) for r in self.waiting_queue)
++        if self.chunked_req is not None:
++            pending_tokens += max(
++                0,
++                len(self.chunked_req.origin_input_ids)
++                - len(self.chunked_req.prefix_indices),
++            )
++        pending_tokens = min(pending_tokens, self.max_prefill_tokens)
++
++        oldest_waiting_age_ms = 0.0
++        if self.server_args.prefill_delayer_max_queue_ms is not None:
++            now = time.perf_counter()
++            for r in self.waiting_queue:
++                t = r.time_stats.wait_queue_entry_time
++                if t > 0:
++                    age_ms = (now - t) * 1000.0
++                    if age_ms > oldest_waiting_age_ms:
++                        oldest_waiting_age_ms = age_ms
++
++        return dict(
++            prefillable=prefillable,
++            pending_tokens=pending_tokens,
++            # decode-only: chunked_req (mid-prefill) is tracked separately and is
++            # not in running_batch, so running_batch.reqs is the decode load.
++            running_decode_batch=running_bs,
++            kv_usage=self.pool_stats_observer.get_pool_stats().get_max_pool_usage(),
++            has_partial=self.chunked_req is not None,
++            oldest_waiting_age_ms=oldest_waiting_age_ms,
++        )
++
+     def _get_new_batch_prefill_raw(
+         self,
+-        prefill_delayer_single_pass: Optional[PrefillDelayerSinglePassExecutor],
+         running_batch: ScheduleBatch,
+     ) -> Tuple[Optional[ScheduleBatch], ScheduleBatch]:
+         # Check if the grammar is ready in the grammar queue
+@@ -2892,7 +2923,6 @@ class Scheduler(
+             max_prefill_bs=self.max_prefill_bs,
+             max_running_requests=self.max_running_requests,
+             prefill_max_requests=self.server_args.prefill_max_requests,
+-            prefill_delayer_single_pass=prefill_delayer_single_pass,
+             dllm_config=self.dllm_config,
+             waiting_queue_len=len(self.waiting_queue),
+         )
+diff --git a/python/sglang/srt/server_args.py b/python/sglang/srt/server_args.py
+index 15272cc28..f53f85398 100644
+--- a/python/sglang/srt/server_args.py
++++ b/python/sglang/srt/server_args.py
+@@ -2677,6 +2677,58 @@ class ServerArgs:
+             "5000; defaults to 5000 if unset."
+         ),
+     ] = None
++    prefill_delayer_target_fill: A[
++        Optional[float],
++        (
++            "Opt-in to the token-based fill-target (coalescer) delay trigger. "
++            "Holds prefill admission until the SUM of pending prefill tokens "
++            "across all DP ranks reaches target_fill * (max_prefill_tokens * "
++            "num_dp_ranks), so quiet ranks keep accumulating instead of firing "
++            "tiny prefills (Nagle's algorithm for prefill). The single-hold "
++            "wall-clock cap (--prefill-delayer-max-delay-ms) still applies as a "
++            "stall give-up. Unset (default) disables it. Typical: 0.5 ~ 0.8."
++        ),
++    ] = None
++    prefill_delayer_max_queue_ms: A[
++        Optional[float],
++        (
++            "End-to-end TTFT SLA guard (ms) for the prefill coalescer. If any DP "
++            "rank has a schedulable waiting prefill whose true wait since entering "
++            "the waiting queue exceeds this threshold, the coalescer force-releases "
++            "on all ranks (cross-rank OR), regardless of the fill target. Unset "
++            "(default) disables it. Size it to your TTFT SLA."
++        ),
++    ] = None
++    prefill_delayer_ttft_max_ticks: A[
++        int,
++        (
++            "Coalescer single-hold TTFT bound (ticks). Force-release once a hold "
++            "episode has lasted this many scheduler ticks, regardless of fill."
++        ),
++    ] = 30
++    prefill_delayer_partial_max_ticks: A[
++        int,
++        (
++            "Coalescer tight bound (ticks) for holds while any rank is mid-chunked-"
++            "prefill (a partial holds KV, so release it sooner than ttft_max_ticks)."
++        ),
++    ] = 8
++    prefill_delayer_stall_ticks: A[
++        int,
++        (
++            "Coalescer adaptive give-up: force-release after the aggregate pending "
++            "token count has stopped growing for this many consecutive ticks "
++            "(waiting longer would not fill the forward any further)."
++        ),
++    ] = 3
++    prefill_delayer_kv_high_watermark: A[
++        float,
++        (
++            "Coalescer KV-high must-fire watermark. If any prefillable rank's KV "
++            "cache usage is at/above this fraction, release immediately (cannot "
++            "accumulate more)."
++        ),
++    ] = 0.9
+ 
+     # -------------------------------------------------------------------------
+     # Min free slots delay (prefill refill batching)
+diff --git a/test/registered/scheduler/test_prefill_delayer.py b/test/registered/scheduler/test_prefill_delayer.py
+index 58074fbce..e6ffc17dc 100644
+--- a/test/registered/scheduler/test_prefill_delayer.py
++++ b/test/registered/scheduler/test_prefill_delayer.py
+@@ -3,7 +3,7 @@ import os
+ import re
+ import time
+ import unittest
+-from dataclasses import dataclass
++from dataclasses import dataclass, field
+ from types import SimpleNamespace
+ from typing import List, Optional
+ 
+@@ -36,42 +36,48 @@ register_cuda_ci(
+ WORLD_SIZE = os.environ.get("SGLANG_TEST_WORLD_SIZE", "8")
+ 
+ # ============================ Unit Tests ============================
++# Exercise the ATOM-style tick state machine (alignment gate / must-fire bounds
++# / fill target / stall give-up) over a real cross-DP all_gather.
++
++
++def _make_server_args(**overrides):
++    base = dict(
++        enable_dp_attention=True,
++        disable_overlap_schedule=False,
++        prefill_delayer_target_fill=0.7,
++        prefill_delayer_ttft_max_ticks=30,
++        prefill_delayer_partial_max_ticks=8,
++        prefill_delayer_stall_ticks=3,
++        prefill_delayer_kv_high_watermark=0.9,
++        prefill_delayer_token_usage_low_watermark=None,
++        prefill_delayer_max_queue_ms=None,
++    )
++    base.update(overrides)
++    return SimpleNamespace(**base)
+ 
+ 
+ @dataclass
+-class NegotiateCall:
++class Tick:
++    """Per-tick, per-rank inputs to should_allow_prefill (index by rank)."""
++
+     prefillable: List[bool]
+-    token_usage: List[float]
+-    # Optional scheduler state; when None, _run_negotiate_test does not pass
+-    # the kwarg and the delayer falls back to the historical behavior of
+-    # reading kwargs.get(..., 0).
+-    running_batch: Optional[List[int]] = None
+-    max_prefill_bs: Optional[List[int]] = None
+-    waiting_queue_len: Optional[List[int]] = None
+-    max_running_requests: Optional[int] = None
+-    # Inter-call sleep (seconds). Used to exercise the queue-trigger
+-    # wall-clock timeout.
+-    sleep_before_s: float = 0.0
++    pending_tokens: List[int]
++    running_decode_batch: List[int]
++    kv_usage: List[float] = None
++    has_partial: List[bool] = None
++    oldest_waiting_age_ms: List[float] = None
+ 
+ 
+ @dataclass
+-class NegotiateTestCase:
++class DelayerCase:
+     name: str
+-    max_delay_passes: int
+-    token_usage_low_watermark: Optional[float]
+-    calls: List[NegotiateCall]
+-    expected_allow: bool
+-    expected_reason: str
+-    # Queue-trigger knobs (new in the queue-based delayer). Leave both None
+-    # to exercise the legacy slot-only code paths.
+-    queue_min_ratio: Optional[float] = None
+-    max_delay_ms: Optional[float] = None
+-    # Expected accumulated wait surfaced on the final (release) outcome. When
+-    # set, asserts the wait histograms would observe this value instead of 0.
+-    expected_wait_forward_passes: Optional[int] = None
+-
+-
+-def _run_negotiate_test(rank, test_cases):
++    max_prefill_tokens: int
++    ticks: List[Tick]
++    expected_allow: bool  # asserted on the LAST tick
++    server_args_overrides: dict = field(default_factory=dict)
++
++
++def _run_delayer_test(rank, test_cases):
+     world_size = torch.distributed.get_world_size()
+     cpu_group = torch.distributed.new_group(backend="gloo")
+ 
+@@ -80,307 +86,215 @@ def _run_negotiate_test(rank, test_cases):
+             dp_size=world_size,
+             attn_tp_size=1,
+             cpu_group=cpu_group,
+-            server_args=SimpleNamespace(
+-                enable_dp_attention=True,
+-                disaggregation_mode="null",
+-                disable_overlap_schedule=False,
+-                prefill_delayer_queue_min_ratio=case.queue_min_ratio,
+-                prefill_delayer_max_delay_ms=case.max_delay_ms,
+-            ),
+-            max_delay_passes=case.max_delay_passes,
+-            token_usage_low_watermark=case.token_usage_low_watermark,
++            server_args=_make_server_args(**case.server_args_overrides),
++            max_prefill_tokens=case.max_prefill_tokens,
+         )
+-
+-        for call in case.calls:
+-            if call.sleep_before_s > 0:
+-                time.sleep(call.sleep_before_s)
+-
+-            extra_kwargs = {}
+-            if call.running_batch is not None:
+-                extra_kwargs["running_batch"] = call.running_batch[rank]
+-            if call.max_prefill_bs is not None:
+-                extra_kwargs["max_prefill_bs"] = call.max_prefill_bs[rank]
+-            if call.waiting_queue_len is not None:
+-                extra_kwargs["waiting_queue_len"] = call.waiting_queue_len[rank]
+-            if call.max_running_requests is not None:
+-                extra_kwargs["max_running_requests"] = call.max_running_requests
+-
+-            result = delayer._negotiate_should_allow_prefill(
+-                local_prefillable=call.prefillable[rank],
+-                token_usage=call.token_usage[rank],
+-                **extra_kwargs,
++        result = True
++        for tick in case.ticks:
++            kv = tick.kv_usage or [0.5] * world_size
++            partial = tick.has_partial or [False] * world_size
++            age = tick.oldest_waiting_age_ms or [0.0] * world_size
++            result = delayer.should_allow_prefill(
++                prefillable=tick.prefillable[rank],
++                pending_tokens=tick.pending_tokens[rank],
++                running_decode_batch=tick.running_decode_batch[rank],
++                kv_usage=kv[rank],
++                has_partial=partial[rank],
++                oldest_waiting_age_ms=age[rank],
+             )
++        assert result == case.expected_allow, (
++            f"Case {case.name} rank {rank}: got {result}, "
++            f"expected {case.expected_allow}"
++        )
+ 
+-        assert (result.output_allow, result.output_reason) == (
+-            case.expected_allow,
+-            case.expected_reason,
+-        ), f"Case {case.name} rank {rank}"
+ 
+-        if case.expected_wait_forward_passes is not None:
+-            assert result.wait_forward_passes == case.expected_wait_forward_passes, (
+-                f"Case {case.name} rank {rank}: wait_forward_passes "
+-                f"{result.wait_forward_passes} != {case.expected_wait_forward_passes}"
+-            )
+-            # On a release after a real wait, seconds must be observed too.
+-            if case.expected_wait_forward_passes > 0:
+-                assert (
+-                    result.wait_seconds > 0.0
+-                ), f"Case {case.name} rank {rank}: wait_seconds not surfaced"
+-
+-
+-_NEGOTIATE_TEST_CASES = [
+-    NegotiateTestCase(
+-        name="all_prefillable",
+-        max_delay_passes=100,
+-        token_usage_low_watermark=0.8,
+-        calls=[
+-            NegotiateCall(
+-                prefillable=[True, True, True, True],
+-                token_usage=[0.9, 0.9, 0.9, 0.9],
++def _all(v, n=4):
++    return [v] * n
++
++
++_DELAYER_TEST_CASES = [
++    # First call always fires (warmup seed).
++    DelayerCase(
++        name="first_fire",
++        max_prefill_tokens=1000,
++        ticks=[
++            Tick(
++                prefillable=_all(True),
++                pending_tokens=_all(10),
++                running_decode_batch=_all(4),
+             )
+         ],
+         expected_allow=True,
+-        expected_reason="no_wait",
+-        # No prior wait, so the histograms legitimately observe 0.
+-        expected_wait_forward_passes=0,
+     ),
+-    NegotiateTestCase(
+-        name="all_prefillable_with_previous_wait",
+-        max_delay_passes=100,
+-        token_usage_low_watermark=0.8,
+-        calls=[
+-            NegotiateCall(
+-                prefillable=[True, False, True, False],
+-                token_usage=[0.9, 0.9, 0.9, 0.9],
++    # Vacuous: no rank prefillable -> allow.
++    DelayerCase(
++        name="vacuous",
++        max_prefill_tokens=1000,
++        ticks=[
++            Tick(
++                prefillable=_all(True),
++                pending_tokens=_all(10),
++                running_decode_batch=_all(4),
+             ),
+-            NegotiateCall(
+-                prefillable=[True, True, True, True],
+-                token_usage=[0.9, 0.9, 0.9, 0.9],
++            Tick(
++                prefillable=_all(False),
++                pending_tokens=_all(0),
++                running_decode_batch=_all(4),
+             ),
+         ],
+         expected_allow=True,
+-        expected_reason="wait_success",
+-        # One mixed delay preceded the release, so the wait histograms must
+-        # observe 1 forward pass (regression guard for #25949).
+-        expected_wait_forward_passes=1,
+-    ),
+-    NegotiateTestCase(
+-        name="none_prefillable",
+-        max_delay_passes=100,
+-        token_usage_low_watermark=0.8,
+-        calls=[
+-            NegotiateCall(
+-                prefillable=[False, False, False, False],
+-                token_usage=[0.9, 0.9, 0.9, 0.9],
+-            )
+-        ],
+-        expected_allow=True,
+-        expected_reason="",
+     ),
+-    NegotiateTestCase(
+-        name="mixed_delay",
+-        max_delay_passes=100,
+-        token_usage_low_watermark=0.8,
+-        calls=[
+-            NegotiateCall(
+-                prefillable=[True, False, True, False],
+-                token_usage=[0.9, 0.9, 0.9, 0.9],
+-            )
++    # Alignment gate: some ranks lack prefill, decode running, low fill -> HOLD.
++    DelayerCase(
++        name="alignment_gate_hold",
++        max_prefill_tokens=1000,
++        ticks=[
++            Tick(
++                prefillable=_all(True),
++                pending_tokens=_all(10),
++                running_decode_batch=_all(4),
++            ),
++            Tick(
++                prefillable=[True, True, False, True],
++                pending_tokens=[100, 100, 0, 100],
++                running_decode_batch=_all(4),
++            ),
+         ],
+         expected_allow=False,
+-        expected_reason="delay",
+     ),
+-    NegotiateTestCase(
+-        name="mixed_watermark_force_allow",
+-        max_delay_passes=100,
+-        token_usage_low_watermark=0.8,
+-        calls=[
+-            NegotiateCall(
+-                prefillable=[True, False, True, False],
+-                token_usage=[0.5, 0.9, 0.9, 0.9],
+-            )
++    # Fill target reached: all prefillable, pending sum >= 0.7*(4*1000) -> FIRE.
++    DelayerCase(
++        name="fill_target_fire",
++        max_prefill_tokens=1000,
++        ticks=[
++            Tick(
++                prefillable=_all(True),
++                pending_tokens=_all(10),
++                running_decode_batch=_all(4),
++            ),
++            Tick(
++                prefillable=_all(True),
++                pending_tokens=_all(800),
++                running_decode_batch=_all(4),
++            ),
+         ],
+         expected_allow=True,
+-        expected_reason="token_watermark",
+-    ),
+-    NegotiateTestCase(
+-        name="mixed_watermark_disabled",
+-        max_delay_passes=100,
+-        token_usage_low_watermark=None,
+-        calls=[
+-            NegotiateCall(
+-                prefillable=[True, False, True, False],
+-                token_usage=[0.5, 0.9, 0.9, 0.9],
+-            )
+-        ],
+-        expected_allow=False,
+-        expected_reason="delay",
+-    ),
+-    NegotiateTestCase(
+-        name="mixed_watermark_not_prefillable",
+-        max_delay_passes=100,
+-        token_usage_low_watermark=0.8,
+-        calls=[
+-            NegotiateCall(
+-                prefillable=[False, False, True, False],
+-                token_usage=[0.5, 0.9, 0.9, 0.9],
+-            )
+-        ],
+-        expected_allow=False,
+-        expected_reason="delay",
+     ),
+-    NegotiateTestCase(
+-        name="mixed_timeout",
+-        max_delay_passes=3,
+-        token_usage_low_watermark=0.8,
+-        calls=[
+-            NegotiateCall(
+-                prefillable=[True, False, True, False],
+-                token_usage=[0.9, 0.9, 0.9, 0.9],
+-            ),
+-            NegotiateCall(
+-                prefillable=[True, False, True, False],
+-                token_usage=[0.9, 0.9, 0.9, 0.9],
++    # All prefillable but underfilled and no decode -> nodecode must-fire.
++    DelayerCase(
++        name="nodecode_fire",
++        max_prefill_tokens=1000,
++        ticks=[
++            Tick(
++                prefillable=_all(True),
++                pending_tokens=_all(10),
++                running_decode_batch=_all(4),
+             ),
+-            NegotiateCall(
+-                prefillable=[True, False, True, False],
+-                token_usage=[0.9, 0.9, 0.9, 0.9],
++            Tick(
++                prefillable=_all(True),
++                pending_tokens=_all(10),
++                running_decode_batch=_all(0),
+             ),
+         ],
+         expected_allow=True,
+-        expected_reason="wait_timeout",
+-        # Two delays accumulated before timing out; the timeout release must
+-        # still surface that wait to the histograms.
+-        expected_wait_forward_passes=2,
+     ),
+-    # Queue-based trigger: waiting queue below queue_min = min(running * R,
+-    # max_prefill_bs) should defer prefill. With R=0.5, running=100 and
+-    # max_prefill_bs=80, queue_min = min(50, 80) = 50, and queue_len=10 < 50.
+-    NegotiateTestCase(
+-        name="queue_trigger_delay",
+-        max_delay_passes=100,
+-        token_usage_low_watermark=0.8,
+-        queue_min_ratio=0.5,
+-        max_delay_ms=5000,
+-        calls=[
+-            NegotiateCall(
+-                prefillable=[True, True, True, True],
+-                token_usage=[0.9, 0.9, 0.9, 0.9],
+-                running_batch=[100, 100, 100, 100],
+-                max_prefill_bs=[80, 80, 80, 80],
+-                waiting_queue_len=[10, 10, 10, 10],
+-                max_running_requests=1024,
++    # All prefillable, underfilled, decode running -> HOLD (coalesce).
++    DelayerCase(
++        name="underfilled_hold",
++        max_prefill_tokens=1000,
++        ticks=[
++            Tick(
++                prefillable=_all(True),
++                pending_tokens=_all(10),
++                running_decode_batch=_all(4),
+             ),
+-            # skip_first_delayer consumes the first would-be delay; a second
+-            # identical call must actually delay.
+-            NegotiateCall(
+-                prefillable=[True, True, True, True],
+-                token_usage=[0.9, 0.9, 0.9, 0.9],
+-                running_batch=[100, 100, 100, 100],
+-                max_prefill_bs=[80, 80, 80, 80],
+-                waiting_queue_len=[10, 10, 10, 10],
+-                max_running_requests=1024,
++            Tick(
++                prefillable=_all(True),
++                pending_tokens=_all(10),
++                running_decode_batch=_all(4),
+             ),
+         ],
+         expected_allow=False,
+-        expected_reason="delay",
+     ),
+-    # Waiting queue at or above queue_min: queue trigger must not fire.
+-    NegotiateTestCase(
+-        name="queue_trigger_above_threshold",
+-        max_delay_passes=100,
+-        token_usage_low_watermark=0.8,
+-        queue_min_ratio=0.5,
+-        max_delay_ms=5000,
+-        calls=[
+-            NegotiateCall(
+-                prefillable=[True, True, True, True],
+-                token_usage=[0.9, 0.9, 0.9, 0.9],
+-                running_batch=[100, 100, 100, 100],
+-                max_prefill_bs=[80, 80, 80, 80],
+-                waiting_queue_len=[64, 64, 64, 64],
+-                max_running_requests=1024,
+-            )
++    # KV-high must-fire: a prefillable rank at/above watermark -> FIRE.
++    DelayerCase(
++        name="kv_high_fire",
++        max_prefill_tokens=1000,
++        ticks=[
++            Tick(
++                prefillable=_all(True),
++                pending_tokens=_all(10),
++                running_decode_batch=_all(4),
++            ),
++            Tick(
++                prefillable=_all(True),
++                pending_tokens=_all(10),
++                running_decode_batch=_all(4),
++                kv_usage=[0.95, 0.5, 0.5, 0.5],
++            ),
+         ],
+         expected_allow=True,
+-        expected_reason="no_wait",
+     ),
+-    # queue_min_ratio unset: queue trigger is opt-in and must stay disabled
+-    # even when running_batch and queue_len would otherwise trigger it.
+-    NegotiateTestCase(
+-        name="queue_trigger_disabled_when_ratio_unset",
+-        max_delay_passes=100,
+-        token_usage_low_watermark=0.8,
+-        queue_min_ratio=None,
+-        max_delay_ms=None,
+-        calls=[
+-            NegotiateCall(
+-                prefillable=[True, True, True, True],
+-                token_usage=[0.9, 0.9, 0.9, 0.9],
+-                running_batch=[100, 100, 100, 100],
+-                max_prefill_bs=[80, 80, 80, 80],
+-                waiting_queue_len=[1, 1, 1, 1],
+-                max_running_requests=1024,
+-            )
++    # TTFT queue guard: one rank's oldest waiting prefill aged past threshold.
++    DelayerCase(
++        name="queue_guard_fire",
++        max_prefill_tokens=1000,
++        server_args_overrides=dict(prefill_delayer_max_queue_ms=100.0),
++        ticks=[
++            Tick(
++                prefillable=_all(True),
++                pending_tokens=_all(10),
++                running_decode_batch=_all(4),
++            ),
++            Tick(
++                prefillable=_all(True),
++                pending_tokens=_all(10),
++                running_decode_batch=_all(4),
++                oldest_waiting_age_ms=[500.0, 0.0, 0.0, 0.0],
++            ),
+         ],
+         expected_allow=True,
+-        expected_reason="no_wait",
+     ),
+-    # max_delay_ms wall-clock timeout: once a single queue-trigger delay
+-    # exceeds the cap, prefill must be force-released.
+-    # Call sequence:
+-    #   1) queue_condition holds but skip_first_delayer consumes it
+-    #      (no state recorded, falls through to allow)
+-    #   2) queue_condition holds -> delay, records start_time in state
+-    #   3) after sleeping past max_delay_ms, elapsed >= cap -> force release
+-    NegotiateTestCase(
+-        name="queue_trigger_wall_clock_timeout",
+-        max_delay_passes=100,
+-        token_usage_low_watermark=0.8,
+-        queue_min_ratio=0.5,
+-        max_delay_ms=50,
+-        calls=[
+-            NegotiateCall(
+-                prefillable=[True, True, True, True],
+-                token_usage=[0.9, 0.9, 0.9, 0.9],
+-                running_batch=[100, 100, 100, 100],
+-                max_prefill_bs=[80, 80, 80, 80],
+-                waiting_queue_len=[10, 10, 10, 10],
+-                max_running_requests=1024,
++    # Stall give-up: underfilled but pending stops growing for stall_ticks -> FIRE.
++    DelayerCase(
++        name="stall_fire",
++        max_prefill_tokens=1000,
++        server_args_overrides=dict(prefill_delayer_stall_ticks=2),
++        ticks=[
++            Tick(
++                prefillable=_all(True),
++                pending_tokens=_all(10),
++                running_decode_batch=_all(4),
++            ),
++            # hold (fill low), pending stays flat across the next ticks
++            Tick(
++                prefillable=_all(True),
++                pending_tokens=_all(50),
++                running_decode_batch=_all(4),
+             ),
+-            NegotiateCall(
+-                prefillable=[True, True, True, True],
+-                token_usage=[0.9, 0.9, 0.9, 0.9],
+-                running_batch=[100, 100, 100, 100],
+-                max_prefill_bs=[80, 80, 80, 80],
+-                waiting_queue_len=[10, 10, 10, 10],
+-                max_running_requests=1024,
++            Tick(
++                prefillable=_all(True),
++                pending_tokens=_all(50),
++                running_decode_batch=_all(4),
+             ),
+-            NegotiateCall(
+-                prefillable=[True, True, True, True],
+-                token_usage=[0.9, 0.9, 0.9, 0.9],
+-                running_batch=[100, 100, 100, 100],
+-                max_prefill_bs=[80, 80, 80, 80],
+-                waiting_queue_len=[10, 10, 10, 10],
+-                max_running_requests=1024,
+-                sleep_before_s=0.2,  # > max_delay_ms (50ms)
++            Tick(
++                prefillable=_all(True),
++                pending_tokens=_all(50),
++                running_decode_batch=_all(4),
+             ),
+         ],
+         expected_allow=True,
+-        expected_reason="wait_success",
+-        # One queue-trigger delay was recorded before the wall-clock release.
+-        expected_wait_forward_passes=1,
+     ),
+ ]
+ 
+ 
+-class TestPrefillDelayerNegotiate(unittest.TestCase):
+-    def test_negotiate(self):
++class TestPrefillDelayerStateMachine(unittest.TestCase):
++    def test_state_machine(self):
+         run_distributed_test(
+-            _run_negotiate_test,
++            _run_delayer_test,
+             world_size=4,
+             backend="gloo",
+-            test_cases=_NEGOTIATE_TEST_CASES,
++            test_cases=_DELAYER_TEST_CASES,
+         )
+ 
+ 
+@@ -605,9 +519,9 @@ class TestPrefillDelayerTokenUsageLowWatermark(CustomTestCase):
+ 
+             metrics_text = _print_prefill_delayer_metrics(base_url, expect_metrics=True)
+             if token_usage_low_watermark is not None:
+-                total = _sum_prometheus_metric_values(metrics_text, "token_watermark")
+-                self.assertGreater(total, 0, "Expected token_watermark > 0")
+-                print(f"total token_watermark: {total}")
++                total = _sum_prometheus_metric_values(metrics_text, "kv")
++                self.assertGreater(total, 0, "Expected kv-watermark releases > 0")
++                print(f"total kv fires: {total}")
+         finally:
+             kill_process_tree(process.pid)
+ 
+@@ -679,8 +593,6 @@ def _launch_server(
+             "0.6",
+             "--enable-metrics",
+             *(["--enable-prefill-delayer"] if prefill_delayer else []),
+-            "--prefill-delayer-max-delay-passes",
+-            str(max_delay_passes),
+             *(
+                 [
+                     "--prefill-delayer-token-usage-low-watermark",
+@@ -705,8 +617,6 @@ def _print_prefill_delayer_metrics(base_url: str, expect_metrics: bool) -> str:
+     for line in prefill_delayer_metrics:
+         print(line)
+     if expect_metrics:
+-        assert "sglang:prefill_delayer_wait_forward_passes" in metrics_text
+-        assert "sglang:prefill_delayer_wait_seconds" in metrics_text
+         assert "sglang:prefill_delayer_outcomes_total" in metrics_text
+     return metrics_text
+ 
+-- 
+2.34.1
+

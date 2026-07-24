@@ -1,0 +1,27 @@
+diff --git a/aiter/ops/gemm_op_a8w8.py b/aiter/ops/gemm_op_a8w8.py
+index 60730ab7e..a7d5b8119 100644
+--- a/aiter/ops/gemm_op_a8w8.py
++++ b/aiter/ops/gemm_op_a8w8.py
+@@ -2,6 +2,7 @@
+ # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+ 
+ import functools
++import os
+ from typing import Optional
+ 
+ import pandas as pd
+@@ -904,7 +905,13 @@ def gemm_a8w8_blockscale_bpreshuffle(
+     )
+     # Triton path first: it allocates its own output, so skip the Y buffer the
+     # ck/asm paths below need.
+-    if config is not None and config["libtype"] == "triton":
++    # AITER_DISABLE_BLOCKSCALE_TRITON=1 forces triton-selected shapes to fall
++    # through to the default CK path (workaround for triton-custom mismatch).
++    if (
++        config is not None
++        and config["libtype"] == "triton"
++        and os.environ.get("AITER_DISABLE_BLOCKSCALE_TRITON", "0") != "1"
++    ):
+         # kernelName optionally carries the backend hint ("triton"/"gluon");
+         # anything else -> None (auto gluon->triton detection). config=None lets
+         # the triton impl load its own tuned config internally. WQ is already

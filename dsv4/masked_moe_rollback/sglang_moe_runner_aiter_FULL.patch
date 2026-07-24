@@ -1,0 +1,393 @@
+diff --git a/python/sglang/srt/layers/moe/moe_runner/aiter.py b/python/sglang/srt/layers/moe/moe_runner/aiter.py
+index c67d0aa9e..300ff11da 100644
+--- a/python/sglang/srt/layers/moe/moe_runner/aiter.py
++++ b/python/sglang/srt/layers/moe/moe_runner/aiter.py
+@@ -119,6 +119,221 @@ def _aiter_fused_moe_supports_no_combine() -> bool:
+     return "no_combine" in inspect.signature(fused_moe).parameters
+ 
+ 
++@functools.cache
++def _is_gfx950() -> bool:
++    try:
++        from aiter.jit.core import get_gfx
++
++        return get_gfx() == "gfx950"
++    except Exception:
++        return False
++
++
++def _maybe_run_mori_masked(
++    runner_input: AiterRunnerInput,
++    quant_info: AiterMoeQuantInfo,
++    config: MoeRunnerConfig,
++    running_state: dict,
++) -> Optional[torch.Tensor]:
++    """Opt-in gfx950 masked (deep_gemm-style) MoE for the mori-EP decode path.
++
++    Default OFF: returns None unless ``SGLANG_MORI_MASKED_MOE=1`` (and a positive
++    per-expert cap ``SGLANG_MORI_MASKED_MAX_M``) so the standard path is untouched.
++
++    Consumes the flat mori recv buffer (already fp8-quantized) directly, skipping
++    moe_sorting AND the fp8->bf16->fp8 activation round-trip (§5f): the masked
++    aiter GEMM natively takes fp8 + per-1x32 e8m0 scale. Output is flat recv-order
++    ``[M, model_dim]`` (un-weighted) which mori ``combine`` reduces to tokens.
++
++    DSV4 quark w4a4 stores w13/w2 as ``shuffle_weight((16,16))`` + ``e8m0_shuffle``
++    scales -- exactly the masked entry's expected layout -- so weights pass through.
++
++    Requires the recv buffer to be expert-contiguous ("packed"): rows are grouped
++    by local expert with per-expert counts ``num_recv_tokens_per_expert``. NOTE:
++    unvalidated on a live server; enable only for A/B testing.
++    """
++    if not get_bool_env_var("SGLANG_MORI_MASKED_MOE", "false"):
++        return None
++    if not running_state.get("aiter_combine_is_mori"):
++        return None
++    if runner_input.quant_type != AiterQuantType.PER_1X32:
++        return None
++    if not _is_gfx950():
++        return None
++    max_m = get_int_env_var("SGLANG_MORI_MASKED_MAX_M", 0)
++    if max_m <= 0:
++        return None
++    if runner_input.num_local_tokens is None:
++        return None
++    if config.activation not in ("silu", "swiglu"):
++        return None
++    # DECODE ONLY: prefill per-expert counts far exceed any static max_m and would
++    # drop tokens. Fall through to the sorted path for extend/prefill batches.
++    try:
++        from sglang.srt.layers.dp_attention import get_is_extend_in_batch
++
++        if get_is_extend_in_batch():
++            return None
++    except Exception:
++        return None
++
++    try:
++        from aiter.ops.flydsl.grouped_moe_gfx950 import flydsl_masked_moe_gfx950_recv
++
++        recv_hidden = runner_input.hidden_states  # [M, K] or [M, K/2] (fp4x2)
++        # Supported recv activation formats:
++        #  - fp4x2 (mxfp4 decode dispatch, the WORKING default): per-1x32 e8m0 scale
++        #    -> masked a4w4, consumed DIRECTLY (no upscale/round-trip). PREFERRED.
++        #  - bf16 (global bf16 dispatch): masked does a single per-1x32 fp8 quant.
++        # (mori fp8 dispatch is per-1x128 -> incompatible with the masked a8w4
++        # per-1x32 kernel; falls through.)
++        _fp4x2 = getattr(torch, "float4_e2m1fn_x2", None)
++        if _fp4x2 is not None and recv_hidden.dtype == _fp4x2:
++            recv_scale = runner_input.a1_scale  # per-1x32 e8m0 from mxfp4 dispatch
++            if recv_scale is None:
++                return None
++        elif recv_hidden.dtype == torch.bfloat16:
++            recv_scale = None
++        else:
++            return None
++
++        M, K = recv_hidden.shape
++        w13 = quant_info.w13_weight
++        E = w13.shape[0]  # num LOCAL experts
++        inter_dim = w13.shape[1] // 2
++        # model_dim = true K (recv K is packed /2 for fp4x2)
++        model_dim = K * 2 if (_fp4x2 is not None and recv_hidden.dtype == _fp4x2) else K
++
++        # mori recv is token-major: recv_topk_ids [M, topk] are GLOBAL expert ids
++        # (§6c). Validity is per-(row,slot) via expert_mask (== shipping
++        # get_topk_valid_mask); local block = contiguous [base, base+E), so
++        # base = first local index in expert_mask. NO total_recv prefix gate.
++        expert_mask = quant_info.expert_mask
++        if expert_mask is None:
++            return None
++        # graph-safe: keep base/total_recv as 0-d DEVICE tensors (NO .item() host
++        # sync) so the masked path is cuda-graph-capturable. The routing ops
++        # downstream consume them as tensors.
++        base = torch.argmax(expert_mask.to(torch.int32))  # 0-d int64 tensor
++        # valid recv rows are the prefix [0, total_recv); total_recv = sum of
++        # num_recv_tokens_per_expert (§6c-viii). Rows beyond are padding.
++        _nlt = runner_input.num_local_tokens
++        if not torch.is_tensor(_nlt):
++            _nlt = torch.tensor(list(_nlt), device=recv_hidden.device)
++        total_recv = _nlt.reshape(-1).sum()  # 0-d int tensor (on device)
++
++        _capturing = torch.cuda.is_current_stream_capturing()
++        if (
++            get_bool_env_var("SGLANG_MORI_MASKED_DEBUG", "false")
++            and not _capturing
++            and not getattr(_maybe_run_mori_masked, "_logged", False)
++        ):
++            print(
++                f"[mori-masked] ACTIVE: E={E} M={M} K={K} inter={inter_dim} "
++                f"max_m={max_m} base={int(base)} recv_dtype={recv_hidden.dtype}",
++                flush=True,
++            )
++            _maybe_run_mori_masked._logged = True
++
++        swiglu_limit = quant_info.swiglu_limit if quant_info.swiglu_limit > 0 else None
++        out = flydsl_masked_moe_gfx950_recv(
++            recv_hidden=recv_hidden,
++            recv_scale=recv_scale,
++            recv_topk_ids=runner_input.topk_ids,
++            recv_topk_weights=runner_input.topk_weights,
++            w1_shuf=w13,
++            w2_shuf=quant_info.w2_weight,
++            w1_scale_shuf=quant_info.w13_scale,
++            w2_scale_shuf=quant_info.w2_scale,
++            E=E,
++            expert_base=base,
++            total_recv=total_recv,
++            model_dim=model_dim,
++            inter_dim=inter_dim,
++            max_m=max_m,
++            activation=config.activation,
++            swiglu_limit=swiglu_limit,
++            # DSV4 default is gate_mode INTERLEAVE (GUGU) + a8w4 (fp8 act): the
++            # fused_moe key shows q_dtype_a=fp8, kernel flydsl_moe1_..._gui.
++            gate_mode="interleave",
++        )
++        if runner_input.output_dtype is not None:
++            out = out.to(runner_input.output_dtype)
++
++        # Track WORST masked-vs-default diff on genuinely-REAL rows (weight>0 AND
++        # both masked & ref finite) across ALL decode calls, to catch divergent
++        # batches (not just an early lucky one). Ref computed every call (2x MoE ->
++        # slow; use for diagnosis only, not for a valid gsm8k score).
++        if get_bool_env_var("SGLANG_MORI_MASKED_DUMP", "false"):
++            try:
++                from aiter.fused_moe import fused_moe as _ref_fused_moe
++
++                ref = _ref_fused_moe(
++                    hidden_states=recv_hidden,
++                    w1=quant_info.w13_weight,
++                    w2=quant_info.w2_weight,
++                    topk_weight=runner_input.topk_weights,
++                    topk_ids=runner_input.topk_ids,
++                    quant_type=_aiter_quant_type(runner_input.quant_type),
++                    activation=_aiter_activation(config.activation),
++                    w1_scale=quant_info.w13_scale,
++                    w2_scale=quant_info.w2_scale,
++                    a1_scale=recv_scale,
++                    a2_scale=quant_info.a2_scale,
++                    expert_mask=quant_info.expert_mask,
++                    num_local_tokens=runner_input.num_local_tokens,
++                    dtype=runner_input.output_dtype,
++                )
++                of = out.float()
++                rf = ref.float()
++                tw = runner_input.topk_weights.float()
++                # "normal-real" rows: weight>0, both finite, and REF magnitude is
++                # in the normal MoE-output range (|ref|<10 => exclude padding rows
++                # where the DEFAULT emits ~3e38 garbage). This isolates the rows
++                # that actually matter (what combine reads) from stale padding.
++                wpos = tw.sum(dim=1) > 0
++                fin = torch.isfinite(of).all(dim=1) & torch.isfinite(rf).all(dim=1)
++                refmag = rf.abs().amax(dim=1)
++                normal = wpos & fin & (refmag < 10.0)
++                nnorm = int(normal.sum())
++                c = getattr(_maybe_run_mori_masked, "_c", 0) + 1
++                _maybe_run_mori_masked._c = c
++                if nnorm:
++                    rowmax = (of - rf).abs().amax(dim=1)
++                    nidx = normal.nonzero().flatten()
++                    nrm = rowmax[nidx]
++                    nmax = float(nrm.max())
++                    gnmax = max(getattr(_maybe_run_mori_masked, "_gnmax", 0.0), nmax)
++                    _maybe_run_mori_masked._gnmax = gnmax
++                    if (nmax > 0.2 and not getattr(_maybe_run_mori_masked, "_shown", False)):
++                        rowmax2 = (of - rf).abs().amax(dim=1)
++                        nidx2 = normal.nonzero().flatten()
++                        order2 = torch.argsort(rowmax2[nidx2], descending=True)
++                        print(f"[REALDIFF2] call#{c} nmax={nmax:.4f} worst normal rows:", flush=True)
++                        for j in order2[:4].tolist():
++                            r = int(nidx2[j])
++                            print(
++                                f"  row{r} d={float(rowmax2[r]):.4f} |ref|={float(refmag[r]):.3f} "
++                                f"masked={[round(x,4) for x in of[r,:5].tolist()]} "
++                                f"ref={[round(x,4) for x in rf[r,:5].tolist()]} "
++                                f"ids={runner_input.topk_ids[r].tolist()} "
++                                f"w={[round(x,3) for x in tw[r].tolist()]}",
++                                flush=True,
++                            )
++                        _maybe_run_mori_masked._shown = True
++            except Exception as _e:
++                print(f"[mori-masked REALDIFF] failed: {_e}", flush=True)
++
++        return out
++    except Exception as exc:
++        if get_bool_env_var("SGLANG_MORI_MASKED_DEBUG", "false"):
++            import traceback
++
++            print(f"[mori-masked] fell back to default: {exc}", flush=True)
++            traceback.print_exc()
++        return None
++
++
+ class AiterRunnerCore(MoeRunnerCore):
+     def run(
+         self,
+@@ -145,6 +360,14 @@ class AiterRunnerCore(MoeRunnerCore):
+                 )
+             return AiterRunnerOutput(hidden_states=runner_input.hidden_states)
+ 
++        # Opt-in gfx950 masked (deep_gemm-style) MoE for the mori-EP path. Default
++        # off (returns None) so behavior is unchanged. See _maybe_run_mori_masked.
++        _masked_out = _maybe_run_mori_masked(
++            runner_input, quant_info, self.config, running_state
++        )
++        if _masked_out is not None:
++            return AiterRunnerOutput(hidden_states=_masked_out)
++
+         from aiter.fused_moe import fused_moe
+ 
+         from sglang.srt.environ import envs
+@@ -183,17 +406,90 @@ class AiterRunnerCore(MoeRunnerCore):
+         if self.config.no_combine:
+             extra["no_combine"] = True
+ 
++        # ===== PROTOTYPE v2: cuda-graph-safe per-bs prefix slice (opt-in) =====
++        # mori returns a STATICALLY padded recv [M_padded, K] (world*cap). Under
++        # CUDA-GRAPH the MoE grid is captured at M_padded/tile blocks, so MoE kernel
++        # time scales with M (profiled: EP stage1 169us@M=2048 vs DP 47us; smaller
++        # SGLANG_MORI_DECODE_MAX_DISPATCH_TOKENS -> faster, near-DP). (In EAGER,
++        # moe_sorting sizes the grid dynamically to num_valid, so M_padded is free
++        # there -- which is why an earlier eager A/B wrongly showed no win.)
++        #
++        # v2 slices recv to a STATIC-per-graph bound derived from the LOCAL decode
++        # bs (= origin_topk_ids.shape[0], static under cuda-graph), NOT from total_recv
++        # (dynamic) and NOT from the cap: M_bs = round_up(local_bs*topk*safety, tile).
++        # This tracks the real decode size per captured bs -> decode-tier kernel +
++        # small grid, without manually tuning the dispatch cap. cuda-graph-safe
++        # (all shapes are Python ints from .shape). Opt-in: SGLANG_MORI_DECODE_PREFIX_SLICE=1.
++        # CORRECTNESS: M_bs must be >= actual total_recv or tokens are dropped; the
++        # safety factor (SGLANG_MORI_DECODE_PREFIX_SAFETY, default 2) guards imbalance.
++        #
++        # RESULT (2026-07-15, VALIDATED under CUDA-GRAPH; the earlier eager A/B was
++        # invalid because eager sizes the moe_sorting grid dynamically to num_valid):
++        # cap=256 (M=2048), C=128, 2000in/400out: slice ON (M_bs=1536) = 2308 tok/s /
++        # TPOT 43.7ms vs OFF (M=2048) = 2163 / 47.1ms  => +6.7% tput, -7% TPOT, gsm8k
++        # 0.9. Bigger win at smaller bs / safety=1 (M_bs tracks local_bs*topk tightly),
++        # i.e. this is the AUTO per-bs equivalent of SGLANG_MORI_DECODE_MAX_DISPATCH_TOKENS.
++        _hs = runner_input.hidden_states
++        _tids = runner_input.topk_ids
++        _tw = runner_input.topk_weights
++        _a1s = a1_scale
++        _origin = running_state.get("aiter_combine_topk_ids")
++        from sglang.srt.layers.dp_attention import (
++            get_is_extend_in_batch as _get_is_extend,
++        )
++        if (
++            get_bool_env_var("SGLANG_MORI_DECODE_PREFIX_SLICE", "false")
++            and running_state.get("aiter_combine_is_mori")
++            and _origin is not None
++            and not _get_is_extend()  # decode only
++        ):
++            _local_bs = int(_origin.shape[0])
++            _topk = int(_tids.shape[1])
++            _safety = get_int_env_var("SGLANG_MORI_DECODE_PREFIX_SAFETY", 4)
++            _tile = 32
++            _M = int(_hs.shape[0])
++            # CALIBRATED: empirically total_recv ~= origin_bs * ep_size (~= origin_bs
++            # * topk * dp/ep). For DSV4 (dp==ep) this ~= origin_bs*topk. So the base
++            # estimate is origin_bs*topk and `safety` (>=2) covers the ep/dp ratio +
++            # routing imbalance. (An earlier `*E_local/E_global` factor UNDER-sized by
++            # ep_size and dropped tokens -- do NOT reintroduce it.)
++            _need = _local_bs * _topk  # base estimate of total_recv
++            _M_bs = int((_need * _safety + _tile - 1) // _tile) * _tile
++            _M_bs = min(_M, max(_tile, _M_bs))
++            if get_bool_env_var("SGLANG_MORI_MASKED_DEBUG", "false") and not torch.cuda.is_current_stream_capturing():
++                _nlt2 = runner_input.num_local_tokens
++                _tr2 = int(_nlt2.reshape(-1).sum() if torch.is_tensor(_nlt2) else sum(_nlt2))
++                _cnt = getattr(AiterRunnerCore, "_pslice_calls", 0) + 1
++                AiterRunnerCore._pslice_calls = _cnt
++                # track worst observed total_recv / (origin_bs*topk) to tune safety
++                _r = _tr2 / max(1, _need)
++                _mr = max(getattr(AiterRunnerCore, "_pslice_maxr", 0.0), _r)
++                AiterRunnerCore._pslice_maxr = _mr
++                if _tr2 > _M_bs or _cnt % 500 == 1:
++                    print(
++                        f"[prefix-slice] origin_bs={_local_bs} topk={_topk} safety={_safety} "
++                        f"M_bs={_M_bs} total_recv={_tr2} ratio={_r:.2f} maxratio={_mr:.2f} M_padded={_M}"
++                        f"{'  *** DROP! total_recv>M_bs ***' if _tr2 > _M_bs else ''}",
++                        flush=True,
++                    )
++            if 0 < _M_bs < _M:
++                _hs = _hs[:_M_bs]
++                _tids = _tids[:_M_bs]
++                _tw = _tw[:_M_bs]
++                if _a1s is not None and torch.is_tensor(_a1s) and _a1s.dim() >= 1 and _a1s.shape[0] == _M:
++                    _a1s = _a1s[:_M_bs]
++
+         output = fused_moe(
+-            hidden_states=runner_input.hidden_states,
++            hidden_states=_hs,
+             w1=quant_info.w13_weight,
+             w2=quant_info.w2_weight,
+-            topk_weight=runner_input.topk_weights,
+-            topk_ids=runner_input.topk_ids,
++            topk_weight=_tw,
++            topk_ids=_tids,
+             quant_type=_aiter_quant_type(runner_input.quant_type),
+             activation=_aiter_activation(self.config.activation),
+             w1_scale=quant_info.w13_scale,
+             w2_scale=quant_info.w2_scale,
+-            a1_scale=a1_scale,
++            a1_scale=_a1s,
+             a2_scale=quant_info.a2_scale,
+             bias1=quant_info.b13,
+             bias2=quant_info.b2,
+@@ -203,6 +499,15 @@ class AiterRunnerCore(MoeRunnerCore):
+             intermediate_pad=quant_info.intermediate_pad,
+             **extra,
+         )
++        # prefix-slice: pad the MoE output back to the full padded recv length so
++        # mori's combine (which expects [M_padded, ...]) gets the right shape;
++        # valid results are in the prefix, the tail is zero (unused by combine).
++        if _hs is not runner_input.hidden_states and output.shape[0] < runner_input.hidden_states.shape[0]:
++            _full = output.new_zeros(
++                (runner_input.hidden_states.shape[0],) + tuple(output.shape[1:])
++            )
++            _full[: output.shape[0]] = output
++            output = _full
+         return AiterRunnerOutput(hidden_states=output)
+ 
+     @property
+@@ -327,6 +632,28 @@ def _pre_permute_deepep_to_aiter(
+         is_w4a4 = weight_quant == AiterQuantType.PER_1X32
+         is_fp4_dispatch = hidden_states.dtype == torch.float4_e2m1fn_x2
+ 
++        # gfx950 masked path (opt-in): SKIP the fp4/fp8 -> bf16 upscale round-trip
++        # (§5f) for BOTH fp4 (mxfp4, preferred) and fp8 dispatch, keeping the
++        # dispatched format + per-1x32 e8m0 scale. The masked aiter GEMM consumes
++        # fp4x2 (a4w4) or fp8 (a8w4) + per-1x32 scale natively; run() routes to it
++        # via _maybe_run_mori_masked (decode-only).
++        _masked_skip_upscale = (
++            is_w4a4
++            and a1_scale is not None
++            and get_bool_env_var("SGLANG_MORI_MASKED_MOE", "false")
++            and get_int_env_var("SGLANG_MORI_MASKED_MAX_M", 0) > 0
++        )
++        if _masked_skip_upscale:
++            # decode-only (masked runs decode-only); prefill keeps the default
++            # upscale so its sorted-path fused_moe gets the format it expects.
++            try:
++                from sglang.srt.layers.dp_attention import get_is_extend_in_batch
++
++                if get_is_extend_in_batch():
++                    _masked_skip_upscale = False
++            except Exception:
++                _masked_skip_upscale = False
++
+         # AITER fused_moe Clamped-SwiGLU is dispatched with
+         # gate_mode=INTERLEAVE, for which AITER picks a bf16/fp8 `q_dtype_a`
+         # Refer to https://github.com/ROCm/aiter/blob/a2617c366dc7271a1662ecda2023d19f6ccefcec/aiter/fused_moe.py#L406-L412
+@@ -334,7 +661,10 @@ def _pre_permute_deepep_to_aiter(
+             "SGLANG_USE_AITER_MOE_GU_ITLV", "true"
+         )
+ 
+-        if is_w4a4 and a1_scale is not None and not is_fp4_dispatch:
++        if _masked_skip_upscale:
++            # keep fp8 hidden_states + a1_scale; masked GEMM handles it downstream.
++            pass
++        elif is_w4a4 and a1_scale is not None and not is_fp4_dispatch:
+             # W4A4 weights with FP8 dispatch: dequant FP8->BF16 first; the
+             # FP4 per_1x32 path needs BF16 input.
+             hidden_states = upscale(

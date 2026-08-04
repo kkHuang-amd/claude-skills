@@ -69,7 +69,24 @@ Common harness:
 - radix cache OFF
 - shared-expert fusion OFF
 
+Current guarded-delayer comparison matrix:
+
+| Backend | TBO | Delayer | Total tok/s | TPOT | TTFT | GSM8K |
+|---|:---:|:---:|---:|---:|---:|---:|
+| DP | off | on | 30,895.54 | 55.80 ms | 19.00 s | 0.943 |
+| DP | on | on | **33,076.53** | **52.93 ms** | **16.91 s** | — |
+| FlyDSL-EP | off | on | 31,227.35 | 55.87 ms | 18.17 s | 0.931 |
+| FlyDSL-EP | on | off | 32,087.20 | 53.91 ms | 18.27 s | 0.940 |
+| FlyDSL-EP | on | on | **32,368.95** | 54.36 ms | **17.30 s** | 0.936 |
+
+TBO effect with guarded delayer:
+
+- DP: +7.1% throughput, -5.1% TPOT, -11.0% TTFT
+- FlyDSL-EP: +3.7% throughput, -2.7% TPOT, -4.8% TTFT
+
 ### FlyDSL-EP, no TBO
+
+Delayer OFF baseline:
 
 | Run | Total tok/s | Output tok/s | TPOT | TTFT |
 |---|---:|---:|---:|---:|
@@ -77,11 +94,60 @@ Common harness:
 | 2 | 30,928.78 | 3,436.53 | 55.27 ms | 19.94 s |
 | Mean | **30,850.71** | **3,427.86** | **55.41 ms** | **19.88 s** |
 
+Recommended delayer ON with mixed-slot guard:
+
+| Run | Total tok/s | Output tok/s | TPOT | TTFT |
+|---|---:|---:|---:|---:|
+| 1 | 31,215.12 | 3,468.35 | 55.91 ms | 18.17 s |
+| 2 | 31,239.58 | 3,471.06 | 55.83 ms | 18.17 s |
+| Mean | **31,227.35** | **3,469.71** | **55.87 ms** | **18.17 s** |
+
+Guarded delayer vs delayer OFF: +1.2% throughput and -8.6% TTFT. GSM8K
+0.931/invalid0. The DSV4 launcher enables delayer for FlyDSL unless `DELAYER=off`.
+
 Historical same-harness DP reference from the original branch:
 
 - 30,425.55 total tok/s
 - 3,380.62 output tok/s
 - 60.15 ms TPOT
+
+DP regression isolation (2026-07-24):
+
+| Tree | Commit/state | Total tok/s | TPOT | TTFT |
+|---|---|---:|---:|---:|
+| old clean base | `02236fa38` | 30,593.82 | 59.01 ms | 16.38 s |
+| old dirty MegaMoE worktree | same base + local edits | 30,530.99 | 59.94 ms | 15.32 s |
+| new clean pre-A2A base | `11b0e5c5a` | 27,697.37 | 75.09 ms | 2.25 s |
+| FlyDSL-A2A HEAD, DP mode | A2A commits present, backend=none | 27,722.32 | 74.78 ms | 2.26 s |
+
+Conclusions:
+
+- FlyDSL-A2A commits change DP by +0.09%: no DP regression from this feature.
+- Dirty MegaMoE edits are not the 10% difference: clean and dirty old base agree.
+- The regression entered in upstream history `02236fa38..11b0e5c5a`.
+- Both branches report identical delayer args and `prefill_delayer.py` is unchanged;
+  the TTFT/TPOT shift points to an upstream scheduler/config interaction.
+- Delayer-OFF 512-prompt screening looked fast (30.8k), but the full 2048-prompt run
+  degraded to 20.0k with wave-like stalls. Disabling delayer is not a sustained-load fix.
+- Automated first-parent bisect used a validated 512-prompt proxy (good endpoint
+  30.7k, bad endpoint 23.0k; threshold 27k) and found:
+  - parent `927979e12`: 30,402.64 tok/s (GOOD)
+  - first bad `d03c8cee8`: 23,086.85 tok/s (BAD)
+  - commit: `Negotiate PrefillDelayer only after KV-budget admission checks (#31835)`
+- That commit moves `PrefillDelayer.negotiate_should_allow_prefill()` from the start
+  of `add_one_req()` to after all KV-budget gates. This changes the prefill/decode
+  scheduling balance and matches the observed TTFT improvement / TPOT regression.
+- Root mechanism: after KV admission, ranks commonly report `mixed`; the mixed branch
+  times out after 30 passes and admits prefill while decode slots are still constrained.
+  The old `all` branch kept slot-based decode protection until slots freed.
+- Fix (current FlyDSL-A2A branch): preserve post-KV correctness, but gather the effective
+  per-scheduler `max_running_requests` as a sixth DP field; when mixed ranks are under
+  slot pressure, continue delaying instead of taking the generic mixed timeout. An env
+  kill switch `SGLANG_PREFILL_DELAYER_MIXED_SLOT_GUARD` defaults to true.
+- Validation: original KV-reject unit tests PASS; new mixed-slot test PASS; full 2048
+  prompts = 30,895.54 tok/s, TPOT 55.80ms, TTFT 19.00s; GSM8K 0.943/invalid0.
+- Fixed timeout tuning is not a substitute: 100 passes gives 15.6k / 68.8s TTFT, and
+  1000 passes over-delays. Simply disabling delayer also fails on sustained workloads.
 
 ### FlyDSL-EP + prefill TBO
 
@@ -90,7 +156,7 @@ Settings:
 - `--enable-two-batch-overlap`
 - `GPU_MAX_HW_QUEUES=5`
 - `SGLANG_FLYDSL_TBO_BLOCK_NUM=64`
-- prefill delayer OFF
+- delayer OFF for the original two-run tuning baseline; guarded delayer ON also validated
 
 | Run | Total tok/s | TPOT | TTFT |
 |---|---:|---:|---:|
@@ -98,11 +164,21 @@ Settings:
 | 2 | 32,041.39 | 53.86 ms | 18.38 s |
 | Mean | **32,087.20** | **53.91 ms** | **18.27 s** |
 
+Guarded-delayer ON single validation:
+
+- 32,368.95 total tok/s
+- 54.36 ms TPOT
+- 17.30 s TTFT
+- GSM8K 0.936 / invalid 0
+
 Relative to FlyDSL no-TBO:
 
 - throughput +4.0%
 - TPOT -2.7%
 - TTFT -8.1%
+
+These percentages use the delayer-OFF no-TBO baseline. Use the comparison matrix
+above for the fully guarded-delayer A/B.
 
 Correctness:
 
@@ -111,7 +187,7 @@ Correctness:
 
 Negative configurations:
 
-- prefill delayer ON: 26,534.68 tok/s, TPOT 76.99 ms
+- pre-fix (`d03c8cee8`) delayer ON: 26,534.68 tok/s, TPOT 76.99 ms
 - TBO default grid: 30,405.56 tok/s after comm-stream fix
 - TBO block32: 22,284.80 tok/s, under-parallelized
 
@@ -277,12 +353,11 @@ MODE=flydsl PORT=8000 bash run_sgl_dsv4_unified.sh
 FlyDSL-EP + TBO:
 
 ```bash
-GPU_MAX_HW_QUEUES=5 \
-SGL_EXTRA_ARGS=--enable-two-batch-overlap \
-SGLANG_FLYDSL_TBO_BLOCK_NUM=64 \
-MODE=flydsl PORT=8000 \
-bash run_sgl_dsv4_unified.sh
+MODE=flydsl-tbo PORT=8000 bash run_sgl_dsv4_unified.sh
 ```
+
+`flydsl-tbo` automatically sets `GPU_MAX_HW_QUEUES=5`, enables TBO, uses block64,
+and enables the guarded delayer. `DELAYER=off` reproduces the original TBO tuning baseline.
 
 Serving sweep:
 

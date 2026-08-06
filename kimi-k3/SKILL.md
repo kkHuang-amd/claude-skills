@@ -8,7 +8,7 @@ description: Deploy and accuracy-benchmark open-weight Kimi-K3 with SGLang on 8 
 Use the scripts in:
 
 ```text
-/dockerx/home/wunhuang/tmp/useful-scripts/benchmarking/kimi-k3
+/dockerx/var/amdsgl/kk/workspace/useful-scripts/benchmarking/kimi-k3
 ```
 
 Read [HANDOVER.md](HANDOVER.md) before launching. It records the current paths,
@@ -18,7 +18,7 @@ validated parameters, prior scores, incomplete work, and failure modes.
 
 1. Verify the Docker image exposes 8 GPUs and contains the intended SGLang,
    AITER, FlyDSL, and ROCm versions.
-2. Mount `/dockerx/data/Kimi-K3` and the KVV checkout into the container.
+2. Mount `/dockerx/data/models/Kimi-K3` and the KVV checkout into the container.
 3. Run `launch_server.sh` in the foreground and save its output.
 4. Do not send requests at `Application startup complete`. Wait for:
 
@@ -36,7 +36,7 @@ validated parameters, prior scores, incomplete work, and failure modes.
 
 ## Invariants
 
-- Model weights: `/dockerx/data/Kimi-K3` (96 shards, about 1.6 TB).
+- Model weights: `/dockerx/data/models/Kimi-K3` (96 shards, about 1.6 TB).
 - KVV checkout: `/sgl-workspace/kvv-bench/kvv-k3-0727-update`.
 - API endpoint: `http://localhost:8000/v1`.
 - K3 accuracy settings: effort `max`, temperature `1.0`, top-p `0.95`.

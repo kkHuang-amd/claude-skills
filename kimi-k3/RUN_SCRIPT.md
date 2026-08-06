@@ -3,18 +3,19 @@
 Launcher:
 
 ```text
-/dockerx/home/wunhuang/tmp/useful-scripts/benchmarking/kimi-k3/launch_server.sh
+/dockerx/var/amdsgl/kk/workspace/useful-scripts/benchmarking/kimi-k3/launch_server.sh
 ```
 
 ## Merged defaults
 
-- Model: `/dockerx/data/Kimi-K3`
+- Model: `/dockerx/data/models/Kimi-K3`
 - TP: 8
+- Decode DCP: 8 with the AITER attention backend
 - Listen: `0.0.0.0:8000`
 - Static memory fraction: `0.93`
 - Maximum running requests: `8`
 - Decode CUDA Graph maximum batch size: `8`
-- Prefill context parallelism: enabled with `zigzag`, attention CP size `8`
+- Prefill context parallelism: disabled
 - Radix Cache: disabled for the long-context run
 - Chunked prefill and maximum prefill tokens: `8192`
 - Mamba full-memory ratio: `0.3`
@@ -50,12 +51,12 @@ CUDA_GRAPH_MAX_BS_DECODE=256 \
 ./launch_server.sh
 ```
 
-Long-context defaults are equivalent to:
+Current DCP validation defaults are equivalent to:
 
 ```bash
-ENABLE_PREFILL_CP=1 \
-CP_STRATEGY=zigzag \
-ATTN_CP_SIZE=8 \
+DCP_SIZE=8 \
+ATTENTION_BACKEND=aiter \
+ENABLE_PREFILL_CP=0 \
 RADIX_CACHE=0 \
 ./launch_server.sh
 ```

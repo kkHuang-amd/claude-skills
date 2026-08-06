@@ -1,19 +1,63 @@
 # Kimi-K3 handover
 
+> Current handover after Stage 1 optimization:
+> `STAGE1_HANDOVER_2026-08-06.md`.
+>
+> This file retains the earlier public-weight, DCP-port, KVV, and Docker
+> transition history. New chats should start with the Stage 1 handover.
+
 ## Current state
 
 - The old weights at `/dockerx/data/kmd` were deleted.
 - Latest public weights were downloaded from
-  `moonshotai/Kimi-K3` to `/dockerx/data/Kimi-K3`.
+  `moonshotai/Kimi-K3` to `/dockerx/data/models/Kimi-K3`.
 - Download verification: about 1.6 TB, `config.json`,
   `model.safetensors.index.json`, and all 96 safetensors shards are present.
 - The benchmark checkout is
   `/sgl-workspace/kvv-bench/kvv-k3-0727-update`.
 - The original ad-hoc launcher is `/sgl-workspace/sglang/run_kmd.sh`.
 - Reusable handover scripts are in
-  `/dockerx/home/wunhuang/tmp/useful-scripts/benchmarking/kimi-k3`.
+  `/dockerx/var/amdsgl/kk/workspace/useful-scripts/benchmarking/kimi-k3`.
 - No server or benchmark should be running at handover time. Verify before
   switching Docker images.
+
+## AMD decode DCP port validation (2026-08-04/05)
+
+- Target code: `/sgl-workspace/sglang`, `kimi-k3@e6311f7559`.
+- Port status: the six `k3_dcp` commits have been semantically ported,
+  including AITER Gluon decode/prefill paging, DCP8 correctness fixes, and
+  AITER DCP + DSpark static target-verify.
+- Targeted CPU tests: `9 passed`.
+- TP8 non-DCP baseline (`dcp_size=1`, Triton, 200 GSM8K questions, 5-shot,
+  temperature 0): score `0.985`, latency `33.095 s`, output throughput
+  `606.373 token/s`.
+- Baseline log: `/tmp/kimi-k3-gsm8k-tp8-baseline.log`.
+- DCP8 AITER server reached `ready to roll` with `page_size=32`,
+  `dcp_comm_backend=ag_rs`, replicated Q disabled, 655,584 token capacity,
+  and memory profile weights/KV/graph = `194.4/16.88/0.96 GB` per GPU.
+- DCP8 chat smoke and `/generate` batches 1 and 8 passed.
+- First DCP8 launch exposed an existing ROCm JIT failure from the unconditional
+  `cuda_fp8.h` include in `situ_and_mul.cuh`; the include is now CUDA-guarded,
+  and a standalone ROCm compile/run parity test passed.
+- DCP8 GSM8K (same 200 questions, 5-shot, temperature 0): score `0.985`,
+  latency `117.757 s`, output throughput `170.988 token/s`. Accuracy exactly
+  matches the TP8 non-DCP baseline and exceeds the `0.95` acceptance threshold.
+- DCP8 GSM8K log: `/tmp/kimi-k3-gsm8k-dcp8.log`.
+- Successful DCP8 server log:
+  `/tmp/kimi-k3-dcp8-aiter-server-next.log`.
+- With `CUDA_GRAPH_MAX_BS_DECODE=4` and `MAX_RUNNING_REQUESTS=8`, graph batch 2
+  and eager batch 5 both completed successfully.
+- DCP8 + AITER + DSpark static verify reached full warmup. Chat smoke and an
+  8-request generation batch passed; per-request observed accept lengths ranged
+  from `2.13` to `4.57` on the short synthetic prompts.
+- DSpark server log: `/tmp/kimi-k3-dcp8-aiter-dspark-server.log`.
+- All validation servers were stopped. No benchmark is active.
+
+### CONTINUE HERE
+
+- Status: port and requested validation are complete.
+- No continuation is required unless the changes should be committed or a
+  longer DSpark acceptance/performance benchmark is requested.
 
 ## Why the Docker image is being replaced
 
@@ -33,9 +77,9 @@ configs. Record the exact image name and digest before benchmarking.
 The container needs:
 
 ```text
-/dockerx/data/Kimi-K3
+/dockerx/data/models/Kimi-K3
 /sgl-workspace/kvv-bench/kvv-k3-0727-update
-/dockerx/home/wunhuang/tmp/useful-scripts/benchmarking/kimi-k3
+/dockerx/var/amdsgl/kk/workspace/useful-scripts/benchmarking/kimi-k3
 ```
 
 Recommended Docker runtime flags:
@@ -80,7 +124,7 @@ SGLANG_AITER_K3_OPT=1 \
 AITER_FLYDSL_FORCE=1 \
 AITER_SITUV2_A8W4=1 \
 sglang serve \
-  --model-path /dockerx/data/Kimi-K3 \
+  --model-path /dockerx/data/models/Kimi-K3 \
   --trust-remote-code \
   --enable-multimodal \
   --tp 8 \
@@ -115,7 +159,7 @@ Then verify:
 curl -sS http://localhost:8000/v1/models
 ```
 
-The expected ID is `/dockerx/data/Kimi-K3` when that local path is passed to
+The expected ID is `/dockerx/data/models/Kimi-K3` when that local path is passed to
 the launcher.
 
 ## KVV benchmark setup
@@ -143,7 +187,7 @@ Run order: OCRBench, MMMU-Pro, Tool-call, then BEAM.
 ## Baseline results from the deleted pre-release weights
 
 These results are historical references only. Do not report them as results
-from `/dockerx/data/Kimi-K3`.
+from `/dockerx/data/models/Kimi-K3`.
 
 | Benchmark | Measured | Screenshot reference |
 |---|---:|---:|
@@ -164,7 +208,7 @@ BEAM uses two stages:
 Generation requirements:
 
 - Keep Radix Cache enabled.
-- Use `/dockerx/data/Kimi-K3` as `--tokenizer`.
+- Use `/dockerx/data/models/Kimi-K3` as `--tokenizer`.
 - Do not use the bundled Kimi-K2.6 tokenizer. It undercounted some K3 prompts
   by about 22K tokens and produced context-length 400 errors.
 - Wait for full server warmup before starting.

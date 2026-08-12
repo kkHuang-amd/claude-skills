@@ -1,5 +1,34 @@
 # FlyDSL 學習計劃
 
+## FlyDSL knowledge hub
+
+此目錄現在同時是學習課程與 production 經驗索引。為避免破壞既有
+handover、skill discovery 與相對連結，外部文件採用**複製而非搬移**；
+原始位置仍是 source of truth。
+
+| 目錄 | 內容 |
+|---|---|
+| [`00-foundations/`](./00-foundations/) | 本學習計劃的 layout、MLIR、memory、MFMA、kernel design 與 exercises 副本 |
+| [`01-playbooks/`](./01-playbooks/) | Kernel authoring、profiling-first optimization、debug toolkit、FlyDSL vs Triton patterns |
+| [`02-profiling/`](./02-profiling/) | ROCm/CUDA graph trace 與 kernel timing 方法 |
+| [`03-a2a-dispatch/`](./03-a2a-dispatch/) | FlyDSL A2A、EP dispatch、TBO gap、MORI EPv2 比較 |
+| [`04-megamoe/`](./04-megamoe/) | DSV4 MegaMoE kernel、dispatch、deadlock、codesign 與 handover |
+| [`05-dsv4-masked-moe/`](./05-dsv4-masked-moe/) | gfx950 masked MoE root cause 與變更記錄 |
+| [`06-model-case-studies/kimi-k3/`](./06-model-case-studies/kimi-k3/) | Kimi-K3 MoE、KDA FlyDSL vs Triton、trace 與 serving 結果 |
+| [`06-model-case-studies/gfx1250/`](./06-model-case-studies/gfx1250/) | gfx1250 grouped A8W4 MoE、emulation 與 kernel fixes |
+| [`06-model-case-studies/gpt-oss/`](./06-model-case-studies/gpt-oss/) | GPT-OSS FlyDSL MoE failure modes |
+| [`07-ecosystem/`](./07-ecosystem/) | AITER/FlyDSL/Triton version coupling與 compile cascade |
+
+建議 production kernel 閱讀順序：
+
+1. [`01-playbooks/kernel_authoring.md`](./01-playbooks/kernel_authoring.md)
+2. [`01-playbooks/kernel_opt_playbook.md`](./01-playbooks/kernel_opt_playbook.md)
+3. [`01-playbooks/kernel_debug_toolkit.md`](./01-playbooks/kernel_debug_toolkit.md)
+4. [`01-playbooks/flydsl_performance_patterns_from_kda.md`](./01-playbooks/flydsl_performance_patterns_from_kda.md)
+5. 對應 model case study
+
+---
+
 > 目標讀者：懂 GPU 程式設計（CUDA / HIP），但 FlyDSL 與 CuTe 風格的 layout 概念是新的。
 >
 > 核心難點（依你自己的判斷）：
@@ -29,7 +58,10 @@
 
 ## 1. 環境與座標
 
-- FlyDSL 安裝路徑：`/opt/venv/lib/python3.10/site-packages/flydsl`（版本 `0.2.0`）
+- FlyDSL 安裝路徑：`/opt/venv/lib/python3.10/site-packages/flydsl`。本工作區
+  Kimi-K3/AITER 實驗使用 `0.3.0`；舊課程最初基於 `0.2.0`，執行範例前
+  請以 `python -c "import importlib.metadata as m; print(m.version('flydsl'))"`
+  確認實際版本。
 - 工作區裡的真實 kernel 範例（最佳教材）：
   - `aiter/aiter/ops/flydsl/kernels/` — splitk_hgemm、swiglu_and_mul、reduce、preshuffle_gemm、mfma_* 等
   - `aiter/aiter/ops/flydsl/kernels/layout_utils.py` — layout 字串 parse 與 idx2crd/crd2idx 的純 arith 實作（很好的入門讀物）

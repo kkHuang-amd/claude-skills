@@ -1,0 +1,335 @@
+{
+  "full_compute_ranks": 5,
+  "rank_median_total_ms": 40.101133999999995,
+  "buckets": {
+    "activation_add": {
+      "ms": 0.8007420000000004,
+      "launches": 185,
+      "pct": 1.9968063746027742
+    },
+    "attn_residual": {
+      "ms": 1.6619059999999999,
+      "launches": 186,
+      "pct": 4.144286792488213
+    },
+    "collective": {
+      "ms": 2.3306669999999996,
+      "launches": 187,
+      "pct": 5.811972798574724
+    },
+    "dense_gemm": {
+      "ms": 8.478455999999996,
+      "launches": 698,
+      "pct": 21.142683895173633
+    },
+    "full_attention": {
+      "ms": 6.350504000000001,
+      "launches": 24,
+      "pct": 15.83622049191926
+    },
+    "kda_decode": {
+      "ms": 1.8422260000000006,
+      "launches": 69,
+      "pct": 4.593949886803702
+    },
+    "moe_route_quant": {
+      "ms": 2.9714510000000005,
+      "launches": 368,
+      "pct": 7.409892697797527
+    },
+    "moe_stage1": {
+      "ms": 6.946878999999998,
+      "launches": 92,
+      "pct": 17.32339788695252
+    },
+    "moe_stage2": {
+      "ms": 4.1062600000000025,
+      "launches": 92,
+      "pct": 10.239760302040343
+    },
+    "other": {
+      "ms": 1.5638179999999997,
+      "launches": 312,
+      "pct": 3.899685230846589
+    },
+    "sampling": {
+      "ms": 0.191066,
+      "launches": 15,
+      "pct": 0.4764603414955797
+    },
+    "torch_native": {
+      "ms": 2.857158999999999,
+      "launches": 622,
+      "pct": 7.124883301305142
+    }
+  },
+  "ranks": [
+    {
+      "file": "kimi-k3-tp8-graph-1785932820.4837139-TP-0.trace.json.gz",
+      "buckets": {
+        "sampling": {
+          "ms": 0.191305,
+          "launches": 15
+        },
+        "torch_native": {
+          "ms": 2.857158999999999,
+          "launches": 622
+        },
+        "other": {
+          "ms": 1.5638179999999997,
+          "launches": 312
+        },
+        "collective": {
+          "ms": 2.3306669999999996,
+          "launches": 187
+        },
+        "dense_gemm": {
+          "ms": 8.472769000000003,
+          "launches": 698
+        },
+        "kda_decode": {
+          "ms": 1.8407050000000003,
+          "launches": 69
+        },
+        "attn_residual": {
+          "ms": 1.6624230000000004,
+          "launches": 186
+        },
+        "activation_add": {
+          "ms": 0.8054600000000004,
+          "launches": 185
+        },
+        "moe_route_quant": {
+          "ms": 2.9470519999999993,
+          "launches": 368
+        },
+        "moe_stage1": {
+          "ms": 6.960038999999998,
+          "launches": 92
+        },
+        "moe_stage2": {
+          "ms": 4.109978,
+          "launches": 92
+        },
+        "full_attention": {
+          "ms": 6.350061999999999,
+          "launches": 24
+        }
+      }
+    },
+    {
+      "file": "kimi-k3-tp8-graph-1785932820.4837139-TP-2.trace.json.gz",
+      "buckets": {
+        "sampling": {
+          "ms": 0.19086599999999995,
+          "launches": 15
+        },
+        "torch_native": {
+          "ms": 2.729636000000001,
+          "launches": 622
+        },
+        "other": {
+          "ms": 1.510416999999999,
+          "launches": 312
+        },
+        "collective": {
+          "ms": 2.5357470000000006,
+          "launches": 187
+        },
+        "dense_gemm": {
+          "ms": 8.501845999999997,
+          "launches": 698
+        },
+        "kda_decode": {
+          "ms": 1.8662680000000007,
+          "launches": 69
+        },
+        "attn_residual": {
+          "ms": 1.6579030000000001,
+          "launches": 186
+        },
+        "activation_add": {
+          "ms": 0.7854620000000003,
+          "launches": 185
+        },
+        "moe_route_quant": {
+          "ms": 2.949172,
+          "launches": 368
+        },
+        "moe_stage1": {
+          "ms": 6.914396,
+          "launches": 92
+        },
+        "moe_stage2": {
+          "ms": 4.061981,
+          "launches": 92
+        },
+        "full_attention": {
+          "ms": 6.328503,
+          "launches": 24
+        }
+      }
+    },
+    {
+      "file": "kimi-k3-tp8-graph-1785932820.4837139-TP-3.trace.json.gz",
+      "buckets": {
+        "sampling": {
+          "ms": 0.19190500000000002,
+          "launches": 15
+        },
+        "torch_native": {
+          "ms": 2.7467180000000004,
+          "launches": 622
+        },
+        "other": {
+          "ms": 1.527939000000002,
+          "launches": 312
+        },
+        "collective": {
+          "ms": 2.3538290000000006,
+          "launches": 187
+        },
+        "dense_gemm": {
+          "ms": 8.495405,
+          "launches": 698
+        },
+        "kda_decode": {
+          "ms": 1.837904,
+          "launches": 69
+        },
+        "attn_residual": {
+          "ms": 1.6787840000000003,
+          "launches": 186
+        },
+        "activation_add": {
+          "ms": 0.8007420000000004,
+          "launches": 185
+        },
+        "moe_route_quant": {
+          "ms": 2.9714510000000005,
+          "launches": 368
+        },
+        "moe_stage1": {
+          "ms": 6.9359220000000015,
+          "launches": 92
+        },
+        "moe_stage2": {
+          "ms": 4.111696999999999,
+          "launches": 92
+        },
+        "full_attention": {
+          "ms": 6.351500999999999,
+          "launches": 24
+        }
+      }
+    },
+    {
+      "file": "kimi-k3-tp8-graph-1785932820.4837139-TP-1.trace.json.gz",
+      "buckets": {
+        "sampling": {
+          "ms": 0.19102600000000003,
+          "launches": 15
+        },
+        "torch_native": {
+          "ms": 2.9089950000000018,
+          "launches": 622
+        },
+        "other": {
+          "ms": 1.5650950000000001,
+          "launches": 312
+        },
+        "collective": {
+          "ms": 2.236624,
+          "launches": 187
+        },
+        "dense_gemm": {
+          "ms": 8.470048000000007,
+          "launches": 698
+        },
+        "kda_decode": {
+          "ms": 1.8422260000000006,
+          "launches": 69
+        },
+        "attn_residual": {
+          "ms": 1.6619059999999999,
+          "launches": 186
+        },
+        "activation_add": {
+          "ms": 0.8002629999999997,
+          "launches": 185
+        },
+        "moe_route_quant": {
+          "ms": 2.986051000000002,
+          "launches": 368
+        },
+        "moe_stage1": {
+          "ms": 6.970799,
+          "launches": 92
+        },
+        "moe_stage2": {
+          "ms": 4.1062600000000025,
+          "launches": 92
+        },
+        "full_attention": {
+          "ms": 6.350504000000001,
+          "launches": 24
+        }
+      }
+    },
+    {
+      "file": "kimi-k3-tp8-graph-1785932820.4837139-TP-6.trace.json.gz",
+      "buckets": {
+        "sampling": {
+          "ms": 0.191066,
+          "launches": 15
+        },
+        "torch_native": {
+          "ms": 2.8659130000000004,
+          "launches": 622
+        },
+        "other": {
+          "ms": 1.5746140000000004,
+          "launches": 312
+        },
+        "collective": {
+          "ms": 2.173145999999999,
+          "launches": 187
+        },
+        "dense_gemm": {
+          "ms": 8.478455999999996,
+          "launches": 698
+        },
+        "kda_decode": {
+          "ms": 1.886825,
+          "launches": 69
+        },
+        "attn_residual": {
+          "ms": 1.6493430000000004,
+          "launches": 186
+        },
+        "activation_add": {
+          "ms": 0.8280200000000003,
+          "launches": 185
+        },
+        "moe_route_quant": {
+          "ms": 2.981412000000002,
+          "launches": 368
+        },
+        "moe_stage1": {
+          "ms": 6.946878999999998,
+          "launches": 92
+        },
+        "moe_stage2": {
+          "ms": 4.074099999999999,
+          "launches": 92
+        },
+        "full_attention": {
+          "ms": 6.368862000000001,
+          "launches": 24
+        }
+      }
+    }
+  ],
+  "graph_decode_throughput_tok_s": 842.0,
+  "derived_step_ms": 38.00475059382423
+}

@@ -36,6 +36,11 @@ the analyzer is still being developed
 the trace is the sole evidence for a correctness issue
 ```
 
+For new SGLang captures, use
+`aiter-optimization-tracker/SGLANG_TRACE_CAPTURE_METHOD_2026-08-13.md`.
+Do not merge TP ranks; enforce a 500 MiB compressed limit per rank and capture
+only representative late prefill plus short decode steps.
+
 When deleting raw traces, create a manifest containing relative path and byte
 size. The 2026-08-12 cleanup manifest is:
 
@@ -44,6 +49,15 @@ RAW_TRACE_DELETION_2026-08-12.tsv
 ```
 
 ## Experiment run folders
+
+Physical run storage:
+
+```text
+/dockerx/var/amdsgl/kk/workspace/kimi-k3-runs/stage2-runs
+```
+
+The project-local `stage2-runs` path is a symlink to this location. Keep using
+the project-local path in reports and scripts so links remain stable.
 
 Each run folder should retain:
 

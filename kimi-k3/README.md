@@ -10,6 +10,8 @@ start_prompt.md
 SUMMARY.md
 aiter-optimization-tracker/HANDOFF_2026-08-11.md
 aiter-optimization-tracker/SGLANG_VENDOR_FLYDSL_2026-08-12.md
+aiter-optimization-tracker/PR34490_RADIX4_RESULTS_2026-08-12.md
+aiter-optimization-tracker/SGLANG_TRACE_CAPTURE_METHOD_2026-08-13.md
 k3-handover-2026-08-12/HANDOVER.md
 ```
 
@@ -17,7 +19,7 @@ k3-handover-2026-08-12/HANDOVER.md
 
 ```text
 aiter-optimization-tracker/   canonical reports and decisions
-stage2-runs/                  retained benchmark logs/results/scripts
+stage2-runs/                  symlink to external benchmark/run storage
 persistent-snapshots/         reproducibility snapshot and Triton runtime
 k3-handover-2026-08-12/      portable git bundles and handover docs
 canvases/                     canonical topic canvases
@@ -26,6 +28,14 @@ legacy/                       archived pre-2026-08-10 documents/canvases
 
 New results should be added to `aiter-optimization-tracker/`, not as another
 top-level handover file.
+
+Large run artifacts are physically stored under:
+
+```text
+/dockerx/var/amdsgl/kk/workspace/kimi-k3-runs/stage2-runs
+```
+
+The local `stage2-runs` symlink preserves canonical document and script paths.
 
 ## Artifact policy
 

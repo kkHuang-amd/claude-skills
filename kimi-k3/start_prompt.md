@@ -179,6 +179,21 @@ export SGLANG_K3_AITER_MOE_PREROUTE_FP8=1
 export SGLANG_K3_AITER_B2_FUSIONS=1
 ```
 
+Validated optional Radix-4 router:
+
+```bash
+export SGLANG_K3_RADIX4_TOPK=1
+```
+
+Validated performance-only Triton 3.7 extend-attention fix:
+
+```bash
+export SGLANG_TRITON_37_EXTEND_LQ576_N32=1
+```
+
+This profile is default-off pending GSM8K validation. It is ignored by the
+block selector on Triton 3.6.
+
 `SGLANG_K3_FLYDSL_SOURCE` supports:
 
 ```text
@@ -210,6 +225,17 @@ C2 TPOT:  17.67 ->   16.16 ms
 C4:     1741.98 -> 1743.45 tok/s
 ```
 
+Optional Radix-4 result:
+
+```text
+Focused tests: 45 passed
+C2 paired median: 970.38 -> 993.11 tok/s (+2.34%)
+C2 TPOT:          17.63 -> 17.21 ms (-2.38%)
+C4/C8/C16/C32:    +2.05% / +1.71% / +1.34% / +0.68%
+GSM8K 200:         0.985
+capacity:          933883
+```
+
 Do not claim a new gain unless it is compared against this fresh, vendored
 baseline using the same workload and warmup policy.
 
@@ -233,6 +259,7 @@ KDA group64
 SGLang-vendored Kimi FlyDSL kernels
 optional B2 profile
 optional M16384 profile
+optional SGLang #34490 Radix-4 TopK router with local tie/NaN fixes
 ```
 
 Optional only:
@@ -276,6 +303,7 @@ stage1 ABI consuming route metadata and token-major scale directly
 Before implementing another kernel, read:
 
 ```text
+aiter-optimization-tracker/PR34490_RADIX4_RESULTS_2026-08-12.md
 aiter-optimization-tracker/B300_MI355X_TRACE_COMPARISON_2026-08-11.md
 aiter-optimization-tracker/PRODUCTION_TRACE_2026-08-11.md
 aiter-optimization-tracker/PAUSE_TRACK_2026-08-11.md
@@ -292,6 +320,15 @@ Open/review the SGLang integration PR.
 ```
 
 ## 9. Artifact retention rules
+
+Large run artifacts are physically stored at:
+
+```text
+/dockerx/var/amdsgl/kk/workspace/kimi-k3-runs/stage2-runs
+```
+
+The project-local `stage2-runs` path is a symlink to that directory. Continue
+using project-local paths in reports and scripts.
 
 Keep:
 
@@ -327,6 +364,10 @@ Keep each optimization independently gated and revertible.
 Do not push, commit, or delete data unless explicitly requested.
 Verify actual kernel dispatch with fresh JIT evidence.
 Do not infer endpoint gains from isolated kernel benchmarks.
+For SGLang traces, follow
+aiter-optimization-tracker/SGLANG_TRACE_CAPTURE_METHOD_2026-08-13.md:
+one unmerged file per TP rank, one manual profiler session spanning late
+prefill into a short decode sample, no stacks/shapes, and <=500 MiB per rank.
 Update SUMMARY.md, the relevant detailed report, and the canonical canvas after
 each accepted or rejected experiment.
 ```

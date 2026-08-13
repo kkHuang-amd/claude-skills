@@ -17,20 +17,25 @@ const pr = (number: number) => (
   <Link href={`https://github.com/ROCm/aiter/pull/${number}`}>#{number}</Link>
 );
 
+const sglPr = (number: number) => (
+  <Link href={`https://github.com/sgl-project/sglang/pull/${number}`}>#{number}</Link>
+);
+
 export default function KimiK3OptimizationScan() {
   return (
     <Stack gap={18} style={{ padding: 20, maxWidth: 1500, margin: "0 auto" }}>
       <Stack gap={6}>
         <H1>Kimi-K3 optimization scan</H1>
         <Text tone="secondary">
-          45 tracked PRs: 43 direct Kimi-K3 matches plus 2 KDA dependencies ·
-          canonical PR inventory, integration state, and measured local effects.
+          46 tracked PRs: 43 direct AITER matches, 2 KDA dependencies, and 1
+          SGLang integration candidate · canonical PR inventory, integration
+          state, and measured local effects.
         </Text>
       </Stack>
 
       <Grid columns={4} gap={14}>
-        <Stat value="45" label="Tracked PRs (43 direct + 2 related)" />
-        <Stat value="31" label="Open PRs" tone="info" />
+        <Stat value="46" label="Tracked PRs (43 direct + 3 related)" />
+        <Stat value="32" label="Open PRs" tone="info" />
         <Stat value="9" label="Merged PRs in search set" tone="success" />
         <Stat value="3" label="Closed without merge" tone="warning" />
       </Grid>
@@ -38,7 +43,7 @@ export default function KimiK3OptimizationScan() {
       <Grid columns={4} gap={14}>
         <Stat value="6" label="Kimi kernel families vendored in SGLang" tone="success" />
         <Stat value="2" label="Hard AITER core dependencies" tone="info" />
-        <Stat value="4" label="Optional profiles / flags" tone="warning" />
+        <Stat value="5" label="Optional profiles / flags" tone="warning" />
         <Stat value="23" label="Open PRs still unintegrated" tone="info" />
       </Grid>
 
@@ -48,6 +53,7 @@ export default function KimiK3OptimizationScan() {
         Vendored validation passed GSM8K 200 at 0.990, matched C2-C32 within
         0.25%, and preserved capacity at 933,883 tokens. #4503/#4504 and the
         B2 path remain independent optional flags; #4603 remains C16-only.
+        SGLang #34490 is validated default-off with local tie/NaN fixes.
       </Callout>
 
       <H2>Local integration ledger</H2>
@@ -56,6 +62,7 @@ export default function KimiK3OptimizationScan() {
         striped
         headers={["PR", "Feature", "Local commits", "Measured result", "Production status"]}
         rows={[
+          [sglPr(34490), "Radix-4 E896 top-16 router", "experiment/pr34490-radix4", "45 tests; paired C2 +2.34%; C4-C32 +0.68–2.05%", "Validated optional"],
           [pr(4495), "Fused KDA decode + f_b", "SGLang 13e6937", "Vendored kernel tests and endpoint validation passed", "Production manifest"],
           [pr(4617), "Caller-owned fused_moe output", "AITER integration/k3-core-only", "Removed routed-output copy; strict alias contract passed", "Core dependency"],
           [pr(4647), "Reusable MoE stage1 scratch", "AITER integration/k3-core-only", "Capacity 933,883; graph memory reuse retained", "Core dependency"],
@@ -64,7 +71,7 @@ export default function KimiK3OptimizationScan() {
           [pr(4504), "FP8 MoE pre-route/shared-down", "SGLang 13e6937", "B2 C2 +8.8%; C4 flat; C1 capacity cost remains", "Optional B2/C1"],
           [pr(4503), "FP8 latent-MoE tail", "SGLang 13e6937", "C1 +2.39%, token capacity −9.55%", "Optional off"],
         ]}
-        rowTone={["success", "success", "success", "success", "success", "warning", "warning"]}
+        rowTone={["success", "success", "success", "success", "success", "success", "warning", "warning"]}
       />
 
       <Callout tone="success" title="Final selected-stack validation">
@@ -72,6 +79,13 @@ export default function KimiK3OptimizationScan() {
         C2/4/8/16/32 measured 968.57 / 1741.98 / 2881.25 / 4432.25 /
         6191.41 tok/s, all within 0.25% of golden. The optional B2 profile
         reached 1054.19 tok/s at C2 and stayed flat at C4.
+      </Callout>
+      <Callout tone="success" title="Radix-4 validation">
+        The default-off #34490 profile passed 45 focused tests and exact AITER
+        tie/NaN contracts. Five paired C2 rounds improved throughput
+        970.38→993.11 tok/s (+2.34%); C4/C8/C16/C32 improved
+        +2.05/+1.71/+1.34/+0.68%. GSM8K 200 was 0.985 and capacity remained
+        933,883.
       </Callout>
 
       <H2>Production trace refresh · 2026-08-11</H2>
@@ -105,6 +119,7 @@ export default function KimiK3OptimizationScan() {
         striped
         headers={["PR", "Area", "Target", "Reported impact", "Local disposition", "Branch"]}
         rows={[
+          [sglPr(34490), "Radix-4 K3 TopK router", "MI355X · E896 top-16 decode", "Measured 4.2-5.2 µs/layer saved at M1-M64", "Validated default-off; local exact-tie, NaN and gfx guard fixes required", "experiment/pr34490-radix4"],
           [pr(4507), "MLA split sizing from page table", "gfx950 · long context", "Up to 4.80× E2E at 327K context", "Deferred: Triton 3.7 isolated env", "fix/mla-gluon-splitkv-sizing-from-page-table"],
           [pr(4450), "12-head MLA split scheduling", "gfx950 · TP8", "TPOT up to 3.78× at c1 / 100K", "Deferred: Triton 3.7 isolated env", "perf/mla-gluon-h12-split-tuning"],
           [pr(4509), "Split-major MLA grid + blocked reduce", "gfx950 · small nhead", "+10.86% median throughput on top of #4507", "Deferred: depends on #4507/Triton 3.7", "perf/mla-gluon-split-major-grid-blocked-reduce"],
@@ -119,7 +134,7 @@ export default function KimiK3OptimizationScan() {
           [pr(4607), "Fused A4W4 stage1 quantization", "gfx1250", "3.2–35.1% MoE speedup by M", "Deferred: gfx1250 hardware", "perf/gfx1250-fuse-a4w4-quant"],
           [pr(4647), "Reusable MoE stage1 scratch", "graph capture", "Saves about 6.7 GiB/GPU", "Integrated; enabled (−5.69 GB/GPU)", "xiaohuguo/pr-f-moe-stage1-workspace"],
         ]}
-        rowTone={["info", "info", "info", "neutral", "neutral", "info", "warning", "success", "warning", "success", "info", "info", "success"]}
+        rowTone={["info", "info", "info", "info", "neutral", "neutral", "info", "warning", "success", "warning", "success", "info", "info", "success"]}
       />
 
       <H2>Other open K3 work</H2>
@@ -252,12 +267,13 @@ export default function KimiK3OptimizationScan() {
       </Grid>
 
       <Callout tone="warning" title="Tracking caveats">
-        The 43 direct PRs come from the 2026-08-10 Kimi-K3 text-search snapshot
-        at origin/main 7c5e20170; #4568/#4602 were added manually as functional
-        KDA dependencies. Local integration status is newer and comes from the
-        integration branches plus measured MI355X results. Upstream PR states
-        can change, and PR-author speedups are not directly interchangeable
-        with local endpoint measurements.
+        The 43 direct AITER PRs come from the 2026-08-10 Kimi-K3 text-search
+        snapshot at origin/main 7c5e20170; AITER #4568/#4602 and SGLang #34490
+        were added manually as functional dependencies or candidates. Local
+        integration status is newer and comes from the integration branches
+        plus measured MI355X results. Upstream PR states can change, and
+        PR-author speedups are not directly interchangeable with local endpoint
+        measurements.
       </Callout>
 
       <Text tone="tertiary" size="small">

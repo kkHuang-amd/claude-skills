@@ -48,12 +48,25 @@ export default function KimiK3OptimizationScan() {
       </Grid>
 
       <Callout tone="info" title="Current execution state">
-        Kimi-specific gfx950 FlyDSL kernels are now maintained in SGLang
-        commit 13e6937. The AITER core-only branch retains #4617 and #4647.
-        Vendored validation passed GSM8K 200 at 0.990, matched C2-C32 within
-        0.25%, and preserved capacity at 933,883 tokens. #4503/#4504 and the
-        B2 path remain independent optional flags; #4603 remains C16-only.
-        SGLang #34490 is validated default-off with local tie/NaN fixes.
+        Independent SGLang work is staged locally on
+        perf/k3-gfx950-independent-fusions-clean from current main is now Draft
+        PR #35287; KDA-only vendoring and C2 tuning were pushed to existing
+        Draft PR #34198. The independent branch uses stock AITER
+        FlyDSL shims and excludes #4617/#4647 contracts. Unified cooperative
+        preroute covers M2/M4; #4503 remains optional off. MLA Q/cache was
+        removed because main's AITER pin fails its batch64 semantics.
+      </Callout>
+      <Callout tone="success" title="PR extraction validation">
+        Independent branch: 35 pinned-AITER focused tests, C2/C4 runtime smoke,
+        and GSM8K 1319 = 0.953. PR #34198 update: 15 pinned-AITER KDA tests, a
+        12.77 µs C2 graph benchmark, and GSM8K 1319 = 0.950. The only hard
+        unmerged AITER dependencies remain #4617 and #4647, and both already
+        have AITER PRs.
+      </Callout>
+      <Callout tone="info" title="MLA Q/cache integration staged separately">
+        Draft PR #35308 carries BF16/FP8 MLA Q/cache fusion and passes GSM8K
+        1319 at 0.955. It is intentionally separate because it requires AITER
+        #4342 / 770790cd semantics newer than main's current AITER pin.
       </Callout>
 
       <H2>Local integration ledger</H2>
@@ -68,7 +81,7 @@ export default function KimiK3OptimizationScan() {
           [pr(4647), "Reusable MoE stage1 scratch", "AITER integration/k3-core-only", "Capacity 933,883; graph memory reuse retained", "Core dependency"],
           [pr(4497), "Fused MLA output gate", "SGLang 13e6937", "Vendored focused tests passed", "Production manifest"],
           [pr(4499), "KDA group64 input projection", "SGLang 13e6937", "B1/B2 focused tests passed", "Production manifest"],
-          [pr(4504), "FP8 MoE pre-route/shared-down", "SGLang 13e6937", "B2 C2 +8.8%; C4 flat; C1 capacity cost remains", "Optional B2/C1"],
+          [pr(4504), "Unified cooperative MoE preroute", "perf/k3-gfx950-independent-fusions-clean", "M2 +1.08%; M4 C4 +3.08%; GSM8K 0.951", "Staged local PR branch; M2/M4 opt-in"],
           [pr(4503), "FP8 latent-MoE tail", "SGLang 13e6937", "C1 +2.39%, token capacity −9.55%", "Optional off"],
         ]}
         rowTone={["success", "success", "success", "success", "success", "success", "warning", "warning"]}
@@ -94,7 +107,7 @@ export default function KimiK3OptimizationScan() {
         headers={["Rank", "Bottleneck", "Trace evidence", "Decision / next action"]}
         rows={[
           ["1", "TP8 communication", "8–9% of decode kernel time; 22% of prefill", "Dispatch-verified B32: 1-stage 21.47 µs vs 2-stage 12.44 µs; exact C32 −1.66%. B6/B16 are separate shape-specific candidates."],
-          ["2", "MoE route preparation and stages", "Route/top-k/quant-sort 10–14% at C2; stage1+stage2 about 30% at C32", "B2-only profile remains +8.70%. Generic TILE_M: M4 shared+tri saved only 2.77 µs/layer vs 10 µs gate; M8/M16 regressed, so experiment was removed."],
+          ["2", "MoE route preparation and stages", "Route/top-k/quant-sort 10–14% at C2; stage1+stage2 about 30% at C32", "B2 composition is +9.36%. New M4 single mixed front passes at +1.80% C4; M8/M16 and M4 shared-down fail closed."],
           ["3", "Attention-residual aggregate", "6–8% of decode and about 8% of prefill", "#4572 fresh-cache C1 endpoint was flat; standalone replacement rejected."],
         ]}
         rowTone={["warning", "info", "neutral"]}
@@ -279,7 +292,7 @@ export default function KimiK3OptimizationScan() {
       <Text tone="tertiary" size="small">
         Sources: public GitHub PR API, git history/diffs, local integration
         commits, and MI355X benchmark artifacts · canonical status updated
-        2026-08-12.
+        2026-08-18.
       </Text>
     </Stack>
   );

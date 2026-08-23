@@ -1,0 +1,31 @@
+---
+description: Kimi-K3 benchmark scripts, logs, traces, and artifact conventions
+alwaysApply: true
+---
+
+# Kimi-K3 Benchmark and Artifact Conventions
+
+For Kimi-K3 benchmarking, profiling, analysis, or dump work:
+
+1. Use `/workspace/useful-scripts/benchmarking/kimi-k3/` as the canonical
+   reusable toolkit; read its `README.md` before adding a script.
+2. Organize reusable code by function:
+   `server/`, `endpoint/`, `accuracy/`, `trace/`, `analysis/`, `contracts/`,
+   and `micro/`.
+3. Do not copy endpoint loops, trace capture, tensor dump logic, kernel-family
+   classification, or graph timing. Extend the corresponding shared helper.
+4. Keep server launch separate from endpoint, accuracy, and trace clients.
+   Experiment wrappers should define environments and invoke shared tools.
+5. Put dated raw run evidence under `/workspace/kimi-k3-runs/<experiment>/`.
+   Never treat a dated run wrapper as the canonical implementation.
+6. Preserve summaries, commands, effective args, JSON/CSV results, patches,
+   and checksums. Raw traces/logs may be removed only after their findings are
+   captured durably and the investigation is closed.
+7. Redirect full noisy output to artifacts and show only stable summary/error
+   markers in chat. Do not paste large server, build, trace, or benchmark logs.
+8. Use `server/dump_runtime_state.sh` for reproducibility metadata; never dump
+   credentials or the unrestricted process environment.
+9. Clean rebuildable `/tmp/aiter-jit-*` and `/tmp/sglang-cache-*` experiment
+   caches after runs, while retaining durable run artifacts.
+10. Validate new Python with compilation/help smoke, shell scripts with
+    `bash -n`, and at least one real saved artifact when practical.

@@ -1,0 +1,28 @@
+---
+description: Kimi-K3 handoff, worktree safety, and durable-state workflow
+alwaysApply: true
+---
+
+# Kimi-K3 Workflow
+
+Apply this rule whenever a task concerns Kimi-K3, SGLang K3, AITER K3,
+MXFP4, MLA/KDA, or the associated benchmark artifacts.
+
+1. Read `/workspace/claude-skills/kimi-k3/HANDOFF_2026-08-21.md` first,
+   especially `CONTINUE HERE`.
+2. Treat that handoff, `/workspace/claude-skills/kimi-k3/SUMMARY.md`, and
+   linked tracker reports as the source of truth. Do not reconstruct old chats.
+3. Check both worktrees before editing:
+   - `/sgl-workspace/sglang-k3-triton37`
+   - `/sgl-workspace/aiter-k3-triton37`
+4. Preserve all pre-existing uncommitted changes. Never reset, discard,
+   overwrite, commit, or push unless the user explicitly requests it.
+5. Distinguish prior MXFP4 work from the manually ported PR #35770 attention
+   changes. Do not remove one while intending to remove the other.
+6. Production currently remains on AITER prefill with Triton decode.
+   `SGLANG_K3_TRITON_PREFILL_PROFILE` defaults to `off`; do not change the
+   default without new endpoint and correctness evidence.
+7. Record durable decisions, metrics, exact revisions, commands, and next
+   steps under `/workspace/claude-skills/kimi-k3/`.
+8. Keep a concise `CONTINUE HERE` section and update the handoff before ending
+   a long optimization session.

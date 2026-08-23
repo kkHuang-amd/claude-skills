@@ -29,6 +29,7 @@ aiter-optimization-tracker/SGLANG_VENDOR_FLYDSL_2026-08-12.md
 aiter-optimization-tracker/FRESH_INTEGRATION_2026-08-12.md
 aiter-optimization-tracker/AITER_DEPENDENCY_MATRIX_2026-08-12.md
 aiter-optimization-tracker/PAUSE_TRACK_2026-08-11.md
+aiter-optimization-tracker/KDA_B2_M4_OPTIMIZATION_2026-08-18.md
 canvases/README.md
 ```
 
@@ -124,6 +125,18 @@ AITER  284a1eb401bb15f6368a68b34eb0cd693ee1fcd3
 If the remote branches changed, compare their commits against these SHAs
 before continuing.
 
+Current 2026-08-18 worktree state:
+
+```text
+SGLang HEAD c8e8c5080d4c2d24b9777caf4b11654ad76f2840
+  branch perf/k3_opts_0812
+  KDA/B2/M4 experiments are uncommitted
+
+AITER HEAD 284a1eb401bb15f6368a68b34eb0cd693ee1fcd3
+  branch integration/k3-core-only
+  pre-existing modified op_tests/test_moe_2stage.py remains
+```
+
 Offline bundles are available at:
 
 ```text
@@ -170,14 +183,32 @@ export SGLANG_K3_AITER_KDA_GROUP64=1
 export SGLANG_K3_AITER_MOE_PREROUTE_FP8=0
 export SGLANG_K3_AITER_LATENT_TAIL_FP8=0
 export SGLANG_K3_AITER_B2_FUSIONS=0
+export SGLANG_K3_AITER_MLA_Q_CACHE_FUSION=1
+export SGLANG_K3_TRITON_FP8_Q=0
 ```
 
-Optional B2 profile:
+Optional KDA B2 group64 specialization:
+
+```bash
+export SGLANG_K3_AITER_B2_FUSIONS=1
+```
+
+The KDA exact-C2 winner is now automatic under
+`SGLANG_K3_KDA_FUSED_BACKEND=aiter`; no additional C2 tuning flags are needed.
+M1/M4/M8/M16 retain their original kernel options.
+
+Validated unified M2/M4 cooperative preactivated producer, default-off:
 
 ```bash
 export SGLANG_K3_AITER_MOE_PREROUTE_FP8=1
-export SGLANG_K3_AITER_B2_FUSIONS=1
+export SGLANG_K3_PREROUTE_PREACTIVATED_SHARED=1
+export SGLANG_K3_FLYDSL_SOURCE=sglang
 ```
+
+Five-round gains are M2 `+1.08%` throughput / `-1.11%` TPOT and M4 `+3.08%`
+throughput / `-3.33%` TPOT. Combined M2+KDA reaches `1111.97 tok/s`; GSM8K-1319
+is `0.951`. The path covers exact M2/M4; M1 retains B1 and AITER-source mode
+fails closed. Older per-bucket M2/M4 MoE designs were removed.
 
 Validated optional Radix-4 router:
 
@@ -215,6 +246,29 @@ C4:  1741.98 tok/s
 C8:  2881.25 tok/s
 C16: 4432.25 tok/s
 C32: 6191.41 tok/s
+```
+
+Current BF16-Q + FP8-KV mixed-backend sweep (2026-08-17):
+
+```text
+C2:    998.71 tok/s
+C4:   1830.68 tok/s
+C8:   3041.08 tok/s
+C16:  4729.40 tok/s
+C32:  6654.66 tok/s
+C64:  8656.21 tok/s
+```
+
+Latest optional composition:
+
+```text
+KDA winner + B2 flags:
+  C2 1002.26 -> 1096.04 tok/s (+9.36%)
+  TPOT 17.099 -> 15.561 ms (-8.99%)
+
+M4 cooperative preactivation:
+  C4 five-round mean 1862.80 -> 1920.22 tok/s (+3.08%)
+  TPOT 17.622 -> 17.036 ms (-3.33%)
 ```
 
 Optional B2 result:

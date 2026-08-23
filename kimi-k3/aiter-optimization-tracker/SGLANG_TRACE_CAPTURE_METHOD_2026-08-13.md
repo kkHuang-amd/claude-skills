@@ -89,6 +89,19 @@ Triton 3.7: 7.7-8.2 MiB per rank
 Both versions retained representative PyTorch API, MoE and attention-residual
 GPU events. All 16 gzip files passed integrity validation.
 
+## Additional validated capture
+
+The same method was adapted to a matched C64 8192/64 workload for Kimi-K3 FP8
+KV with MLA Q/cache fusion enabled:
+
+```text
+/workspace/kimi-k3-runs/mla-q-cache-fp8-trace-2026-08-13/
+```
+
+It produced eight valid 18 MiB rank traces (139 MiB total), retained late
+prefill plus C64 decode, and kept CUDA Graph enabled. See that directory's
+`README.md` for the exact configuration and ATOM comparison trace paths.
+
 ## Retention
 
 Keep the compact raw traces while they are under active inspection. After

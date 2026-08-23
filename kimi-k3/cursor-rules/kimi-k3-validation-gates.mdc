@@ -1,0 +1,28 @@
+---
+description: Kimi-K3 optimization validation and production-promotion gates
+alwaysApply: true
+---
+
+# Kimi-K3 Validation Gates
+
+Use staged validation for any Kimi-K3 kernel or serving optimization:
+
+1. Start with focused dispatch/fallback tests and numerical microbenchmarks on
+   the target architecture. Fail immediately on wrong dispatch, NaN/Inf, or a
+   numerical threshold violation.
+2. Benchmark graph replay when the production path uses CUDA/HIP graphs.
+   Include conversion/cast work that production performs.
+3. Attribute changes within one backend before the final backend A/B.
+4. For production comparisons, use the current production profile as baseline,
+   not merely the old implementation of the candidate backend.
+5. Keep model, TP, KV dtype, cache state, prompts, seeds, chunk size, request
+   limits, warmups, and all unrelated optimization flags identical.
+6. Run fixed 8K/1K and 68K/350 endpoint workloads over the required
+   concurrencies. Save throughput, TTFT, TPOT, successes, OOMs, and retractions.
+7. Run paired GSM8K and long-context output/logprob checks after performance
+   measurement. State clearly when endpoint top-k probabilities are used as a
+   proxy rather than full logits.
+8. Do not promote an optimization that misses any required performance or
+   correctness gate. Keep it default-off and document the rejection.
+9. Save raw evidence under `/workspace/kimi-k3-runs/` and the decision under
+   `/workspace/claude-skills/kimi-k3/aiter-optimization-tracker/`.

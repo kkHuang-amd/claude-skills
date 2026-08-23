@@ -7,6 +7,61 @@ session can resume without reconstructing the GitHub audit.
 
 ## CONTINUE HERE
 
+- Canonical final SGLang/ATOM C2/C64 GPU-step attribution and decision:
+  [`SGLANG_ATOM_C2_C64_TRACE_ATTRIBUTION_2026-08-22.md`](SGLANG_ATOM_C2_C64_TRACE_ATTRIBUTION_2026-08-22.md)
+- First GPU-first candidate rejected and removed: MLA QKV-A PTPC M64 made the
+  production TP8 target chain `6.007 us` slower:
+  [`MLA_QKVA_PTPC_M64_2026-08-23.md`](MLA_QKVA_PTPC_M64_2026-08-23.md)
+- Decision: production is unchanged. Next implement KDA input-projection MXFP4
+  at M32+ as a separate default-off candidate. Graph-external analysis remains
+  deferred.
+- Current-route workload correction and matched-current-kernel result:
+  [`CURRENT_ROUTE_DIAGNOSTIC_RESULTS_2026-08-22.md`](CURRENT_ROUTE_DIAGNOSTIC_RESULTS_2026-08-22.md),
+  [`MATCHED_ROUTE_CURRENT_KERNEL_2026-08-23.md`](MATCHED_ROUTE_CURRENT_KERNEL_2026-08-23.md)
+- Full dense graph crossover and layer-weighted storage:
+  [`DENSE_CROSSOVER_FULL_2026-08-23.md`](DENSE_CROSSOVER_FULL_2026-08-23.md)
+- Current cross-worktree handoff and exact fresh-chat prompt:
+  [`../HANDOFF_2026-08-21.md`](../HANDOFF_2026-08-21.md)
+- Completed matched SGLang/ATOM C2/C64 trace attribution plan:
+  [`TRACE_ATTRIBUTION_PLAN_2026-08-22.md`](TRACE_ATTRIBUTION_PLAN_2026-08-22.md)
+- SGLang old versus current AITER matched C2 A/B:
+  [`CURRENT_AITER_SGLANG_C2_AB_2026-08-21.md`](CURRENT_AITER_SGLANG_C2_AB_2026-08-21.md)
+- Same-AITER, common-client SGLang versus ATOM C64:
+  [`COMMON_CLIENT_SGLANG_ATOM_C64_2026-08-21.md`](COMMON_CLIENT_SGLANG_ATOM_C64_2026-08-21.md)
+- Same-AITER, common-client SGLang versus ATOM C2:
+  [`COMMON_CLIENT_SGLANG_ATOM_C2_2026-08-21.md`](COMMON_CLIENT_SGLANG_ATOM_C2_2026-08-21.md)
+- Current-main ATOM C64 multi-stream versus single-stream A/B:
+  [`ATOM_C64_STREAM_AB_2026-08-21.md`](ATOM_C64_STREAM_AB_2026-08-21.md)
+- Current-main ATOM C2 multi-stream versus single-stream A/B:
+  [`ATOM_C2_STREAM_AB_2026-08-21.md`](ATOM_C2_STREAM_AB_2026-08-21.md)
+- SGLang PR #35770 Triton prefill integration rejected for production:
+  [`TRITON_PREFILL_PR35770_2026-08-21.md`](TRITON_PREFILL_PR35770_2026-08-21.md)
+- Decode latent-up MXFP4 M32-M256:
+  [`DECODE_LATENT_MXFP4_2026-08-20.md`](DECODE_LATENT_MXFP4_2026-08-20.md)
+- Latent RMSNorm + MXFP4 quant fusion:
+  [`RMSNORM_MXFP4_FUSION_2026-08-20.md`](RMSNORM_MXFP4_FUSION_2026-08-20.md)
+- Dedicated dense MXFP4 kernel tuning:
+  [`MXFP4_DENSE_KERNEL_TUNING_2026-08-20.md`](MXFP4_DENSE_KERNEL_TUNING_2026-08-20.md)
+- MXFP4 latent-up fused epilogue rejected:
+  [`MXFP4_TAIL_EPILOGUE_REJECTED_2026-08-20.md`](MXFP4_TAIL_EPILOGUE_REJECTED_2026-08-20.md)
+- Capacity-aware latent-up-only MXFP4:
+  [`MOE_LATENT_SPLIT_2026-08-20.md`](MOE_LATENT_SPLIT_2026-08-20.md)
+- Non-EP tuned MoE front and latent MXFP4:
+  [`MOE_FRONT_TUNED_MXFP4_2026-08-19.md`](MOE_FRONT_TUNED_MXFP4_2026-08-19.md)
+- KDA whole-input projection integration:
+  [`KDA_INPROJ_FUSION_INTEGRATION_2026-08-19.md`](KDA_INPROJ_FUSION_INTEGRATION_2026-08-19.md)
+- Modified-worktree Triton 3.7 performance validation:
+  [`MODIFIED_WORKTREE_PERFORMANCE_2026-08-19.md`](MODIFIED_WORKTREE_PERFORMANCE_2026-08-19.md)
+- Triton 3.7 best-profile container reproduction:
+  [`TRITON37_BEST_PROFILE_REPRODUCTION_2026-08-19.md`](TRITON37_BEST_PROFILE_REPRODUCTION_2026-08-19.md)
+- Independent SGLang PR extraction and AITER gap audit:
+  [`PR_EXTRACTION_AND_AITER_GAPS_2026-08-18.md`](PR_EXTRACTION_AND_AITER_GAPS_2026-08-18.md)
+- Independent feature PR draft:
+  [`INDEPENDENT_K3_PR_DRAFT_2026-08-18.md`](INDEPENDENT_K3_PR_DRAFT_2026-08-18.md)
+- SGLang PR #34198 update draft:
+  [`PR34198_UPDATE_DRAFT_2026-08-18.md`](PR34198_UPDATE_DRAFT_2026-08-18.md)
+- MLA Q/cache standalone PR preparation:
+  [`MLA_Q_CACHE_PR_PREP_2026-08-18.md`](MLA_Q_CACHE_PR_PREP_2026-08-18.md)
 - Fresh-clone migration result:
   [`FRESH_INTEGRATION_2026-08-12.md`](FRESH_INTEGRATION_2026-08-12.md)
 - Fresh AITER dependency matrix:

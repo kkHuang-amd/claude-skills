@@ -141,10 +141,21 @@ export default function B300VsMI355XKimiK3() {
           ["Route prep", "route_quant_fused", "grouped top-k + sort/quant kernels", "About 1.73 ms/step C2 gap"],
           ["Attention", "trtllm_mla", "Triton prefill + AITER MLA decode", "B300 has TMA/persistent kernels"],
           ["Attention residual", "TMA fused kernel", "ROCm register-tile Triton kernel", "About 0.43 ms/step C2 gap"],
-          ["KDA", "CUDA fused many-heads kernel", "AITER fused KDA + f_b", "About 0.29 ms/step C2 gap"],
+          ["KDA", "CUDA fused many-heads kernel", "ATT-tuned AITER fused KDA + f_b", "69-layer graph improved 9.20→8.38 µs/layer; still opt-in"],
         ]}
         rowTone={["warning", "warning", "neutral", "warning", "info", "info", "info"]}
       />
+      <Callout tone="info" title="2026-08-18 serial KDA and preroute update">
+        SGLang K3 sets <Text weight="semibold">alt_streams=None</Text> on HIP,
+        so the retained MI355X execution is single-stream; do not attribute M4
+        shared-down behavior to stream overlap. ATT-backed KDA changes reduce a
+        production-like 69-layer graph by 8.9%, while combined B2 projections
+        raise C2 throughput 9.36%. A new single-launch M4 mixed preroute front
+        raises C4 1.80%; M8/M16 and M4 shared-down fail their endpoint gates.{" "}
+        <Link href="file:///workspace/claude-skills/kimi-k3/aiter-optimization-tracker/KDA_B2_M4_OPTIMIZATION_2026-08-18.md">
+          Detailed handoff
+        </Link>
+      </Callout>
 
       <H2>Recommended order</H2>
       <Stack gap={8}>

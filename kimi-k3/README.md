@@ -12,6 +12,7 @@ aiter-optimization-tracker/HANDOFF_2026-08-11.md
 aiter-optimization-tracker/SGLANG_VENDOR_FLYDSL_2026-08-12.md
 aiter-optimization-tracker/PR34490_RADIX4_RESULTS_2026-08-12.md
 aiter-optimization-tracker/SGLANG_TRACE_CAPTURE_METHOD_2026-08-13.md
+aiter-optimization-tracker/KDA_B2_M4_OPTIMIZATION_2026-08-18.md
 k3-handover-2026-08-12/HANDOVER.md
 ```
 
@@ -47,6 +48,19 @@ and analysis outputs were retained. The deletion inventory is:
 ```text
 RAW_TRACE_DELETION_2026-08-12.tsv
 ```
+
+The 2026-08-17 C2 KDA/B2 traces and older summarized raw profiler artifacts
+were deleted with explicit user approval. Inventories:
+
+```text
+RAW_TRACE_DELETION_2026-08-18.tsv
+RAW_TRACE_DELETION_2026-08-18_GLOBAL.tsv
+RAW_TRACE_DELETION_2026-08-18_REMAINDER.tsv
+RAW_TRACE_DELETION_2026-08-18_COOP_PREACT.tsv
+```
+
+Durable JSON/CSV analyses, benchmark results, scripts and decision reports
+remain under `/workspace/kimi-k3-runs`.
 
 ## Canvas policy
 

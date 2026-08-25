@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+
+# contains an ANTHROPIC API subscription key — keep out of version control
+claude_setup.sh

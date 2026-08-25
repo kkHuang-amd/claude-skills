@@ -1,0 +1,176 @@
+================================================================================
+ NEW WORKSPACE BOOTSTRAP PROMPT
+ Paste everything between the BEGIN/END markers as the FIRST message of a new
+ session. Usage notes are at the bottom, after the END marker.
+================================================================================
+
+----------------------------- BEGIN PROMPT -----------------------------
+
+Before doing any work, adopt the following operating rules for this entire
+session. They are not optional and they are not just for the first turn.
+
+## 1. Skills repository
+
+My skills live at:  /dockerx/home/wunhuang/claude-skills/
+
+Do this now, in ONE batched message:
+  - ls that directory (top level only)
+  - read  cap-tool-output/SKILL.md
+  - read  reduce-conversation-usage/SKILL.md
+
+Then, for the domain skills below, read ONLY the `description:` frontmatter
+line of each (`head -5 <dir>/SKILL.md`) -- do NOT read the bodies. Read a body
+only when the task turns out to be about that topic.
+
+  aiter-custom-allreduce-nan-crash   dsv4      gfx1250    kimi-k3
+  perf-bottleneck-attribution        gpt-oss   flydsl     sglang-prefill-coalescer
+
+If a skill covers what I am asking about, say so and follow it instead of
+improvising.
+
+### Directory size -- READ THIS BEFORE OPENING ANY OF THEM
+
+These directories are document CORPORA, not single files. Their SKILL.md is an
+index; the directory behind it is large. Never `cat` a directory, never read a
+corpus in bulk, and never assume a .md file is small -- check with `wc -c`
+first.
+
+  mori      2,759,849 chars  ~690k tokens  in ONE file
+  dsv4      1,036,592 chars  ~259k tokens  53 files
+  flydsl      971,997 chars  ~243k tokens  61 files
+  kimi-k3     633,914 chars  ~158k tokens  115 files
+  gfx1250     251,855 chars   ~63k tokens  19 files
+
+`mori/` has NO SKILL.md. It contains exactly one file,
+`dsv4-tbo-full-conversation.md`, which is a raw conversation export of about
+690k tokens. Reading it would consume most of a 1M context window in a single
+tool call and effectively end the session. Do not read it. If you need
+something from it, grep for the specific term and read a narrow line range:
+
+  rg -n '<term>' mori/dsv4-tbo-full-conversation.md | head -20 | cut -c1-200
+  sed -n 'A,Bp' mori/dsv4-tbo-full-conversation.md
+
+Every other directory above has a SKILL.md that tells you which single file to
+open. Use it. For `kimi-k3` specifically, the entry point is
+`kimi-k3/CONTINUE_HERE.md` plus `kimi-k3/DEV_RULES.md` -- not `SUMMARY.md`,
+which is 36 KB and must be read one section at a time.
+
+## 2. Token discipline -- ACTIVE FROM YOUR VERY FIRST TOOL CALL
+
+Context is re-sent every turn, so cost ~= bytes_printed x turns_remaining.
+A dump on turn 3 of a 40-turn session is paid ~37 more times, and there is no
+way to un-print it. Be strictest at the START, when you are exploring and
+output size is least predictable.
+
+These rules apply even before you have finished reading the skills above:
+
+  a. Cap WIDTH, not just line count. `tail -30` bounds lines and says nothing
+     about bytes -- one config/argparse/JSON line can be 17,000 chars (~4k
+     tokens) on its own. Always compose both:
+         tail -n 30 x.log | cut -c1-200
+
+  b. Unconditional byte cap on anything you have not run before this session:
+         <command> 2>&1 | head -c 2000
+
+  c. Count before you list. Ask for the answer, not the data:
+         find ... | wc -l        rg -c pattern file        test -f x && echo yes
+     Only list once the count says listing is safe (< ~30 short entries).
+
+  d. Never search from /. Scope it, depth-limit it, prune generated trees
+     (build/, jit/, .git/, 3rdparty/, __pycache__/, node_modules/):
+         find <scoped-dir> -maxdepth 4 -name 'pat' -not -path '*/build/*' | head -20
+     Prefer `rg --files -g 'pat'` inside a repo.
+
+  e. Bounded git only. `git diff --stat -- <path>` first, then one file.
+     Never bare `git diff` / `git log` / `git show`.
+
+  f. Long jobs: full log to a FILE, only markers to the chat. The filter must
+     be INSIDE the command -- output of a background task cannot be filtered
+     after the fact:
+         <job> > /tmp/job.log 2>&1
+         echo "exit=$?"; rg 'PASS|FAIL|Error|Traceback' /tmp/job.log | tail -20 | cut -c1-200
+
+  g. ONE channel per log. Do not run a monitor AND poll the same file -- you
+     pay for identical lines twice for zero extra information.
+
+  h. Parse structured responses, never dump them. Extract the fields:
+         curl -s "$URL" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['x'])"
+
+  i. Do NOT re-read a file you just edited to verify it. A failed edit raises
+     an error; silence means success. Same for re-ls / re-running "to be sure".
+
+  j. Edit in place (Edit / sed -i / small python script). Never rewrite a whole
+     large file to change a few lines.
+
+Escalation ladder -- go down a step only if the step above genuinely did not
+answer the question. Most exploration should stop at 2 or 3.
+     1. wc -l / wc -c / rg -c        -- how much is there?
+     2. rg -o '<narrow pattern>'     -- just the value I need
+     3. rg '<pat>' | head -20 | cut -c1-200
+     4. sed -n 'A,Bp' file           -- one targeted range
+     5. read the whole file          -- rare, small files only
+
+## 3. Durable state lives on disk, not in this chat
+
+  - Write results, decisions and next steps into a project doc as you go, not
+    only into the conversation.
+  - Keep a "CONTINUE HERE" block at the top of that doc: status / exact next
+    action / files+functions / one copy-paste repro command / pass criteria.
+  - When this thread gets large, I will start a fresh chat pointing at the doc.
+    The doc is the source of truth; the chat is scratch.
+
+## 4. Environment -- detect, do not assume
+
+Do not assume CUDA/NVIDIA. Detect first, cheaply, in one batched message:
+  - GPU vendor/arch, driver tool (rocm-smi vs nvidia-smi)
+  - whether this is a git repo, and its dirty state (--short | head)
+  - which of rg / jq / fd are available
+Then state what you found in one or two lines and proceed.
+
+## 5. How I want you to work
+
+  - Batch independent tool calls into ONE message. Do not serialise reads,
+    greps and checks across many turns.
+  - Decide and act. Ask me only when genuinely blocked or when two readings of
+    my request would produce materially different work.
+  - Report faithfully: if something failed, show the actual error; if you
+    skipped part of the task, say which part and why.
+  - Do not commit, push, or touch anything outside the working directory
+    without asking me first.
+  - Long-running servers/benchmarks: launch in the background, filter the log,
+    and tell me the PID and how to kill it.
+
+Acknowledge with a SHORT confirmation (a few lines, not a summary of the
+above), then wait for my actual task.
+
+------------------------------ END PROMPT ------------------------------
+
+
+================================================================================
+ USAGE NOTES  (not part of the prompt -- do not paste, or paste harmlessly)
+================================================================================
+
+WHEN TO USE
+  First message of any new workspace / container / fresh chat, before the
+  real task. Paste block is 5,241 chars (~1.3k tokens); pays for itself on the
+  first avoided log dump (one ServerArgs line was measured at 16,980
+  chars, ~4.2k tokens).
+
+SHORT VARIANT
+  If the skills repo is already mounted and you trust the agent to read it,
+  this one-liner is often enough:
+
+    Read /dockerx/home/wunhuang/claude-skills/cap-tool-output/SKILL.md and
+    reduce-conversation-usage/SKILL.md and apply both for this whole session.
+    Then list the other skill dirs and read only their description: lines.
+    Cap every command: | cut -c1-200 and | head -c 2000. Count before listing.
+    Never search from /. Batch independent tool calls. Acknowledge briefly.
+
+  Use the FULL prompt when the skills repo is NOT mounted in the new workspace
+  (the inline rules in section 2 then still take effect without any file read).
+
+MAINTENANCE
+  - Section 1 lists skill directory names. Update it when skills are added or
+    removed, or replace the list with: `ls /dockerx/home/wunhuang/claude-skills/`.
+  - Keep section 2 in sync with cap-tool-output/SKILL.md; it is a deliberate
+    duplicate so the rules survive a workspace where the repo is absent.

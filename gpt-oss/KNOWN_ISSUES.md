@@ -419,6 +419,180 @@ silent miscompute becomes a loud failure.
 
 ---
 
+### A6. `sink_ptr` without `sink_size` selects a `_nsink` kernel — prefill aborts (FIXED locally in aiter, NOT committed, NOT upstreamed)
+
+Affects every gpt-oss launch on the AITER backend, both the SHUFFLE 5D path
+and the legacy NHD path. The server loads weights, captures CUDA graphs, then
+dies on the first prefill (the startup warmup `/generate`):
+
+```text
+RuntimeError: invalid argument for batch_prefill: no matching kernel found.
+              page_size=1, num_pages=6, dtype=bf16.
+              If KV cache exceeds 2GB (INT32_MAX byte offset) with page_size < kN0,
+              CDNA3+ GPU (MI300/MI350) is required.
+```
+
+**The error message is misleading.** It blames KV-cache size and GPU
+generation; neither is the cause. `num_pages=6` is just the 6-token warmup
+batch, and this reproduced on MI355X (gfx950), which is CDNA4.
+
+Traceback tail:
+
+```text
+sglang/srt/layers/attention/aiter_backend.py:2454  forward_extend
+sglang/srt/layers/attention/aiter_utils.py:97      forward_extend_vectorized_5d
+aiter/aiter/ops/mha.py:3935                        mha_batch_prefill_func
+```
+
+#### Root cause — two bugs in `aiter/aiter/ops/mha.py`
+
+gpt-oss uses a learned per-head **sink logit**, passed as `sink_ptr`. It does
+NOT use `sink_size` (aiter's StreamingLLM-style "first N KV tokens always
+attended"), so `sink_size` stays at its default `0`. That exposes:
+
+1. **Parameter-order mismatch (the dominant bug).** `_mha_batch_prefill` calls
+   the op with all-positional args in the order
+
+   ```text
+   ..., kv_block_descale, kv_last_page_lens, block_table, seqlen_k, sink_ptr, gen
+   ```
+
+   but `cmdGenFunc_mha_batch_prefill` — the function that picks which JIT
+   module to build/load — declares
+
+   ```text
+   ..., kv_block_descale, sink_ptr, gen, kv_last_page_lens, block_table, seqlen_k
+   ```
+
+   so inside the generator `sink_ptr` actually receives `kv_last_page_lens`.
+
+2. **Inconsistent sink predicate.** The generator computed
+   `has_effective_sink` from `sink_size > 0` only, while the C++ side
+   (`csrc/cpp_itfs/mha_fwd_batch_prefill.cu:52`) uses
+
+   ```cpp
+   bool has_sink = args.sink_size > 0 || args.sink_ptr != nullptr;
+   ```
+
+Net effect: Python names and loads the `..._nsink.so` module, C++ then asks for
+a `has_sink=true` kernel arm that module does not contain,
+`fmha_batch_prefill` returns `t < 0`, and the `TORCH_CHECK` above fires.
+
+Fixing only (2) is **not** sufficient — verified; the generator still reads the
+wrong slot and keeps selecting `_nsink`. Both changes are required.
+
+#### Affected call sites (all pass `sink_ptr` and never `sink_size`)
+
+```text
+python/sglang/srt/layers/attention/aiter_utils.py:112    5D fresh-prompt path
+python/sglang/srt/layers/attention/aiter_utils.py:199    5D gather-and-linearize path
+python/sglang/srt/layers/attention/aiter_backend.py:2502 legacy NHD path
+```
+
+#### Why this cannot be worked around from the SGLang caller
+
+SGLang already passes `sink_ptr` **by keyword** and is not doing anything
+wrong. The corruption happens two layers deeper, inside aiter: `_mha_batch_prefill`
+re-invokes the decorated op `mha_batch_prefill` with **all-positional** args, and
+`compile_ops` forwards that same arg tuple to `cmdGenFunc_mha_batch_prefill`.
+Nothing SGLang passes can change that binding.
+
+Tail misalignment (positions 25-29 of the generator's signature):
+
+```text
+generator expects     actually receives
+sink_ptr           <- kv_last_page_lens
+gen                <- block_table
+kv_last_page_lens  <- seqlen_k
+block_table        <- sink_ptr
+seqlen_k           <- None
+```
+
+Three caller-side workarounds exist. None is acceptable:
+
+**A. Pass `sink_size > 0` from SGLang.** Mechanically works — `sink_size` sits
+at position 15 and *is* bound correctly, so `has_effective_sink` becomes true
+and the `_sink` module is selected. But `sink_size` in aiter means
+StreamingLLM-style "the first N KV tokens are always attended", and it really
+does change the mask:
+
+```python
+k_start_window = torch.clamp(abs_q - window_left, min=sink_size)
+is_sink = i_k < sink_size
+```
+
+gpt-oss wants a learned per-head sink **logit**, not a preserved KV prefix, and
+gpt-oss runs with a sliding window (128) so this masking path is live. The
+result is silently **wrong attention output** instead of a crash — strictly
+worse than the current failure.
+
+**B. Monkeypatch `cmdGenFunc_mha_batch_prefill`.** Ineffective after import:
+`compile_ops` calls `gen_func(*args, **kwargs)` through a closure variable
+captured at decoration time (`aiter/jit/core.py:1618`), not via a module
+attribute lookup. Patching would have to win a race before aiter is imported.
+
+**C. Call the low-level op `mha_batch_prefill` directly with keyword args.**
+Keyword binding sidesteps the misordering, but it also skips everything
+`mha_batch_prefill_func` does first: contiguity normalization, 5D/4D/3D layout
+validation, head-size divisibility checks, `sink_ptr` dtype/device coercion,
+and the final `out[..., :head_size_v_og]` slice. That copies aiter's internal
+contract into SGLang and breaks whenever aiter changes it.
+
+Conclusion: this must be fixed in aiter. Any model using a learned sink logit
+(`sink_ptr` without `sink_size`) hits it.
+
+#### Fix
+
+Local, uncommitted, in `aiter/aiter/ops/mha.py`:
+
+```text
+1. Reorder cmdGenFunc_mha_batch_prefill's trailing parameters to match the op:
+     kv_block_descale, kv_last_page_lens, block_table, seqlen_k, sink_ptr, gen
+2. has_effective_sink = (sink_size > 0 or sink_ptr is not None) and (
+        causal or not (window_size_left == -1 and window_size_right == -1))
+```
+
+After the fix aiter JIT-builds (~10 min, one time)
+
+```text
+aiter/jit/mha_batch_prefill_bf16_nlogits_nbias_mask_nlse_ndropout_nqscale_sink.so
+```
+
+and the server reaches `The server is fired up and ready to roll!`.
+
+This is an upstream aiter bug and has NOT been submitted. Note (2) is a
+judgement call — upstream may instead intend callers to pass `sink_size`; (1)
+is unambiguously a bug either way.
+
+#### Minimal repro (no model required, ~20 s)
+
+```python
+import torch, aiter
+dev="cuda"; B,S,HQ,HKV,D = 2,3,64,8,64; T=B*S
+q=torch.randn(T,HQ,D,dtype=torch.bfloat16,device=dev)
+k=torch.randn(T,HKV,D,dtype=torch.bfloat16,device=dev)
+v=torch.randn(T,HKV,D,dtype=torch.bfloat16,device=dev)
+ind=torch.tensor([0,S,2*S],dtype=torch.int32,device=dev)
+kvi=torch.arange(T,dtype=torch.int32,device=dev)
+sinks=torch.randn(HQ,dtype=torch.float32,device=dev)
+def run(**kw):
+    return aiter.mha_batch_prefill_func(q,k,v,ind,ind,kvi,S,S,causal=True,
+        window_size=(128,0),return_lse=False,return_attn_probs=False,**kw)
+run()                  # OK   -> loads ..._nsink.so
+run(sink_ptr=sinks)    # FAIL -> same "no matching kernel found" error
+```
+
+#### Verification after fix
+
+```text
+short prompt          "Paris is the capital of France."   correct
+8,093-token needle    retrieved "ZQ-7741"                 correct
+```
+
+Numerically correct, not merely non-crashing — so the `_sink` kernel arm is
+producing right answers on both the fresh-prompt and SWA paths.
+
+
 ## Stability
 
 ### B1. Sporadic TTFT spike at ISL=8192, OSL=1024, concurrency=64 (P2)

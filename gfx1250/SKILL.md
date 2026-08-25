@@ -1,6 +1,22 @@
 ---
 name: gfx1250-mxfp4-a4w4-to-a8w4
-description: Run an MXFP4 (Quark W4A4) checkpoint such as DeepSeek-R1-0528-MXFP4 on AMD gfx1250, which lacks the fp4-activation WMMA scale instruction V_WMMA_SCALE_F32_32X16X128_F4. Use when a4w4 (fp4-activation x fp4-weight) GEMMs cause "Memory access fault ... SQC (inst)" GPU page faults on gfx1250, when converting a4w4 compute to a8w4 (fp8-activation x fp4-weight), when SGLang + aiter MXFP4 MoE / linear layers crash on gfx1250, or when the aiter triton gemm.basic fp4 kernels fault on this arch. Captures which code paths use a4w4, the AITER_FORCE_A8W4 MoE switch, the bf16-dequant linear workaround, the (unfinished) dense flydsl a8w4 gemm, and operational traps (GPU wedging, 260GB GPU coredumps filling the disk). ALSO covers the full working serving recipe reached on 2026-07-07: the aiter fused_qk_rmsnorm JIT build failure (rope_common.h / ck_tile vec_convert.h) worked around with a Triton RMSNorm; the FlyDSL grouped a8w4 "IndexError: tuple index out of range" fixed by adding the missing swiglu_limit arg to the stage1 raw gemm launch; the split_k>1 raw+finalize path GPU illegal-address fixed by forcing split_k=1 (AITER_GROUPED_FORCE_SPLIT_K1); the decode-only "every token is 0" degeneration root-caused to the fp8_e4m3 KV cache (use bf16 KV / --kv-cache-dtype auto); and CUDA graph capture (previously crashing) now working, giving GSM8K ~0.85.
+description: >-
+  Run an MXFP4 (Quark W4A4) checkpoint such as DeepSeek-R1-0528-MXFP4 on AMD gfx1250, which
+  lacks the fp4-activation WMMA scale instruction V_WMMA_SCALE_F32_32X16X128_F4. Use when a4w4
+  (fp4-activation x fp4-weight) GEMMs cause "Memory access fault ... SQC (inst)" GPU page
+  faults on gfx1250, when converting a4w4 compute to a8w4 (fp8-activation x fp4-weight), when
+  SGLang + aiter MXFP4 MoE / linear layers crash on gfx1250, or when the aiter triton
+  gemm.basic fp4 kernels fault on this arch. Captures which code paths use a4w4, the
+  AITER_FORCE_A8W4 MoE switch, the bf16-dequant linear workaround, the (unfinished) dense
+  flydsl a8w4 gemm, and operational traps (GPU wedging, 260GB GPU coredumps filling the disk).
+  ALSO covers the full working serving recipe reached on 2026-07-07: the aiter
+  fused_qk_rmsnorm JIT build failure (rope_common.h / ck_tile vec_convert.h) worked around
+  with a Triton RMSNorm; the FlyDSL grouped a8w4 "IndexError: tuple index out of range" fixed
+  by adding the missing swiglu_limit arg to the stage1 raw gemm launch; the split_k>1
+  raw+finalize path GPU illegal-address fixed by forcing split_k=1
+  (AITER_GROUPED_FORCE_SPLIT_K1); the decode-only "every token is 0" degeneration root-caused
+  to the fp8_e4m3 KV cache (use bf16 KV / --kv-cache-dtype auto); and CUDA graph capture
+  (previously crashing) now working, giving GSM8K ~0.85.
 ---
 
 # gfx1250: a4w4 -> a8w4 for MXFP4 checkpoints (DeepSeek-R1-0528-MXFP4 on SGLang+aiter)

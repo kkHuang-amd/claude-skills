@@ -1,6 +1,13 @@
 ---
 name: sglang-prefill-coalescer
-description: Port ATOM's DP-attention prefill coalescer (ROCm/ATOM#1611) into SGLang's scheduler and A/B it on DeepSeek-V4-Pro (8xMI355X, TBO+DPA dp8). Use when working on SGLang's PrefillDelayer / get_new_batch_prefill, when reproducing ATOM's prefill-coalescing throughput gain, or when hitting the gotchas: the gain only shows on FRAGMENTED (variable-length) DP workloads (range-ratio<1), gsm8k needs max_tokens>=8192 for DSV4 reasoning, DSV4 MoE cuda-graph needs the run_sgl_dsv4_unified.sh env vars, and running ATOM in-place needs an aiter/flydsl/triton upgrade cascade.
+description: >-
+  Port ATOM's DP-attention prefill coalescer (ROCm/ATOM#1611) into SGLang's scheduler and A/B
+  it on DeepSeek-V4-Pro (8xMI355X, TBO+DPA dp8). Use when working on SGLang's PrefillDelayer /
+  get_new_batch_prefill, when reproducing ATOM's prefill-coalescing throughput gain, or when
+  hitting the gotchas: the gain only shows on FRAGMENTED (variable-length) DP workloads
+  (range-ratio<1), gsm8k needs max_tokens>=8192 for DSV4 reasoning, DSV4 MoE cuda-graph needs
+  the run_sgl_dsv4_unified.sh env vars, and running ATOM in-place needs an aiter/flydsl/triton
+  upgrade cascade.
 ---
 
 # SGLang prefill coalescer (faithful ATOM port) — DeepSeek-V4-Pro, MI355X

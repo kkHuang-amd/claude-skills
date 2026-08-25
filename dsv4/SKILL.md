@@ -1,6 +1,12 @@
 ---
 name: dsv4-atom-serving-perf-sweep
-description: Benchmark DeepSeek-V4-Pro serving performance on ATOM (ROCm, 8xMI355X, TP8) and compare clients/engines. Use when measuring tok/s, TTFT, TPOT at fixed (ISL, OSL, concurrency) points, when driving an ATOM OpenAI-compatible server with either ATOM's own benchmark_serving or SGLang's bench_serving, or when hitting the two interop gotchas: (1) sglang import crash from cohere2_moe.py @strict on huggingface_hub>=1.x, and (2) sglang.bench_serving KeyError 'choices' against ATOM's usage-only final SSE chunk.
+description: >-
+  Benchmark DeepSeek-V4-Pro serving performance on ATOM (ROCm, 8xMI355X, TP8) and compare
+  clients/engines. Use when measuring tok/s, TTFT, TPOT at fixed (ISL, OSL, concurrency)
+  points, when driving an ATOM OpenAI-compatible server with either ATOM's own
+  benchmark_serving or SGLang's bench_serving, or when hitting the two interop gotchas: (1)
+  sglang import crash from cohere2_moe.py @strict on huggingface_hub>=1.x, and (2)
+  sglang.bench_serving KeyError 'choices' against ATOM's usage-only final SSE chunk.
 ---
 
 # DeepSeek-V4-Pro serving perf sweep on ATOM (MI355X, TP8)

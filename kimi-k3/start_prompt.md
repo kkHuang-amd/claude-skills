@@ -18,27 +18,65 @@ below as the source of truth.
 
 ## 1. Read these files first
 
-Read in this order:
+Read in TIERS. Reading everything below costs ~26k tokens before any work
+starts, and context is re-sent every turn -- so only Tier 1 is unconditional.
+
+### Tier 1 -- always read, in this order (~1.5k tokens)
 
 ```text
-README.md
-SUMMARY.md
-ARTIFACT_RETENTION.md
+CONTINUE_HERE.md  status, next action, hard constraints, worktree SHAs
+DEV_RULES.md      working rules, canvas rules, artifact retention (all of §3/§9/§10)
+README.md         what this project is
+```
+
+That is enough to start work and to obey every project rule.
+`CONTINUE_HERE.md` §0 is an environment preflight -- run it before trusting
+any recorded path or SHA.
+
+### Tier 2 -- current state, read the SECTION you need, never the whole file
+
+`SUMMARY.md` is 36 KB (~9k tokens). Do not read it in full. Get the section
+map, then read one range:
+
+```bash
+rg -n '^## ' SUMMARY.md
+sed -n 'A,Bp' SUMMARY.md
+```
+
+Sections available:
+
+```text
+Current integration                     Validated Radix-4 router profile
+Fresh environment reproduction          Source selection
+ATOM recipe comparison                  A16W4 caller-contract result
+Validated production result             Decisions already made
+2026-08-13 Triton runtime attribution   Remaining optimization work
+Optional Triton 3.7 extend-attention    Detailed sources
+Optional B2 profile
+```
+
+For "what should I do next", `Remaining optimization work` +
+`Decisions already made` are usually the only sections needed.
+
+### Tier 3 -- reference only, open when tracing a specific past decision
+
+Do NOT read these on startup. They are dated historical records, not state.
+
+```text
 aiter-optimization-tracker/HANDOFF_2026-08-11.md
 aiter-optimization-tracker/SGLANG_VENDOR_FLYDSL_2026-08-12.md
 aiter-optimization-tracker/FRESH_INTEGRATION_2026-08-12.md
 aiter-optimization-tracker/AITER_DEPENDENCY_MATRIX_2026-08-12.md
 aiter-optimization-tracker/PAUSE_TRACK_2026-08-11.md
 aiter-optimization-tracker/KDA_B2_M4_OPTIMIZATION_2026-08-18.md
-canvases/README.md
+aiter-optimization-tracker/SGLANG_TRACE_CAPTURE_METHOD_2026-08-13.md
+canvases/README.md                  only when editing a canvas
+ARTIFACT_RETENTION.md               only when cleaning up run artifacts
+k3-handover-2026-08-12/HANDOVER.md  portable/offline recovery only
 ```
 
-For portable/offline recovery also read:
-
-```text
-k3-handover-2026-08-12/HANDOVER.md
-```
-
+Sections 3, 9 and 10 of this document are now duplicated in `DEV_RULES.md`.
+If you have read `DEV_RULES.md`, you may skip them here.
 ## 2. Restore the canonical canvases
 
 From the Kimi-K3 workspace root, run:

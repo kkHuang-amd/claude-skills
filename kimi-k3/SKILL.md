@@ -3,6 +3,20 @@ name: kimi-k3-deployment-benchmark
 description: Deploy and accuracy-benchmark open-weight Kimi-K3 with SGLang on 8 GPUs. Use when launching Kimi-K3, switching inference Docker images, running KVV OCRBench/MMMU-Pro/Tool-call/BEAM 1M, diagnosing startup warmup or long-context failures, or handing the Kimi-K3 benchmark environment to another engineer.
 ---
 
+> ## Entry points — read ONE of these, never this directory
+>
+> `kimi-k3/` holds 115 markdown files (~634 KB, ~158k tokens). Do not read it
+> in bulk, and do not read `SUMMARY.md` in full (36 KB).
+>
+> | Your task | Start at |
+> |---|---|
+> | Resume optimization work (kernels, traces, candidates) | `CONTINUE_HERE.md` |
+> | Any K3 work — rules that always apply | `DEV_RULES.md` |
+> | Fresh container: restore worktrees / canvases | `start_prompt.md` §2 and §4 |
+> | Deploy + accuracy benchmark | this document, below |
+>
+> For `SUMMARY.md`: `rg -n '^## ' SUMMARY.md` then `sed -n 'A,Bp' SUMMARY.md`.
+
 # Kimi-K3 deployment and benchmark
 
 Use the scripts in:
@@ -11,8 +25,11 @@ Use the scripts in:
 /dockerx/var/amdsgl/kk/workspace/useful-scripts/benchmarking/kimi-k3
 ```
 
-Read [HANDOVER.md](HANDOVER.md) before launching. It records the current paths,
-validated parameters, prior scores, incomplete work, and failure modes.
+Read [CONTINUE_HERE.md](CONTINUE_HERE.md) before launching — it records the
+current status, next action and worktree state. For the original deployment
+handover (paths, validated parameters, prior scores, failure modes) see
+[k3-handover-2026-08-12/HANDOVER.md](k3-handover-2026-08-12/HANDOVER.md);
+note it is dated 2026-08-12 and superseded by `HANDOFF_2026-08-21.md`.
 
 ## Workflow
 

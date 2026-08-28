@@ -23,233 +23,218 @@ of the plumbing, not a published benchmark.
 
 ## CONTINUE HERE
 
-**Status (2026-08-28, 04:05 local):** machine **idle** — 8 GPUs at 0 % VRAM, no
-sglang processes, ports 8888/8889 clear. Environment unchanged; still no PR
-patch on `/sgl-workspace/sglang` (reverted so TBO works — §17).
+**Status (2026-08-28, 10:36 local):** a **topk_v2 run is IN FLIGHT** (started
+10:35:55, PID under its own setsid session). Results ->
+`/workspace/results/b200align-topkv2-c64-1200s/`. See "IN FLIGHT" below.
 
-**What is settled.** DP attention **alone** is **+35 %** on fixed-seq-len at a
-near-zero cache hit rate — the largest lever on file. TBO **alone never gains**
-(−0.4 % at 8 % hit, −10.8 % at 83 % hit), so §16's "TP8 and DP8+TBO within
-2.1 %" is DP winning and TBO plus the delayer giving it back. The mechanism is
-**cache partitioning**: DP splits the radix cache per rank, so TP8 hits 91.8 %
-where DP hits 83.2 % and computes 2x the prefill. Routing on a prefix-stable
-key **does repair it** (91.3 %, computed prefill halved) but with only 8 keys
-over 8 DP ranks the load collapsed onto half the ranks and cost more than it
-won. Details: `references/dp-tbo.md` §22, §23.
+### The one number that matters: b200align is +6.2 % over DP8+TBO at full length
 
-**PENDING — user-deferred on 2026-08-28, do not start without asking:**
-(1) land `--chat-template` (§24.1); (2) `--tokenizer-worker-num 8` +
-`--stream-interval 20` as a pair (§24); (3) the 64-group cache-aware routing
-re-run (§23). All three are still the right next steps; they are parked, not
-dropped.
+**b200align c64, 3600 s, valid** (`/workspace/results/b200align-tp8-c64-3600s/`):
 
-**TRAP (new, cost one arm): DSv4 needs `HSA_NO_SCRATCH_RECLAIM=0`.**
-The 04:23 b200align run reached warmup and then died in prefill with
-`HSA_STATUS_ERROR_OUT_OF_RESOURCES Code: 0x1008, Available Free mem : 318 MB`
-on DP0 (`Fatal Python error: Aborted` in `watchdog.py:147`, `scheduler_0`
-exit -3); the other ranks then failed with gloo `Connection closed by peer`,
-which is **secondary — do not chase it**. The container ships
-`HSA_NO_SCRATCH_RECLAIM=1` as an environment default (it is in `env` but in no
-shell init file), so every arm here inherited it.
-`benchmarks/multi_node/amd_utils/env.sh:312` already pins it to **0** for
-DeepSeek-V4-Pro with the comment "resolve the OOR issue"; the single-node
-agentic launchers never picked that fix up. Now set in
-`..._b200align_mtp.sh` only — the TP8 and TBO reference numbers were measured
-with the container default, so setting it in those would break comparability.
-
-Two things this crash was **not**, both settled by the tbo arm as a control:
-*not* shared-experts fusion (`tbo-tp8-c64` completed a full 3600 s run with the
-identical `--disable-shared-experts-fusion`, `mem-fraction-static 0.90` and
-`--chunked-prefill-size 65536` on DP8), and *not* KV-pool sizing (b200align died
-at **0.08** peak full-token-usage where tbo survived **0.50** — the exhausted
-memory was scratch/activation outside the static pool, so lowering
-`mem-fraction-static` would have been the wrong lever). Evidence archived at
-`/workspace/results/b200align-oom-0424/`.
-
-**IN FLIGHT (2026-08-28 04:56):** B200-aligned DP arm, **fusion OFF**, c64,
-`DURATION=1200`, results in `/workspace/results/b200align-tp8-c64/`.
-Scratch reclaim on. Launched detached with `setsid` so a session kill cannot
-take it down again:
-
-```bash
-setsid nohup env EP_SIZE=1 CONC=64 DURATION=1200 \
-  bash /workspace/claude-skills/agentx/agentx_b200align.sh \
-  > /workspace/results/b200align-tp8-c64/launcher.log 2>&1 < /dev/null &
-```
-
-Two changes versus the 03:35 attempt, **both verified in the `sglang_command.txt`
-the launcher wrote at startup, not assumed from the source**:
-`--disable-shared-experts-fusion` (was `--enforce-`) and `--chat-template
-.../deepseek_v4_thinking.jinja` (was absent). Dropping fusion removes §16
-confound 1, so this arm now differs from the DP baseline only in the B200 DP
-flags plus the template — two variables, not four. Fusion-with-DP moves to the
-backlog as its own single-variable experiment.
-
-**Its 1200 s references are no-template numbers** (TP8 c64 17,325, DP8+TBO c64
-17,322), so the template is an uncontrolled variable in that comparison; a
-templated TP8 reference arm is needed for a clean read. Per §25 a 1200 s window
-resolves >=10 % only.
-
-**PRIOR ATTEMPTS, ZERO DATA (both).** 03:35 launch died 03:42 when the shell
-holding it was killed — `server.log` stopped at `Load weight end elapsed=274.5 s`,
-before KV-cache init and server-ready, so aiperf never started; no traceback, no
-OOM, no watchdog, i.e. an external SIGKILL, not a software fault. Evidence
-archived at `/workspace/results/b200align-tp8-c64-aborted-0335/`. A 04:12
-relaunch was killed deliberately 8 minutes in (weights still loading) to apply
-the fusion change, because the script must never be edited while running
-(§22.6).
-
-The wrapper `agentx/agentx_b200align.sh` (03:35) was already on disk and is
-parameterised; what was lost with the shell is the **override line** in front
-of it. Reconstructed from `sglang_command.txt` against the wrapper's own
-defaults (`TP=8 CONC=32 EP_SIZE=8 DURATION=3600 DP_ATTENTION=true`):
-
-```bash
-EP_SIZE=1 CONC=64 DURATION=1200 bash /workspace/claude-skills/agentx/agentx_b200align.sh
-```
-
-Derivation: `--max-running-requests 128` = 2*CONC -> **CONC=64** (not the
-default 32); **no `--ep-size`** in the command while the launcher emits it for
-`EP_SIZE>1` -> **EP_SIZE=1** (not the default 8); `--chunked-prefill-size
-65536` = 8192*TP -> TP=8 (default); backend `--port 8889` = PORT+1 -> PORT=8888
-with `DP_ATTENTION=true` (default). `DURATION=1200` is the one value not
-recoverable from `sglang_command.txt` — it is a client-side aiperf flag and the
-run died before `benchmark_command.txt` was written; 1200 is taken from the
-03:37 CONTINUE HERE note. `RESULT_DIR` defaults to
-`/workspace/results/b200align-tp8-c64`, which matches the directory on disk,
-and `RESULT_FILENAME` carries the `agentic-b200align` infix.
-
-The arm is DP8 + dp-attention with B200's DP flags
-(`--enable-dp-attention-local-control-broadcast`, `--tokenizer-worker-num 8`,
-`--stream-interval 20`, `--incremental-streaming-output`,
-`--prefill-decode-interval 10`), **no TBO, no prefill-delayer**, and
-shared-experts fusion ON (`--enforce-shared-experts-fusion`) — a deliberate
-deviation from B200, and fusion has never been combined with DP here
-(§16 confound 1). `DURATION=1200`, warmup 10/lane.
-**Caveat before re-running it as-is:** this arm moves **three** things at once
-(B200 DP flags, the §24 tokenizer/stream pair, fusion-on-with-DP), and it
-carries **no chat template**, so by §24.1's own rule its number would be
-re-measured anyway. Land §24.1 first.
-**Compare it only against the reconstructed 1200 s values** — TP8 c64 **17,325**
-and DP8+TBO c64 **17,322** — never against the 3600 s headlines
-(`references/conc-and-trace-mix.md` §25).
-
-**FIRST VALID b200align RESULT (2026-08-28, 1200 s): 18,895 tok/s/GPU,
-+9.1 % over both references — suggestive, below §25's decidable threshold.**
-Same-cutoff comparison, all cumulative tokens / 1200 s / 8 GPUs:
-
-| cutoff | TP8 c64 | DP8+TBO c64 | b200align |
+| | TP8 c64 | DP8+TBO c64 | **b200align** |
 |---|---|---|---|
-| 300 s | 13,613 | 10,988 | 10,907 |
-| 600 s | 15,166 | 16,306 | 17,144 |
-| 900 s | 17,320 | 17,740 | **19,148** |
-| **1200 s** | **17,325** | **17,322** | **18,895** |
+| aggregate tok/s/GPU | 17,080 | 17,443 | **18,518** |
+| curve-reconstruction full | 17,219 | 17,594 | **18,670** |
+| vs TP8 | — | +2.1 % | **+8.4 %** |
+| vs DP8+TBO | — | — | **+6.2 %** |
 
-The aggregate JSON reports 18,485 because it divides by the actual 1226.6 s;
-18,895 x 1200/1226.6 = 18,485, so use 18,895 against the reconstructed
-references. §25 resolves >=10 % only, this is +9.1 %, and 900 s (19,148) is
-above 1200 s (18,895) — still on the wandering part of the curve. Not a verdict.
-Health confirmed independently of `/metrics`: warmup 701/707 at 1110 s (tbo:
-701/707 at 1200 s), `errors=0`, no HSA/watchdog, `output_actual.mean` 766.7
-tok/req, cache hit 0.956. Result kept at
-`/workspace/results/b200align-tp8-c64-1200s/`. A 3600 s confirmation run is
-under way, to be read against the full-length values TP8 17,219 / TBO 17,585.
+Per-cutoff, same method for all three (cumulative tokens / cutoff / 8):
 
-**What the +9.1 % is attributable to.** Diagnosis added `--enable-prefill-delayer`
-and `--enable-two-batch-overlap` back, so this arm's flag set now differs from
-`tbo-tp8-c64` by **exactly four flags** and nothing else (verified by full
-`sglang_command.txt` diff — no other additions, removals or value changes):
+| cutoff | TP8 | DP8+TBO | b200align |
+|---|---|---|---|
+| 300 s | 13,613 | 10,988 | 14,002 |
+| 600 s | 15,166 | 16,306 | 16,652 |
+| 900 s | 17,320 | 17,740 | 18,963 |
+| 1200 s | 17,325 | 17,322 | 18,792 |
+| 1800 s | 18,266 | 18,171 | 19,232 |
+| 2400 s | 18,649 | 18,521 | 19,337 |
+| 3000 s | 17,856 | 18,180 | 19,132 |
+| 3600 s | 17,219 | — | **18,670** |
+
+b200align leads at **every** cutoff with no crossover — stronger than the
+endpoint alone, given §25 records the TBO-vs-TP8 ordering flipping three times.
+Still **below §25's >=10 % bar**, so: direction clear, ordering stable, magnitude
+moderate, *not* "proven" by this file's own standard. Note the 1200 s run read
++9.1 % — the short window **over**states it.
+
+**Latency is the bigger story than throughput:**
+
+| mode | conc | tok/s/chip | P90 intvty | ITL p90 | TTFT avg | cache hit | dur |
+|---|---|---|---|---|---|---|---|
+| TP8 | 64 | 17,080 | 13.8 | 72.7 ms | 3.35 s | 0.689 | 3629 s |
+| DP8+TBO | 64 | 17,443 | 13.5 | 73.9 ms | 4.28 s | 0.955 | 3629 s |
+| **b200align** | 64 | **18,518** | **20.0** | **50.0 ms** | 7.21 s | 0.955 | 3630 s |
+| b200align | 64 | 18,485 | 20.7 | 48.2 ms | 5.75 s | 0.956 | 1227 s |
+
+Fields: `request_metrics.latency.{intvty.p90, itl.p90, ttft.mean}`,
+`server_metrics.cache.gpu_cache_hit_rate`. **P90 interactivity +45 %, ITL p90
+-32 %** — far outside noise and reproduced independently by the 1200 s run.
+**TTFT is the price: 7.21 s vs 3.35/4.28 s.** Consistent with
+`--prefill-decode-interval 10` forcing decode between prefills: smoother
+inter-token, slower first token.
+
+**Attribution is exact.** A full `sglang_command.txt` diff against
+`tbo-tp8-c64` shows **four** differing flags and nothing else — no other
+additions, removals or value changes:
 `--enable-dp-attention-local-control-broadcast`, `--prefill-decode-interval 10`,
-`--stream-interval 20`, `--tokenizer-worker-num 8`.
-`--incremental-streaming-output` was dropped during bisection and is NOT in this
-result.
+`--stream-interval 20`, `--tokenizer-worker-num 8`. The +6.2 % / +45 % belongs to
+those four **as a set**; no per-flag attribution exists yet.
+`--incremental-streaming-output` was dropped during bisection and is **not** in
+this result. Comparability: duration 3630 vs 3629 s, `input.mean` 116,923 vs
+116,248/115,357, `output_actual.mean` 965.3 vs 956.0/919.4, `errors=0`, zero
+hard failures.
 
-**TRAP — `/metrics` under-reports when `--tokenizer-worker-num > 1`.**
-`sglang:generation_tokens_total` read ~1 token per returned request on runs that
-were in fact generating 767 tok/req, and `sglang:num_running_reqs` read 0.0 on
-every DP rank while requests were being served. The frontend is split across 8
-tokenizer worker processes and the endpoint appears to report one of them.
-**This metric was the basis for three separate wrong diagnoses today**
-(`--chat-template`, then the scratch-reclaim OOR, then "the four B200 flags
-break generation"), and a healthy run was killed because of it. Judge generation
-health by **warmup progress against the reference arm's curve at matched
-`elapsed`** (`tbo-tp8-c64/benchmark.log` has the per-30 s series), by
-`errors=` in the aiperf progress line, and after the fact by
-`request_metrics.tokens.output_actual.mean`. Early `Decode batch` counts are
-also useless: tbo logs **0** decode batches over its first 2147 prefill batches.
+**UNRESOLVED — TP8 cache hit reads 0.689 here but §22/§23 record TP8 at 91.8 %
+and DP at 83.2 %, i.e. the opposite ordering.** Both DP arms read 0.955. §15
+warns the cache metric is device-tier only. Do not cite either number until this
+is reconciled.
 
-**TRAP — the server survives the launcher.** After a completed run,
-`sglang.launch_server` was still alive holding 92 % VRAM with no launcher
-process. `kill -TERM` on the process group did not take it down (a second
-launcher process even appeared); only per-PID `kill -9` matched against
-`sglang.launch_server` **and** `sglang::` children worked, followed by a wait
-for `rocm-smi` VRAM to fall back under 10 %.
+### IN FLIGHT — sglang#36684 (topk_v2) at c64 / 1200 s
 
-**sglang#36656 checked — does NOT affect AgentX, no need to merge first.**
-The PR deletes an 8-line silent `mem_fraction_static *= 0.85` in
-`server_args.py:6417-6423` that fires when
-`resolved_view(self).attention_backend == "aiter"` and `context_len > 8192`.
-AgentX runs `--attention-backend dsv4`, its own backend and **not an alias for
-`aiter`** (`server_args.py:190`; only `"compressed"` aliases to `dsv4`), so the
-branch never fires on our path. Confirmed empirically, not just by reading:
-every arm's `server.log` shows `attention_backend='dsv4'` and the mem fraction
-we passed, verbatim — b200align and tbo `0.9`, armB c64/c48 `0.89`. The reduced
-values (0.765 / 0.7565) appear nowhere. The only other silent rewrite in
-`server_args.py` is `adjust_mem_fraction_for_vlm` (line 10302), a vision path
-DSv4 text serving never enters. This becomes live only if an arm switches to
-`--attention-backend aiter`.
+Cherry-picked **PR 36684** ("[AMD] Enable deepseek-v4 topk_transform v2
+kernel", merged 2026-08-28 05:36 UTC) onto the local tree — **not** a mainline
+update, deliberately: mainline carries three days of unrelated change (local
+HEAD is 2026-08-25 `a1f9508dd4`) plus 20 uncommitted local files, which would
+destroy attribution against the 18,518 baseline. #35619 (§17's TBO blocker) is
+still **OPEN upstream**, so a mainline update would not have reintroduced it —
+that particular fear was unfounded.
 
-**Short-window rule (new, §25):** a short AgentX arm resolves **>=10 %** effects
-and nothing smaller. The c48>c64 ordering is stable from 600 s; the 2.1 %
-TBO-vs-TP8 ordering flips three times before 3000 s. Keep warmup at 10/lane and
-cut only `--benchmark-duration`; cutting warmup biases against DP arms
-specifically, because DP ranks each fill their own cache.
+Applied with `git apply --exclude='test/*'`; touches
+`topk_v2.cuh`, `topk_impl.cuh`, and one line of `server_args.py`
+(`SGLANG_OPT_USE_TOPK_V2.set(False)` -> `True`). **Verified the changed line is
+on our path**: it sits in `elif model_arch in ["DeepseekV4ForCausalLM"]:` ->
+`elif is_hip():`. The other `set(False)` nearby belongs to the DSA family
+(V3.2 / GLM-5.x) branch and is irrelevant. **Setting the env var alone is not
+equivalent to this PR** — it also patches the kernel.
+**JIT cache was moved aside** (`/root/.cache/sglang/jit` ->
+`jit.pre36684`) so the patched `.cuh` recompiles; without that the old objects
+are reused and the change is a no-op. Rollback: that directory plus
+`/tmp/server_args.pre36684.bak`.
 
-**NEXT ACTION — in this order, and the order matters.**
+**Watch for**: the kernel was disabled on ROCm because it needs
+`<cooperative_groups.h>` and `cg::this_cluster()` (server_args.py comment near
+the DSA branch), which ROCm lacks. If it cannot build on gfx950 the run should
+fail loudly at JIT/cuda-graph capture, not silently fall back. The monitor greps
+`cooperative_groups|this_cluster|JIT compilation failed|hipcc.*error`.
 
-1. **Land `--chat-template`** (`references/b200-alignment.md` §24.1) — the
-   tool-message objection is resolved above, the template is safe here. We have
-   been running AgentX with **no chat template at all**: the model ships none,
-   and every arm logged `No chat template found, defaulting to 'string' content
-   format` while aiperf posts to `/v1/chat/completions`. Prompts carry no role
-   markers and no trailing `<think>`, so `SGLANG_DEFAULT_THINKING=1` and
-   `--reasoning-parser deepseek-v4` may never have been exercised. This changes
-   the workload, so it must land **before** any further A/B or every baseline
-   is re-measured afterwards. Correctness first, not a tuning knob.
-2. **`--tokenizer-worker-num 8` + `--stream-interval 20`** as one pair, on
-   ladder rung A, points 1 and 5 (§24). We run 1 tokenizer worker and flush
-   every token; B200 runs 8 and flushes every 20, on ~950-token outputs x
-   ~4,300 requests. Same shape as §20.3b's unexplained 17-19 % scheduler-level
-   rank idle that never appears in `gfx_activity`. Split the pair only if it
-   moves the number.
-3. **Cache-aware routing, decisive re-run**: §23's experiment with
-   `--gsp-num-groups 64 --gsp-prompts-per-group 8` (still 512 requests), so
-   keys >> ranks. §23's negative result is a hash-collision artifact of 8 keys
-   on 8 ranks and is **not** a verdict on routing.
-4. Reproduce the TBO PR on an older SGLang (§21.4) — TBO shows no gain
-   anywhere, so suspect a regression rather than a workload shape.
+**Compare against** (same conc, same 1200 s setting, actual 1227 s):
+tok/s/chip **18,485**, P90 intvty **20.7**, ITL p90 **48.2 ms**,
+TTFT avg **5.75 s**.
 
-**Backlog after that:** stock-MoE `dp8 + ep8` at c64, never run here (§20.3c);
-`--prefill-decode-interval 10` and `--enable-deepseek-v4-fp4-indexer` (the
-latter needs an accuracy gate, §24); TBO @ conc 48; `tbo` with shared-experts
-fusion **on** (§16 confound 1 — the §22 ladder held fusion off in all rungs);
-`--load-balance-method total_tokens` (§18); the two sglang#35619 bugs (§17,
-not started — the PR is reverted, not patched).
+### Traps learned 2026-08-28 — these cost most of a day
+
+1. **`/metrics` under-reports when `--tokenizer-worker-num > 1`.**
+   `sglang:generation_tokens_total` read ~1 token per returned request on runs
+   actually generating 767-965 tok/req, and `sglang:num_running_reqs` read 0.0
+   on all 8 DP ranks while requests were being served. The frontend is split
+   across 8 tokenizer processes and the endpoint appears to report one.
+   **This single artefact produced three wrong root causes in a row**
+   (`--chat-template`, then the scratch-reclaim OOR, then "the four B200 flags
+   break generation") and a healthy run was killed on the strength of it.
+   Judge generation health by **warmup progress vs the reference arm at matched
+   `elapsed`** — `tbo-tp8-c64/benchmark.log` carries the per-30 s series
+   (13/21/31/38/40/44 at 30..180 s) — by `errors=` in the aiperf line, and
+   afterwards by `request_metrics.tokens.output_actual.mean`.
+2. **Early `Decode batch` counts prove nothing.** tbo logs **0** decode batches
+   across its first 2147 prefill batches. A prefill-only early log is normal.
+3. **The server survives the launcher.** Twice, a completed run left
+   `sglang.launch_server` alive holding 92 % VRAM with no launcher process.
+   `kill -TERM` on the process group did not work (a second launcher process
+   even appeared); only per-PID `kill -9` matching `sglang.launch_server` **and**
+   `sglang::` cleared it.
+4. **KFD reclaim is bursty, not gradual.** After the kill, 5 of 8 GPUs sat at
+   90 %+ for ~11 minutes with **no process holding memory**
+   (`rocm-smi --showpids` showed only `gpuagent` at 0), then all 8 dropped to 0
+   within 30 s. Wait for it; do not conclude a leak.
+5. **`pgrep -f <pattern>` matches your own shell command.** It falsely reported
+   vim open, aiperf running and stray servers, four separate times. Use
+   `ps -eo comm` / `ps -eo args` with a bracketed first character instead.
+6. **Monitors that dedupe with `comm` consume a token permanently.** A `FAILED`
+   match on `AIPERF_FAILED_REQUEST_THRESHOLD=0.10` in the env dump meant a real
+   later `FAILED` could never fire. Filter out `^[A-Z_]+=` / `AIPERF_` lines.
+7. **Never let a curl's `--max-time` exceed the tool timeout**, and never probe a
+   loaded server with a short timeout and read 0 bytes as "broken" — under
+   AgentX load both router and backend return nothing within 60 s.
+
+### RETRACTION OF A RETRACTION — the `--chat-template` story is unresolved
+
+Earlier today this file (a) called for landing `--chat-template` as a
+correctness fix, (b) landed it on all four MI355X launchers, then (c) retracted
+it, blaming it for collapsing generation to ~1 token/request. **(c) is also
+wrong.** The next run, with no template, showed the same "~1 tok/req" reading —
+which turned out to be trap 1 above, a metrics artefact. There was very likely
+no collapse at any point.
+
+What is still solid: `--tool-call-parser deepseekv4` makes
+`resolve_chat_encoding_spec()` return `"dsv4"`
+(`entrypoints/openai/chat_encoding.py:112`), so `encoding_dsv4.py` — not a jinja
+template — renders DSv4 prompts, and `--chat-template` overrides that native
+path. The startup line `No chat template found, defaulting to 'string' content
+format` is misleading log noise. So the flag is **unnecessary**; it was never
+shown to be **harmful**. It is currently absent from all four launchers, which
+matches every reference arm, and that is the right default. §24.1 in
+`references/b200-alignment.md` still overstates the case and needs this
+correction folded in.
+
+**What genuinely went wrong in the 04:23 and 04:56 runs is still unexplained.**
+Those two really were degraded — warmup 324/707 at 2430 s against tbo's 701/707
+at 1200 s, and both ended in
+`HSA_STATUS_ERROR_OUT_OF_RESOURCES` (`Available Free mem : 318 MB`) — that part
+is not an artefact. Between then and the first healthy run, **two** things
+changed: the template was removed **and** `--enable-prefill-delayer` +
+`--enable-two-batch-overlap` were added back. Both changed at once, so neither
+is established. `tbo_mtp.sh:170` calls guarded TBO+delayer "the validated
+combination", which makes the delayer/TBO explanation the more likely one, but
+it is a hypothesis. The 06:41 run (no template, no delayer/TBO) was tracking tbo
+normally at elapsed=150 s when it was killed, which weakly argues **against** the
+template being the cause.
+
+`HSA_NO_SCRATCH_RECLAIM=0` was added, then removed again, and is **not** in the
+working config; the container default (=1) is what all reference arms use.
+`benchmarks/multi_node/amd_utils/env.sh:312` does pin it to 0 for
+DeepSeek-V4-Pro with the comment "resolve the OOR issue", so if OOR ever recurs
+on a healthy workload, that is the lever — and *that* result would be real
+evidence rather than a workaround validated on a broken run.
+
+### Next actions
+
+1. Read the topk_v2 result against the 1200 s baseline above. If it fails to
+   build on gfx950, roll back (`jit.pre36684`, `server_args.pre36684.bak`).
+2. **Per-flag bisect of the four B200 flags**, ~90 min each. Start by removing
+   `--prefill-decode-interval 10` alone — it is the prime suspect for both the
+   ITL win and the TTFT regression.
+3. Reconcile the TP8 cache-hit contradiction (0.689 here vs §22/§23's 91.8 %).
+4. Settle the 04:23/04:56 degradation: rerun the current healthy config with
+   delayer+TBO **removed**, template still absent. If it degrades, delayer/TBO
+   was the fix and the template is fully exonerated.
+5. Fold the trap list into the permanent sections; §24.1 still needs the
+   correction above.
+
+**Still parked from before:** `--tokenizer-worker-num 8` + `--stream-interval 20`
+as an isolated pair (§24) — now partly answered, they are inside the +6.2 %
+four; the 64-group cache-aware routing re-run (§23); stock-MoE `dp8 + ep8` at
+c64 (§20.3c); `--enable-deepseek-v4-fp4-indexer` behind an accuracy gate;
+`--load-balance-method total_tokens` (§18); the two sglang#35619 bugs (§17).
 
 **Do not redo:** conc 48 full arm (§19); §20 H1/H2; the B200-vs-MI355X recipe
-comparison (§20.3c); the full §21/§22 ladder, all 8 points; §23's routing run
-(re-run it only in the 64-group form above).
+comparison (§20.3c); the full §21/§22 ladder; §23's routing run in its 8-key
+form.
 
 **Traps to re-read before touching anything** — §14 (stale-router trap), §15
-(cache metric is device-tier only), §17 (#35619 blocks TBO), plus the four that
-cost real GPU time in §22.6 and §23: the Prometheus `cache_hit_rate` gauge
-reads **0.0** on this path (use `server.log`'s `#cached-token`); `stop` must
-match `sglang::` children and wait >200 s; never edit a shell script while it
-is running; `python -m sglang.benchmark.serving` fails from `/sgl-workspace`
-(the repo dir shadows the package). While a run is in flight, test for the
-aggregate by its **exact** `RESULT_FILENAME`, never `ls "$D"/*.json` —
-`gpu_metrics_identity.json` appears minutes in and a glob reports "finished"
-far too early.
+(cache metric is device-tier only), §17 (#35619 blocks TBO), the four in §22.6
+and §23, plus the seven above. While a run is in flight, test for the aggregate
+by its **exact** `RESULT_FILENAME`, never `ls "$D"/*.json`.
+
+### Reproducing an arm
+
+```bash
+# 1200 s b200align (current working config)
+EP_SIZE=1 CONC=64 DURATION=1200 RESULT_DIR=/workspace/results/<name> \
+  bash /workspace/claude-skills/agentx/agentx_b200align.sh
+```
+Launch it under `setsid nohup ... < /dev/null &` — a session kill took down the
+03:35 run through its process group. Keep `--warmup-requests-per-lane 10`; cut
+only `--benchmark-duration` (§25).
 
 ### Results index — every arm on file
 

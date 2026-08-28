@@ -28,7 +28,13 @@ Ours that B200 lacks are equally legitimate: `--attention-backend dsv4`,
 `--kv-cache-dtype fp8_e4m3`, `--page-size 256`, `--cuda-graph-max-bs`,
 `--enable-metrics`.
 
-### 24.1 The chat-template gap is NOT a defect — RETRACTED 2026-08-28
+### 24.1 chat-template: unnecessary, NOT shown to be harmful — twice-corrected
+
+**Read the correction at the end of this section before using anything in it.**
+This section first argued for landing `--chat-template`, then blamed it for
+collapsing generation. Both claims are wrong. Current standing rule: **do not
+pass it** (it is unnecessary and every reference arm runs without it), but do
+**not** cite it as a cause of any failure.
 
 **This section previously called for landing `--chat-template` as a correctness
 fix. That was wrong, it was implemented, and it broke the arm. Do not redo it.**
@@ -59,7 +65,7 @@ Passing `--chat-template` therefore does not add structure — it **overrides th
 native encoder** with `chat_templates/deepseek_v4_thinking.jinja`, nine lines
 that render system/user/assistant text and nothing else.
 
-**Measured consequence (2026-08-28, b200align c64, killed after ~65 min):**
+**What was measured (2026-08-28) — and why it does not mean what it says:**
 
 | arm | output tokens / request |
 |---|---|
@@ -75,7 +81,34 @@ secondary symptoms were a 3-4x slower warmup (324/707 at 2430 s where tbo hit
 both effects, not causes: with ~1 token generated per turn the replay still
 feeds the whole history back, so prompts snowball to ~163k tokens/request.
 
-**Standing rule: never pass `--chat-template` to a DSv4 AgentX arm.** The flag
+**CORRECTION (2026-08-28, later the same day).** The "~1 output token per
+request" figures above came from `sglang:generation_tokens_total` on a server
+running `--tokenizer-worker-num 8`. That metric **under-reports across tokenizer
+worker processes**: a later run reading "~1 tok/req" by the same method finished
+with `request_metrics.tokens.output_actual.mean` = **965.3**. The next run after
+the template was removed showed the identical "~1 tok/req" reading. **There was
+probably never a generation collapse, and the template was never shown to break
+anything.**
+
+What survives: `--tool-call-parser deepseekv4` makes
+`resolve_chat_encoding_spec()` return `"dsv4"` (`chat_encoding.py:112`), so
+`encoding_dsv4.py` renders DSv4 prompts natively and `--chat-template` overrides
+that. The startup line `No chat template found, defaulting to 'string' content
+format` is misleading log noise, not evidence of a defect. So the flag is
+**unnecessary** — that is why it stays off, matching every reference arm — but
+"harmful" is unproven.
+
+Two real failures in the 04:23 and 04:56 runs remain **unexplained**: warmup
+324/707 at 2430 s (tbo: 701/707 at 1200 s) and
+`HSA_STATUS_ERROR_OUT_OF_RESOURCES`, `Available Free mem : 318 MB`. Between
+those and the first healthy run, the template was removed **and**
+`--enable-prefill-delayer` + `--enable-two-batch-overlap` were added back. Two
+variables moved together; neither is established. See SKILL.md CONTINUE HERE,
+"RETRACTION OF A RETRACTION", and next-action 4 for the experiment that would
+settle it.
+
+**Standing rule: do not pass `--chat-template` to a DSv4 AgentX arm** (it is
+redundant with the native encoder),  The flag
 has been removed from all four MI355X launchers. The B200 recipe passes it
 (`dsv4_fp4_b200_sglang_mtp.sh:198`) and also passes `--tool-call-parser
 deepseekv4`; whether B200 is silently degraded the same way, or its SGLang

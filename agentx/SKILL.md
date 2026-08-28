@@ -43,14 +43,37 @@ won. Details: `references/dp-tbo.md` §22, §23.
 re-run (§23). All three are still the right next steps; they are parked, not
 dropped.
 
-**ABORTED, ZERO DATA — B200-aligned DP arm (launched 03:35, died 03:42).**
-The shell holding the run was killed and took the process group with it.
-`server.log` stops at `Load weight end. elapsed=274.5 s` on all 8 DP ranks —
-**before** KV-cache init, cuda-graph capture and server-ready, so aiperf never
-started. No traceback, no OOM, no watchdog: it was an external SIGKILL, not a
-software fault. `/workspace/results/b200align-tp8-c64/` holds only
-`server.log` + `sglang_command.txt`, **0 aiperf JSON**. Nothing was measured
-and nothing was lost — the arm simply has to be re-run.
+**IN FLIGHT (2026-08-28 04:23):** B200-aligned DP arm, **fusion OFF**, c64,
+`DURATION=1200`, results in `/workspace/results/b200align-tp8-c64/`.
+Launched detached with `setsid` so a session kill cannot take it down again:
+
+```bash
+setsid nohup env EP_SIZE=1 CONC=64 DURATION=1200 \
+  bash /workspace/claude-skills/agentx/agentx_b200align.sh \
+  > /workspace/results/b200align-tp8-c64/launcher.log 2>&1 < /dev/null &
+```
+
+Two changes versus the 03:35 attempt, **both verified in the `sglang_command.txt`
+the launcher wrote at startup, not assumed from the source**:
+`--disable-shared-experts-fusion` (was `--enforce-`) and `--chat-template
+.../deepseek_v4_thinking.jinja` (was absent). Dropping fusion removes §16
+confound 1, so this arm now differs from the DP baseline only in the B200 DP
+flags plus the template — two variables, not four. Fusion-with-DP moves to the
+backlog as its own single-variable experiment.
+
+**Its 1200 s references are no-template numbers** (TP8 c64 17,325, DP8+TBO c64
+17,322), so the template is an uncontrolled variable in that comparison; a
+templated TP8 reference arm is needed for a clean read. Per §25 a 1200 s window
+resolves >=10 % only.
+
+**PRIOR ATTEMPTS, ZERO DATA (both).** 03:35 launch died 03:42 when the shell
+holding it was killed — `server.log` stopped at `Load weight end elapsed=274.5 s`,
+before KV-cache init and server-ready, so aiperf never started; no traceback, no
+OOM, no watchdog, i.e. an external SIGKILL, not a software fault. Evidence
+archived at `/workspace/results/b200align-tp8-c64-aborted-0335/`. A 04:12
+relaunch was killed deliberately 8 minutes in (weights still loading) to apply
+the fusion change, because the script must never be edited while running
+(§22.6).
 
 The wrapper `agentx/agentx_b200align.sh` (03:35) was already on disk and is
 parameterised; what was lost with the shell is the **override line** in front

@@ -103,6 +103,32 @@ definitions are pre-folded into the *system* segment as synthetic tokens
 complete for this workload; there is nothing for it to drop. §24.1 stands and
 the template can land.
 
+**LANDED (2026-08-28 04:2x):** `--chat-template
+"$SCRIPT_DIR/../chat_templates/deepseek_v4_thinking.jinja"` now passes in all
+four MI355X SGLang agentic launchers (`..._sglang_mtp.sh`, `..._tbo_mtp.sh`,
+`..._megamoe_mtp.sh`, `..._b200align_mtp.sh`), mirroring
+`dsv4_fp4_b200_sglang_mtp.sh:198`; each also gained the `SCRIPT_DIR=` line the
+path needs. Verified offline: the template renders role markers plus the
+trailing `<think>`, so `SGLANG_DEFAULT_THINKING=1` / `--reasoning-parser
+deepseek-v4` are exercised for the first time. SGLang accepts a `.jinja` path
+via `srt/parser/template_manager.py:202`. **Every AgentX number on file
+predates this and is a no-template measurement** — the next arm is not
+comparable to them at face value.
+
+**sglang#36656 checked — does NOT affect AgentX, no need to merge first.**
+The PR deletes an 8-line silent `mem_fraction_static *= 0.85` in
+`server_args.py:6417-6423` that fires when
+`resolved_view(self).attention_backend == "aiter"` and `context_len > 8192`.
+AgentX runs `--attention-backend dsv4`, its own backend and **not an alias for
+`aiter`** (`server_args.py:190`; only `"compressed"` aliases to `dsv4`), so the
+branch never fires on our path. Confirmed empirically, not just by reading:
+every arm's `server.log` shows `attention_backend='dsv4'` and the mem fraction
+we passed, verbatim — b200align and tbo `0.9`, armB c64/c48 `0.89`. The reduced
+values (0.765 / 0.7565) appear nowhere. The only other silent rewrite in
+`server_args.py` is `adjust_mem_fraction_for_vlm` (line 10302), a vision path
+DSv4 text serving never enters. This becomes live only if an arm switches to
+`--attention-backend aiter`.
+
 **Short-window rule (new, §25):** a short AgentX arm resolves **>=10 %** effects
 and nothing smaller. The c48>c64 ordering is stable from 600 s; the 2.1 %
 TBO-vs-TP8 ordering flips three times before 3000 s. Keep warmup at 10/lane and

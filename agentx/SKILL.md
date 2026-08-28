@@ -43,9 +43,33 @@ won. Details: `references/dp-tbo.md` §22, §23.
 re-run (§23). All three are still the right next steps; they are parked, not
 dropped.
 
-**IN FLIGHT (2026-08-28 04:23):** B200-aligned DP arm, **fusion OFF**, c64,
+**TRAP (new, cost one arm): DSv4 needs `HSA_NO_SCRATCH_RECLAIM=0`.**
+The 04:23 b200align run reached warmup and then died in prefill with
+`HSA_STATUS_ERROR_OUT_OF_RESOURCES Code: 0x1008, Available Free mem : 318 MB`
+on DP0 (`Fatal Python error: Aborted` in `watchdog.py:147`, `scheduler_0`
+exit -3); the other ranks then failed with gloo `Connection closed by peer`,
+which is **secondary — do not chase it**. The container ships
+`HSA_NO_SCRATCH_RECLAIM=1` as an environment default (it is in `env` but in no
+shell init file), so every arm here inherited it.
+`benchmarks/multi_node/amd_utils/env.sh:312` already pins it to **0** for
+DeepSeek-V4-Pro with the comment "resolve the OOR issue"; the single-node
+agentic launchers never picked that fix up. Now set in
+`..._b200align_mtp.sh` only — the TP8 and TBO reference numbers were measured
+with the container default, so setting it in those would break comparability.
+
+Two things this crash was **not**, both settled by the tbo arm as a control:
+*not* shared-experts fusion (`tbo-tp8-c64` completed a full 3600 s run with the
+identical `--disable-shared-experts-fusion`, `mem-fraction-static 0.90` and
+`--chunked-prefill-size 65536` on DP8), and *not* KV-pool sizing (b200align died
+at **0.08** peak full-token-usage where tbo survived **0.50** — the exhausted
+memory was scratch/activation outside the static pool, so lowering
+`mem-fraction-static` would have been the wrong lever). Evidence archived at
+`/workspace/results/b200align-oom-0424/`.
+
+**IN FLIGHT (2026-08-28 04:56):** B200-aligned DP arm, **fusion OFF**, c64,
 `DURATION=1200`, results in `/workspace/results/b200align-tp8-c64/`.
-Launched detached with `setsid` so a session kill cannot take it down again:
+Scratch reclaim on. Launched detached with `setsid` so a session kill cannot
+take it down again:
 
 ```bash
 setsid nohup env EP_SIZE=1 CONC=64 DURATION=1200 \

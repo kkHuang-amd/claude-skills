@@ -52,13 +52,27 @@ software fault. `/workspace/results/b200align-tp8-c64/` holds only
 `server.log` + `sglang_command.txt`, **0 aiperf JSON**. Nothing was measured
 and nothing was lost — the arm simply has to be re-run.
 
-The driving env line lived only in that shell and was **not on disk**; it has
-been reconstructed from `sglang_command.txt` and committed as
-`benchmarks/single_node/agentic/agentx_b200align.sh` (CONC=64 from
-`--max-running-requests 128`=2*CONC; TP=8 from `--chunked-prefill-size
-65536`=8192*TP; PORT=8888 + `DP_ATTENTION=true` from backend `--port 8889`
-=PORT+1; EP_SIZE=1 from the absent `--ep-size`; `KV_OFFLOADING=dram` from the
-hicache flags). The arm is DP8 + dp-attention with B200's DP flags
+The wrapper `agentx/agentx_b200align.sh` (03:35) was already on disk and is
+parameterised; what was lost with the shell is the **override line** in front
+of it. Reconstructed from `sglang_command.txt` against the wrapper's own
+defaults (`TP=8 CONC=32 EP_SIZE=8 DURATION=3600 DP_ATTENTION=true`):
+
+```bash
+EP_SIZE=1 CONC=64 DURATION=1200 bash /workspace/claude-skills/agentx/agentx_b200align.sh
+```
+
+Derivation: `--max-running-requests 128` = 2*CONC -> **CONC=64** (not the
+default 32); **no `--ep-size`** in the command while the launcher emits it for
+`EP_SIZE>1` -> **EP_SIZE=1** (not the default 8); `--chunked-prefill-size
+65536` = 8192*TP -> TP=8 (default); backend `--port 8889` = PORT+1 -> PORT=8888
+with `DP_ATTENTION=true` (default). `DURATION=1200` is the one value not
+recoverable from `sglang_command.txt` — it is a client-side aiperf flag and the
+run died before `benchmark_command.txt` was written; 1200 is taken from the
+03:37 CONTINUE HERE note. `RESULT_DIR` defaults to
+`/workspace/results/b200align-tp8-c64`, which matches the directory on disk,
+and `RESULT_FILENAME` carries the `agentic-b200align` infix.
+
+The arm is DP8 + dp-attention with B200's DP flags
 (`--enable-dp-attention-local-control-broadcast`, `--tokenizer-worker-num 8`,
 `--stream-interval 20`, `--incremental-streaming-output`,
 `--prefill-decode-interval 10`), **no TBO, no prefill-delayer**, and

@@ -134,33 +134,34 @@ re-measured anyway. Land §24.1 first.
 and DP8+TBO c64 **17,322** — never against the 3600 s headlines
 (`references/conc-and-trace-mix.md` §25).
 
-**RESOLVED — the `--chat-template` blocker was a false alarm (2026-08-28 04:1x).**
-`dsv4_fp4_mi355x_sglang_b200align_mtp.sh` carries a comment claiming the
-template must stay off because `chat_templates/deepseek_v4_thinking.jinja`
-renders only system/user/assistant and would silently drop tool definitions and
-`role: tool` messages, distorting ISL. **That is false for this dataset.** The
-AgentX weka loader emits segment roles
-`Literal["system", "user", "assistant"]` only
-(`utils/aiperf/src/aiperf/dataset/loader/weka_synth_buf.py:62`), never populates
-`raw_tools` (0 occurrences in `weka_trace.py` and `weka_trace_models.py`), and
-`openai_chat.py:56` only adds a `tools` key when `raw_tools is not None` — so
-the posted payload has **no `tools` field and no tool-role message**. Tool
-definitions are pre-folded into the *system* segment as synthetic tokens
-(`weka_synth_buf.py:156`). The jinja's three-role coverage is therefore exactly
-complete for this workload; there is nothing for it to drop. §24.1 stands and
-the template can land.
+**RETRACTED — `--chat-template` must NEVER be passed on a DSv4 AgentX arm.**
+Earlier today this file argued the opposite, the flag was landed on all four
+MI355X launchers, and it **broke the arm**: generation collapsed to **~1 output
+token per request** (live `/metrics`: 62.7 M prompt tokens vs **331** generated
+over 329 requests, `num_running_reqs` 0.0 on all 8 DP ranks) against **919-956
+tok/req** on the untemplated reference arms. The flag has been removed again
+from all four launchers; broken-run evidence is in
+`/workspace/results/b200align-chattemplate-broken-0456/`.
 
-**LANDED (2026-08-28 04:2x):** `--chat-template
-"$SCRIPT_DIR/../chat_templates/deepseek_v4_thinking.jinja"` now passes in all
-four MI355X SGLang agentic launchers (`..._sglang_mtp.sh`, `..._tbo_mtp.sh`,
-`..._megamoe_mtp.sh`, `..._b200align_mtp.sh`), mirroring
-`dsv4_fp4_b200_sglang_mtp.sh:198`; each also gained the `SCRIPT_DIR=` line the
-path needs. Verified offline: the template renders role markers plus the
-trailing `<think>`, so `SGLANG_DEFAULT_THINKING=1` / `--reasoning-parser
-deepseek-v4` are exercised for the first time. SGLang accepts a `.jinja` path
-via `srt/parser/template_manager.py:202`. **Every AgentX number on file
-predates this and is a no-template measurement** — the next arm is not
-comparable to them at face value.
+Why: SGLang never used a jinja template for this model. `--tool-call-parser
+deepseekv4` makes `resolve_chat_encoding_spec()` return `"dsv4"`
+(`entrypoints/openai/chat_encoding.py:112`), so the **native encoder**
+`entrypoints/openai/encoding_dsv4.py` owns thinking, tool calls, tool results,
+EOS and reasoning history. `--chat-template` *overrides* that with a nine-line
+system/user/assistant template. The startup line `No chat template found,
+defaulting to 'string' content format` is misleading log noise, not a defect.
+Full post-mortem and the standing rule: `references/b200-alignment.md` §24.1.
+
+Secondary symptoms seen before the cause was found — 3-4x slower warmup
+(324/707 at 2430 s vs tbo 701/707 at 1200 s) and a prefill-only profile (2147
+prefill batches, 2 decode) — are **consequences of the collapse, not causes**:
+at ~1 token per turn the replay still feeds the whole history back, so prompts
+snowball to ~163 k tokens/request. Three other explanations were proposed and
+each was killed by a control (shared-experts fusion: tbo ran the identical
+setting fine; aiter untuned GEMMs: tbo has 5x more and is faster;
+decode starvation: like-for-like over the same 2147 prefill batches, tbo logged
+0 decode and b200align 2). **Get output tokens/request from `/metrics` early —
+it would have caught this in minutes instead of 65.**
 
 **sglang#36656 checked — does NOT affect AgentX, no need to merge first.**
 The PR deletes an 8-line silent `mem_fraction_static *= 0.85` in

@@ -134,34 +134,56 @@ re-measured anyway. Land §24.1 first.
 and DP8+TBO c64 **17,322** — never against the 3600 s headlines
 (`references/conc-and-trace-mix.md` §25).
 
-**RETRACTED — `--chat-template` must NEVER be passed on a DSv4 AgentX arm.**
-Earlier today this file argued the opposite, the flag was landed on all four
-MI355X launchers, and it **broke the arm**: generation collapsed to **~1 output
-token per request** (live `/metrics`: 62.7 M prompt tokens vs **331** generated
-over 329 requests, `num_running_reqs` 0.0 on all 8 DP ranks) against **919-956
-tok/req** on the untemplated reference arms. The flag has been removed again
-from all four launchers; broken-run evidence is in
-`/workspace/results/b200align-chattemplate-broken-0456/`.
+**FIRST VALID b200align RESULT (2026-08-28, 1200 s): 18,895 tok/s/GPU,
++9.1 % over both references — suggestive, below §25's decidable threshold.**
+Same-cutoff comparison, all cumulative tokens / 1200 s / 8 GPUs:
 
-Why: SGLang never used a jinja template for this model. `--tool-call-parser
-deepseekv4` makes `resolve_chat_encoding_spec()` return `"dsv4"`
-(`entrypoints/openai/chat_encoding.py:112`), so the **native encoder**
-`entrypoints/openai/encoding_dsv4.py` owns thinking, tool calls, tool results,
-EOS and reasoning history. `--chat-template` *overrides* that with a nine-line
-system/user/assistant template. The startup line `No chat template found,
-defaulting to 'string' content format` is misleading log noise, not a defect.
-Full post-mortem and the standing rule: `references/b200-alignment.md` §24.1.
+| cutoff | TP8 c64 | DP8+TBO c64 | b200align |
+|---|---|---|---|
+| 300 s | 13,613 | 10,988 | 10,907 |
+| 600 s | 15,166 | 16,306 | 17,144 |
+| 900 s | 17,320 | 17,740 | **19,148** |
+| **1200 s** | **17,325** | **17,322** | **18,895** |
 
-Secondary symptoms seen before the cause was found — 3-4x slower warmup
-(324/707 at 2430 s vs tbo 701/707 at 1200 s) and a prefill-only profile (2147
-prefill batches, 2 decode) — are **consequences of the collapse, not causes**:
-at ~1 token per turn the replay still feeds the whole history back, so prompts
-snowball to ~163 k tokens/request. Three other explanations were proposed and
-each was killed by a control (shared-experts fusion: tbo ran the identical
-setting fine; aiter untuned GEMMs: tbo has 5x more and is faster;
-decode starvation: like-for-like over the same 2147 prefill batches, tbo logged
-0 decode and b200align 2). **Get output tokens/request from `/metrics` early —
-it would have caught this in minutes instead of 65.**
+The aggregate JSON reports 18,485 because it divides by the actual 1226.6 s;
+18,895 x 1200/1226.6 = 18,485, so use 18,895 against the reconstructed
+references. §25 resolves >=10 % only, this is +9.1 %, and 900 s (19,148) is
+above 1200 s (18,895) — still on the wandering part of the curve. Not a verdict.
+Health confirmed independently of `/metrics`: warmup 701/707 at 1110 s (tbo:
+701/707 at 1200 s), `errors=0`, no HSA/watchdog, `output_actual.mean` 766.7
+tok/req, cache hit 0.956. Result kept at
+`/workspace/results/b200align-tp8-c64-1200s/`. A 3600 s confirmation run is
+under way, to be read against the full-length values TP8 17,219 / TBO 17,585.
+
+**What the +9.1 % is attributable to.** Diagnosis added `--enable-prefill-delayer`
+and `--enable-two-batch-overlap` back, so this arm's flag set now differs from
+`tbo-tp8-c64` by **exactly four flags** and nothing else (verified by full
+`sglang_command.txt` diff — no other additions, removals or value changes):
+`--enable-dp-attention-local-control-broadcast`, `--prefill-decode-interval 10`,
+`--stream-interval 20`, `--tokenizer-worker-num 8`.
+`--incremental-streaming-output` was dropped during bisection and is NOT in this
+result.
+
+**TRAP — `/metrics` under-reports when `--tokenizer-worker-num > 1`.**
+`sglang:generation_tokens_total` read ~1 token per returned request on runs that
+were in fact generating 767 tok/req, and `sglang:num_running_reqs` read 0.0 on
+every DP rank while requests were being served. The frontend is split across 8
+tokenizer worker processes and the endpoint appears to report one of them.
+**This metric was the basis for three separate wrong diagnoses today**
+(`--chat-template`, then the scratch-reclaim OOR, then "the four B200 flags
+break generation"), and a healthy run was killed because of it. Judge generation
+health by **warmup progress against the reference arm's curve at matched
+`elapsed`** (`tbo-tp8-c64/benchmark.log` has the per-30 s series), by
+`errors=` in the aiperf progress line, and after the fact by
+`request_metrics.tokens.output_actual.mean`. Early `Decode batch` counts are
+also useless: tbo logs **0** decode batches over its first 2147 prefill batches.
+
+**TRAP — the server survives the launcher.** After a completed run,
+`sglang.launch_server` was still alive holding 92 % VRAM with no launcher
+process. `kill -TERM` on the process group did not take it down (a second
+launcher process even appeared); only per-PID `kill -9` matched against
+`sglang.launch_server` **and** `sglang::` children worked, followed by a wait
+for `rocm-smi` VRAM to fall back under 10 %.
 
 **sglang#36656 checked — does NOT affect AgentX, no need to merge first.**
 The PR deletes an 8-line silent `mem_fraction_static *= 0.85` in

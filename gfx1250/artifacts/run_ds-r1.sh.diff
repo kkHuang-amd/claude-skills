@@ -23,8 +23,8 @@ index bcd94c071..3eb94e857 100755
  SGLANG_ROCM_FUSED_DECODE_MLA=0 \
  SGLANG_USE_ROCM700A=1 \
  python3 -m sglang.launch_server \
--  --model-path /dockerx/data/models/DeepSeek-R1-MXFP4 \
-+  --model-path /dockerx/models/amd/DeepSeek-R1-0528-MXFP4 \
+-  --model-path /shared_nfs/huggingface_models/amd/DeepSeek-R1-MXFP4 \
++  --model-path /shared_nfs/huggingface_models/amd/DeepSeek-R1-0528-MXFP4 \
    --tensor-parallel-size 1 \
    --trust-remote-code \
    --host 0.0.0.0 \

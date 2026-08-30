@@ -115,7 +115,7 @@ bash useful-scripts/benchmarking/dsv4/run_sgl_dsv4_unified.sh
 
 # client — MUST use a fragmented workload to see the gain (range-ratio < 1):
 python3 -m sglang.bench_serving --backend sglang --host 127.0.0.1 --port 8000 \
-  --model /dockerx/data/deepseek-ai/DeepSeek-V4-Pro --dataset-name random \
+  --model /shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro --dataset-name random \
   --random-input-len 1024 --random-output-len 1024 --random-range-ratio 0.3 \
   --num-prompts 2048 --max-concurrency 1024 --request-rate inf
 ```

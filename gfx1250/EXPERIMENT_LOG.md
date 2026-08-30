@@ -9,7 +9,7 @@ Chronological record of what was run and observed. Repos (base commits at time
 of work):
 - `/sgl-workspace/sglang` @ `8d30387cd671a3bc8eae178988f7c119544d08b7` (2026-07-02)
 - `/sgl-workspace/aiter`  @ `8815f4b56dbaf416a3370659b777839c70ff3bf9` (2026-06-30, fork akao-amd/aiter)
-- Model: `/dockerx/models/amd/DeepSeek-R1-0528-MXFP4` (Quark W4A4 MXFP4)
+- Model: `/shared_nfs/huggingface_models/amd/DeepSeek-R1-0528-MXFP4` (Quark W4A4 MXFP4)
 - HW: 4x gfx1250, VRAM ~432 GB each. Shared with another user's `rccl-tests`.
 
 > **MULTI-NODE CONVENTION (2026-07-09):** several machines are now validating this
@@ -53,7 +53,7 @@ for g in 1 2 3; do timeout 25 python3 -c "import torch; x=torch.ones(8,device='c
 ## E2. Model quant config confirmed W4A4
 
 ```bash
-python3 -c "import json;c=json.load(open('/dockerx/models/amd/DeepSeek-R1-0528-MXFP4/config.json'));print(c['quantization_config']['global_quant_config'])"
+python3 -c "import json;c=json.load(open('/shared_nfs/huggingface_models/amd/DeepSeek-R1-0528-MXFP4/config.json'));print(c['quantization_config']['global_quant_config'])"
 ```
 - weight: fp4, per_group, group_size 32, static, e8m0.
 - input_tensors: fp4, per_group, 32, **dynamic**, e8m0.  => W4A4 (a4w4).
@@ -312,7 +312,7 @@ Corrections/notes:
 # 2026-07-08 session — new docker, MoE exoneration (root-cause overturned)
 
 Environment differs from the 2026-07-07 log:
-- Model path moved to `/dockerx/data/models/DeepSeek-R1-0528-MXFP4` (Quark W4A4,
+- Model path moved to `/shared_nfs/huggingface_models/amd/DeepSeek-R1-0528-MXFP4` (Quark W4A4,
   fp4/fp4 confirmed; **n_routed_experts=256**, topk=8, model_dim=7168, inter=2048).
 - `sglang` HEAD `000a61a2` ("Enable DSv4 a8w4 MoE: shuffle FP4 expert weights and
   bring-up env") — newer than the 8d30387 base. Already carries the gfx1250 MoE
@@ -604,7 +604,7 @@ both, only the absorb weight prep differs; two servers in parallel (TP2 each):
 
 Both run the modified tree at `/sgl-workspace/sglang_gfx-1250` (via PYTHONPATH; the
 pip-editable `/sgl-workspace/sglang` is the OLD tree and must NOT be used). Model
-`/dockerx/data/amd/DeepSeek-R1-0528-MXFP4`. No source edits — the ablation is a pure
+`/shared_nfs/huggingface_models/amd/DeepSeek-R1-0528-MXFP4`. No source edits — the ablation is a pure
 runtime monkeypatch.
 
 | absorb path            | GSM8K 200Q | GSM8K 1319Q | Invalid |
@@ -999,7 +999,7 @@ out a broken non-MoE op. Files: `scripts/nonmoe_probe_sitecustomize.py`, `run_ds
 node: gfx1250 / host ctheliosr-rck-g02-j19-10 | sglang(/opt/venv serve) | aiter 8815f4b5(+edits) | 2026-07-09
 
 User's sharp sanity check: "if the gap were a gfx1250 HARDWARE problem, DSv4 couldn't score well on
-gfx1250." Measured it directly. Model `/dockerx/models/DeepSeek-V4-Flash` (DeepseekV4ForCausalLM, 43
+gfx1250." Measured it directly. Model `/shared_nfs/hyperloom/models/DeepSeek-V4-Flash` (DeepseekV4ForCausalLM, 43
 layers, **fp8 w8a8** dynamic e4m3; `is_fp4_experts=True` -> experts are fp4, so with
 `AITER_FORCE_A8W4=1` DSv4 uses the SAME a8w4 grouped MoE kernel as R1). Launch `run_v4_gfx1250.sh`
 style on GPU3, `--attention-backend dsv4`, fp8 KV. Same GSM8K 5-shot completion bench as R1.

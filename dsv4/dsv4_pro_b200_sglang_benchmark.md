@@ -23,7 +23,7 @@ Notes:
 | component | version |
 |-----------|---------|
 | SGLang    | `0.0.0.dev1+gda802ddca` (commit `da802ddcafe55e25b3e1db86b1e0444afc3e05bc`, 2026-06-27) |
-| Model     | `deepseek-ai/DeepSeek-V4-Pro` at `/dockerx/mnt/models/deepseek-ai/DeepSeek-V4-Pro` (config quant `fp8`, routed experts auto-detected `fp4`) |
+| Model     | `deepseek-ai/DeepSeek-V4-Pro` at `/shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro` (config quant `fp8`, routed experts auto-detected `fp4`) |
 | GPU       | 8x NVIDIA B200 (183 GB each) |
 | KV cache dtype | `fp8_e4m3` |
 | Attention backend | `dsv4` (DeepseekV4AttnBackend), page_size 256 |
@@ -44,7 +44,7 @@ Effective server command:
 
 ```bash
 python3 -m sglang.launch_server \
-  --model-path /dockerx/mnt/models/deepseek-ai/DeepSeek-V4-Pro \
+  --model-path /shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro \
   --served-model-name DeepSeek-V4-Pro \
   --host 0.0.0.0 --port 8000 --trust-remote-code \
   --tp 8 --dp 8 --tokenizer-worker-num 8 \
@@ -94,8 +94,8 @@ python3 -m sglang.bench_serving \
 
 ## Related artifacts
 
-- Launch script: `/dockerx/home/wunhuang/useful-scripts/benchmarking/dsv4/run_sgl_dsv4_pro_b200.sh`
-- Raw bench outputs: `/dockerx/home/wunhuang/useful-scripts/benchmarking/dsv4/bench_results/laneA_c*_np*.jsonl`
+- Launch script: `/workspace/useful-scripts/benchmarking/dsv4/run_sgl_dsv4_pro_b200.sh`
+- Raw bench outputs: `/workspace/useful-scripts/benchmarking/dsv4/bench_results/laneA_c*_np*.jsonl`
 - Agentic lane (aiperf inferencex-agentx-mvp) driver + results:
   `run_agentic_replay.sh`, `agentic_results/` (see `agentic_results/FINDINGS.md`)
 

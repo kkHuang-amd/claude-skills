@@ -341,7 +341,7 @@ Historical DSV4 mori-EP TBO was also negative before backend-specific tuning.
 Launcher:
 
 ```bash
-/dockerx/home/wunhuang/tmp/useful-scripts/benchmarking/dsv4/run_sgl_dsv4_unified.sh
+/workspace/useful-scripts/benchmarking/dsv4/run_sgl_dsv4_unified.sh
 ```
 
 FlyDSL-EP:

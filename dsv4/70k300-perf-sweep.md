@@ -11,7 +11,7 @@ DP / DP+TBO** datapoint. All numbers reproduced the prior references within nois
 |---|---|
 | Date | 2026-07-03 |
 | Hardware | 8× AMD Instinct MI355X (gfx950) |
-| Model | `/dockerx/data/deepseek-ai/DeepSeek-V4-Pro` (FP8, 64 shards) |
+| Model | `/shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro` (FP8, 64 shards) |
 | sglang tree | `/sgl-workspace/sglang-upstream` (pinned via PYTHONPATH) |
 | branch | `feat/dsv4-ep-tbo-prefill` |
 | HEAD | `236bcab4e` (`fix(dsv4-tbo): avoid empty two-chunk TBO child on degenerate batches`) |
@@ -80,7 +80,7 @@ Bold = best config at that concurrency.
 
 ## Commands (exact, reproducible)
 
-cwd for all: `/dockerx/home/wunhuang/tmp/useful-scripts/benchmarking/dsv4/`.
+cwd for all: `/workspace/useful-scripts/benchmarking/dsv4/`.
 Cold load ~9–10 min/launch (faster if weights cached); poll `http://127.0.0.1:8000/health`
 (200) before benching. `run_sgl_dsv4_70k.sh` internally pins the sglang-upstream PYTHONPATH.
 

@@ -751,7 +751,7 @@ Working-tree only (not committed). Also a separate clone `/sgl-workspace/sglang-
 ## How to run
 `run_sgl_dsv4_unified.sh` now has a `megamoe` MODE (added):
 ```bash
-cd /dockerx/home/wunhuang/tmp/useful-scripts/benchmarking/dsv4/
+cd /workspace/useful-scripts/benchmarking/dsv4/
 MEM=0.65 SGLANG_AMD_FLYDSL_MEGA_MOE_MTPR=8192 MODE=megamoe PORT=8000 bash run_sgl_dsv4_unified.sh
 # needs the FlyDSL workspace: /sgl-workspace/FlyDSL @ branch mega_moe_v1 (kernels.moe.mega_moe)
 ```

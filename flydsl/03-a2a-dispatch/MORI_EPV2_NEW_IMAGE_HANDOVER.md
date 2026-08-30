@@ -337,7 +337,7 @@ rocm-smi --showpids --showmeminfo vram
 ```bash
 source /opt/venv/bin/activate
 
-export MODEL=/dockerx/data/deepseek-ai/DeepSeek-V4-Pro
+export MODEL=/shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro
 export PORT=8000
 export SGLANG_REPO=/workspace/sglang-mori-epv2
 export AITER_REPO=/workspace/aiter

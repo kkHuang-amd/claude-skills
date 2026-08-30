@@ -13,11 +13,11 @@
 ## 先讀文件
 
 ```text
-/dockerx/var/amdsgl/kk/workspace/claude-skills/dsv4/FLYDSL_A2A_FINAL_REPORT_2026-07-30.md
-/dockerx/var/amdsgl/kk/workspace/claude-skills/dsv4/megamoe/MEGAMOE_HANDOFF.md
-/dockerx/var/amdsgl/kk/workspace/claude-skills/dsv4/megamoe/MEGAMOE_OPT_DIRECTIONS_HANDOVER.md
-/dockerx/var/amdsgl/kk/workspace/claude-skills/dsv4/megamoe/FLYDSL_MEGAMOE_STAGE1_ANALYSIS.md
-/dockerx/var/amdsgl/kk/workspace/claude-skills/dsv4/megamoe/EXPERIMENT_LOG.md
+/workspace/claude-skills/dsv4/FLYDSL_A2A_FINAL_REPORT_2026-07-30.md
+/workspace/claude-skills/dsv4/megamoe/MEGAMOE_HANDOFF.md
+/workspace/claude-skills/dsv4/megamoe/MEGAMOE_OPT_DIRECTIONS_HANDOVER.md
+/workspace/claude-skills/dsv4/megamoe/FLYDSL_MEGAMOE_STAGE1_ANALYSIS.md
+/workspace/claude-skills/dsv4/megamoe/EXPERIMENT_LOG.md
 ```
 
 ## Workspace isolation

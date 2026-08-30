@@ -5,7 +5,7 @@ project/hardware/clients as the main log; see `SKILL.md` for how-to and
 `HANDOFF.md` for the running summary.
 
 - **Date**: 2026-06-23
-- **Model**: `/dockerx/data/deepseek-ai/DeepSeek-V4-Pro/` (FP8)
+- **Model**: `/shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro/` (FP8)
 - **sglang clone (active editable)**: `/sgl-workspace/sglang-upstream/python`
   (HEAD `4f174ce74`); contains shipped gatherv + A-fix (PR #28216) + ported
   SE-local.

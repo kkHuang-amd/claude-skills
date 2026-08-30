@@ -10,12 +10,12 @@ JSON); all working-tree changes are default-off, so the default path == baseline
 繼續 MegaMoE FlyDSL 工作:kernel 優化階段已結案,現在跑 e2e 驗證。**先套用 skill「reduce-conversation-usage」**(狀態寫回文件、指令輸出一律 `rg` 過濾、窄讀不重讀、批次工具呼叫、少回合)。
 
 **目前狀態(務必先讀,不要重建整段歷史):**
-- `/dockerx/home/wunhuang/tmp/claude-skills/dsv4/megamoe/KERNEL_OWNER_DECODE_PLAN.md` ← **主檔**,含 Track B 全部結論:occupancy 不是槓桿、K-loop 是 MFMA-bound、唯一穩健 win = **`b_nt` per-bucket**(decode `b_nt=2` bs64 −5.1% 已嚴格驗證;prefill `b_nt=1`)。
-- `/dockerx/home/wunhuang/tmp/claude-skills/dsv4/megamoe/README.md` 的「▶ CONTINUE HERE」(dispatch 結論:ship compact-only)。
-- `/dockerx/home/wunhuang/tmp/claude-skills/dsv4/megamoe/MEGAMOE_HANDOFF.md`(baseline gsm8k ~0.937、conc256 tok/s A/B 口徑、driver `/workspace/ab_megamoe_driver.sh`)。
-- `/dockerx/home/wunhuang/tmp/claude-skills/dsv4/FLYDSL_KERNEL_OPT_PLAYBOOK.md`(profiling/gotchas 方法論;含「按數字 PID kill、清 VRAM、量測噪音」)。
+- `/workspace/claude-skills/dsv4/megamoe/KERNEL_OWNER_DECODE_PLAN.md` ← **主檔**,含 Track B 全部結論:occupancy 不是槓桿、K-loop 是 MFMA-bound、唯一穩健 win = **`b_nt` per-bucket**(decode `b_nt=2` bs64 −5.1% 已嚴格驗證;prefill `b_nt=1`)。
+- `/workspace/claude-skills/dsv4/megamoe/README.md` 的「▶ CONTINUE HERE」(dispatch 結論:ship compact-only)。
+- `/workspace/claude-skills/dsv4/megamoe/MEGAMOE_HANDOFF.md`(baseline gsm8k ~0.937、conc256 tok/s A/B 口徑、driver `/workspace/ab_megamoe_driver.sh`)。
+- `/workspace/claude-skills/dsv4/FLYDSL_KERNEL_OPT_PLAYBOOK.md`(profiling/gotchas 方法論;含「按數字 PID kill、清 VRAM、量測噪音」)。
 
-**環境:** FlyDSL=`/sgl-workspace/FlyDSL` @ `mega_moe_v1`;sglang=`/sgl-workspace/sglang`;8× MI355X(gfx950);model=`/dockerx/data/deepseek-ai/DeepSeek-V4-Pro`。
+**環境:** FlyDSL=`/sgl-workspace/FlyDSL` @ `mega_moe_v1`;sglang=`/sgl-workspace/sglang`;8× MI355X(gfx950);model=`/shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro`。
 
 **關鍵前提(決定驗證口徑):**
 - `cd /sgl-workspace/FlyDSL && git status --short` 應看到 5 檔未 commit(dispatch.py/gemm1.py/mega_moe.py/utils.py/test_mega_moe.py)。**這些改動全部 default-off**:recv 預設關(不出貨)、`MEGA_S1_BNT` 是 env-gated 預設關、divzero 修復對 tile_k=256 是 no-op。

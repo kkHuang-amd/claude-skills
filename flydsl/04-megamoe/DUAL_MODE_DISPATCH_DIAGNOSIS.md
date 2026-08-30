@@ -161,12 +161,12 @@ PYTHONPATH=/sgl-workspace/FlyDSL MORI_SHMEM_HEAP_SIZE=40G torchrun --standalone 
 
 **Server (HANGS — the kernel-owner repro):**
 ```bash
-cd /dockerx/home/wunhuang/tmp/useful-scripts/benchmarking/dsv4/
+cd /workspace/useful-scripts/benchmarking/dsv4/
 SGLANG_AMD_FLYDSL_MEGA_DEBUG=1 SGLANG_AMD_FLYDSL_MEGA_DECODE_MTPR=512 \
   SGLANG_AMD_FLYDSL_MEGA_MOE_MTPR=8192 MEM=0.65 MODE=megamoe PORT=8000 bash run_sgl_dsv4_unified.sh
 # in another shell, drive continuous batching:
 lm_eval --model local-completions --model_args \
-  model=/dockerx/data/deepseek-ai/DeepSeek-V4-Pro,base_url=http://localhost:8000/v1/completions,\
+  model=/shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro,base_url=http://localhost:8000/v1/completions,\
 num_concurrent=128,max_retries=3,tokenized_requests=False --tasks gsm8k --num_fewshot 5
 # server reaches ready, runs some prefills + decode steps, then a compact prefill hangs (health 503).
 # py-spy a scheduler: for p in $(rocm-smi --showpids|awk '/^[0-9]/{print $1}'); do py-spy dump --pid $p; done

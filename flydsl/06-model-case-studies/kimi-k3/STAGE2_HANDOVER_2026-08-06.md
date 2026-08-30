@@ -195,7 +195,7 @@ matching A8W8 preshuffle path.
 All Stage 2 logs, benchmark JSONL, traces, and summaries are under:
 
 ```text
-/dockerx/var/amdsgl/kk/workspace/claude-skills/kimi-k3/stage2-runs/2026-08-06-baseline
+/workspace/claude-skills/kimi-k3/stage2-runs/2026-08-06-baseline
 ```
 
 Most useful machine-readable files:
@@ -221,7 +221,7 @@ DCP_SIZE=1 ATTENTION_BACKEND=triton \
 MAX_RUNNING_REQUESTS=32 CUDA_GRAPH_MAX_BS_DECODE=32 \
 RADIX_CACHE=0 ENABLE_INT8_MAMBA_CHECKPOINT=1 \
 ENABLE_CACHE_REPORT=1 \
-bash /dockerx/var/amdsgl/kk/workspace/useful-scripts/benchmarking/kimi-k3/launch_server.sh
+bash /workspace/useful-scripts/benchmarking/kimi-k3/launch_server.sh
 ```
 
 Before serving, verify:

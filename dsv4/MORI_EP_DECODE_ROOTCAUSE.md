@@ -1989,7 +1989,7 @@ grouped path is taken (not the sorted `mfma_moe1_..._sort` path).
 
 **Launch recipe (8k/1k conc256, the standard EP point):**
 ```bash
-cd /dockerx/home/wunhuang/tmp/useful-scripts/benchmarking/dsv4/
+cd /workspace/useful-scripts/benchmarking/dsv4/
 AITER_USE_GROUPED_GEMM=1 \                 # (or the gfx950 masked gate you added)
 SGLANG_MORI_DECODE_DISPATCH_DTYPE=bf16 \
 SGLANG_MORI_DECODE_MAX_DISPATCH_TOKENS=128 \   # = CGBS/dp; masked should make this less critical
@@ -2002,7 +2002,7 @@ MODE=mori-ep PORT=8000 bash run_sgl_dsv4_unified.sh   # health: curl :8000/healt
 ```bash
 WORKLOADS="8192:1024" CONCS="256" NP_MULT=2 WARM_MULT=1 \
   RESULT_DIR=/workspace/bench_results_dsv4_epdbg/masked bash sweep_dsv4_sglang_client.sh
-lm_eval --model local-completions --model_args model=/dockerx/data/deepseek-ai/DeepSeek-V4-Pro/,base_url=http://localhost:8000/v1/completions,num_concurrent=128,max_retries=3,tokenized_requests=False --tasks gsm8k --num_fewshot 5
+lm_eval --model local-completions --model_args model=/shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro/,base_url=http://localhost:8000/v1/completions,num_concurrent=128,max_retries=3,tokenized_requests=False --tasks gsm8k --num_fewshot 5
 ```
 
 **Pass/compare targets (same build, 8k/1k conc256 — from §5y):**
@@ -2351,7 +2351,7 @@ sglang. GPUs idle.
 #   SGLANG_MORI_MASKED_DEBUG=1   (SGLANG_MORI_MASKED_DUMP=1 for the masked-vs-default DIFF)
 ps aux | grep "[l]aunch_server --model-path" | awk '{print $2}' | xargs -r kill -9   # NB: never `pkill -f sglang.launch_server` (matches its own cmdline, kills the shell)
 find /sgl-workspace/aiter/aiter/jit/build \( -name lock -o -name 'lock_*' \) -delete
-cd /dockerx/home/wunhuang/tmp/useful-scripts/benchmarking/dsv4/ && nohup bash run_sgl_dsv4_masked.sh > /tmp/masked_srv.log 2>&1 & disown   # ready ~90-120s ("Uvicorn running")
+cd /workspace/useful-scripts/benchmarking/dsv4/ && nohup bash run_sgl_dsv4_masked.sh > /tmp/masked_srv.log 2>&1 & disown   # ready ~90-120s ("Uvicorn running")
 ```
 **Code touchpoints (all working-tree, default-OFF):** aiter `ops/flydsl/grouped_moe_gfx950.py`
 (`flydsl_masked_moe_gfx950_recv` = the bridge primitive; kernels in `kernels/mixed_moe_gemm_2stage.py`);

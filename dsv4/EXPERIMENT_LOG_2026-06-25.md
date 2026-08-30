@@ -6,7 +6,7 @@ LONG-CONTEXT, prefill-dominated profile (very different from the prior 1k/1k and
 throughput across conc {2,4,8,16,32}.
 
 - **Date**: 2026-06-25
-- **Model**: `/dockerx/data/deepseek-ai/DeepSeek-V4-Pro/` (FP8)
+- **Model**: `/shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro/` (FP8)
 - **sglang clone (active editable)**: `/sgl-workspace/sglang-upstream/python`
   (HEAD `ffb1afd5e`, branch `feat/dsv4-aiter-reduce-scatter-decode`; has PR #28216
   gatherv + PR #29103 reduce_scatter + flat-RoPE + SE-local).
@@ -385,7 +385,7 @@ dispatchers leak per-call queues on ROCm).
 TBO-supported upstream) + mori + TBO**, same box / same TBO infra / same mori
 (`async_finish=True`), `aiter` attention backend, mem 0.72, cuda-graph-max-bs 64.
 Ran the **FULL gsm8k (1319) at conc 16 → COMPLETED, NO crash**, 0.9484/0.9439.
-Model `/dockerx/data/amd/DeepSeek-R1-0528-MXFP4/`, launch `/workspace/run_r1_mori_tbo.sh`.
+Model `/shared_nfs/huggingface_models/amd/DeepSeek-R1-0528-MXFP4/`, launch `/workspace/run_r1_mori_tbo.sh`.
 
 **Conclusions (strong):**
 - The HSA OUT_OF_RESOURCES is **DSV4-SPECIFIC**, NOT a general mori+TBO infra bug.

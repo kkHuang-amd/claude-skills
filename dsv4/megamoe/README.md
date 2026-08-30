@@ -108,6 +108,12 @@ Files changed for `recv` (all additive, default-off, shipping compact/fixedslot 
 `_disp_tbl_recv`, build + `_run`/`forward` select), `tests/kernels/test_mega_moe.py` (`--recv`).
 
 ## In this folder
+- **`PR35619_UPSTREAM_REPRO.md`** — **upstream `sglang#35619` reproduction (2026-08-27)**: both PR numbers
+  hit on *stock* `/sgl-workspace/aiter` (no `aiter-megamoe-pr4439` / `FlyDSL-mega_moe_v1` needed) —
+  39,200.88 no-EPLB and 42,505.60 EPLB, within 0.9%. Full non-folded server+client commands, the five
+  settings that silently break it (mori heap default, shared-experts fusion, the four DP-comm envs, the
+  EPLB distribution recorder, redundant experts), and the open `RANK_SYNC` + DP-attention IndexError.
+  **Start here to re-run the upstream PR.**
 - **`E2E_VALIDATION_PROMPT.md`** — paste-ready prompt for running the whole-network / gsm8k e2e validation in a
   fresh chat (aligned to current state: compact-only ship + `b_nt` GEMM win, all working-tree changes default-off).
 - **`MEGAMOE_HANDOFF.md`** — original bring-up: functional + at parity, compact-only megamoe shipped

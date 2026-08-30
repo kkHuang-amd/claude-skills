@@ -5,7 +5,7 @@ Use this method for future SGLang CPU/GPU Chrome traces on MI355X.
 ## Canonical implementation
 
 ```text
-/dockerx/var/amdsgl/kk/workspace/kimi-k3-runs/stage2-runs/
+/workspace/kimi-k3-runs/stage2-runs/
   2026-08-13-triton36-vs37-compact-global-traces/
   run_compact_trace.sh
 ```
@@ -75,7 +75,7 @@ reinitialization produced incomplete MoE GPU coverage.
 The retained Triton 3.6/3.7 pair is:
 
 ```text
-/dockerx/var/amdsgl/kk/workspace/kimi-k3-runs/stage2-runs/
+/workspace/kimi-k3-runs/stage2-runs/
   2026-08-13-triton36-vs37-compact-global-traces/
 ```
 

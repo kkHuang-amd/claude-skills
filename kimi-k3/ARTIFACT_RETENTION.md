@@ -53,7 +53,7 @@ RAW_TRACE_DELETION_2026-08-12.tsv
 Physical run storage:
 
 ```text
-/dockerx/var/amdsgl/kk/workspace/kimi-k3-runs/stage2-runs
+/workspace/kimi-k3-runs/stage2-runs
 ```
 
 The project-local `stage2-runs` path is a symlink to this location. Keep using

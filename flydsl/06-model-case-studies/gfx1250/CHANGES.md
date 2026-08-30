@@ -50,7 +50,7 @@ Key added knobs:
 - env: `HSA_ENABLE_COREDUMP=0`, `HSA_COREDUMP_PATTERN=/dev/null`, `AMD_COREDUMP=0`
 - env: `AITER_FORCE_A8W4=1` — MoE a8w4 + triggers linear bf16-dequant (#1)
 - `HIP_VISIBLE_DEVICES` -> a healthy GPU
-- model-path `/dockerx/models/amd/DeepSeek-R1-0528-MXFP4`
+- model-path `/shared_nfs/huggingface_models/amd/DeepSeek-R1-0528-MXFP4`
 
 ## 4. No code change needed for MoE dtype switch
 
@@ -134,7 +134,7 @@ AMD_SERIALIZE_KERNEL=3 bash /tmp/run_diag.sh 2>&1 | tee /tmp/run_diag.log
 
 ## 2026-07-08 session edits (newer docker: sglang 000a61a2, aiter 8815f4b5)
 
-Model path is now `/dockerx/data/models/DeepSeek-R1-0528-MXFP4`.
+Model path is now `/shared_nfs/huggingface_models/amd/DeepSeek-R1-0528-MXFP4`.
 SHIPPING code changes (updated 2026-07-09, E36-E40): **FIX A (below) is THE accuracy fix**
 (GSM8K 0.811 -> 0.950 @1319Q, full speed); plus B (weight shuffle, mandatory) and C
 (AITER_GROUPED_FORCE_SPLIT_K1). Change **A (bisect) is REMOVED** (E40: caused DSv4 OOB, and it
@@ -205,7 +205,7 @@ script set it; the tuned CSV picks split_k1=2 for the token=1 R1 decode dims (E1
 illegal-address path), so the env is required to force the fused path.
 
 ### run_ds-r1.sh
-`--model-path /dockerx/data/models/DeepSeek-R1-0528-MXFP4`; add
+`--model-path /shared_nfs/huggingface_models/amd/DeepSeek-R1-0528-MXFP4`; add
 `SGLANG_MOE_SHUFFLE_GFX1250=1`; keep `AITER_FORCE_A8W4=1`, `AITER_GROUPED_FORCE_SPLIT_K1=1`,
 `--kv-cache-dtype auto`, `--attention-backend triton`, cuda-graph ON.
 After editing FIX A: `rm -rf /root/.triton/cache` so Triton recompiles the attention kernels.

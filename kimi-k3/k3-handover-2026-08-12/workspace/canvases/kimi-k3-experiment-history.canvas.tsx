@@ -115,7 +115,7 @@ export default function KimiK3ExperimentHistory() {
 
       <Text size="small" tone="tertiary">
         Canonical source:{" "}
-        <Link href="file:///dockerx/var/amdsgl/kk/workspace/claude-skills/kimi-k3/SUMMARY.md">
+        <Link href="file:///workspace/claude-skills/kimi-k3/SUMMARY.md">
           SUMMARY.md
         </Link>
         {" "}· Experiment evidence is retained under stage2-runs without raw profiler traces.

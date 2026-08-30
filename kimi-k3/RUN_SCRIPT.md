@@ -3,12 +3,12 @@
 Launcher:
 
 ```text
-/dockerx/var/amdsgl/kk/workspace/useful-scripts/benchmarking/kimi-k3/launch_server.sh
+/workspace/useful-scripts/benchmarking/kimi-k3/launch_server.sh
 ```
 
 ## Merged defaults
 
-- Model: `/dockerx/data/models/Kimi-K3`
+- Model: `/shared_nfs/huggingface_models/moonshotai/Kimi-K3`
 - TP: 8
 - Decode DCP: 8 with the AITER attention backend
 - Listen: `0.0.0.0:8000`

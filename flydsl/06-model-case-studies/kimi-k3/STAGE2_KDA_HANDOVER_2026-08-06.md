@@ -153,7 +153,7 @@ performance default.
 ## Persistent artifacts
 
 ```text
-/dockerx/var/amdsgl/kk/workspace/claude-skills/kimi-k3/stage2-runs/2026-08-06-kda-flydsl-vs-triton
+/workspace/claude-skills/kimi-k3/stage2-runs/2026-08-06-kda-flydsl-vs-triton
 ```
 
 Important files:

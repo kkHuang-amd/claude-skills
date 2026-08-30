@@ -131,7 +131,7 @@ Do not enable it by default until GSM8K accuracy validation is recorded.
 ## Artifacts
 
 ```text
-/dockerx/var/amdsgl/kk/workspace/kimi-k3-runs/stage2-runs/
+/workspace/kimi-k3-runs/stage2-runs/
   2026-08-13-extend-attention-triton37-tuning/
 ```
 

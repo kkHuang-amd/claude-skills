@@ -11,7 +11,7 @@ session. They are not optional and they are not just for the first turn.
 
 ## 1. Skills repository
 
-My skills live at:  /dockerx/home/wunhuang/claude-skills/
+My skills live at:  /workspace/claude-skills/
 
 Do this now, in ONE batched message:
   - ls that directory (top level only)
@@ -160,7 +160,7 @@ SHORT VARIANT
   If the skills repo is already mounted and you trust the agent to read it,
   this one-liner is often enough:
 
-    Read /dockerx/home/wunhuang/claude-skills/cap-tool-output/SKILL.md and
+    Read /workspace/claude-skills/cap-tool-output/SKILL.md and
     reduce-conversation-usage/SKILL.md and apply both for this whole session.
     Then list the other skill dirs and read only their description: lines.
     Cap every command: | cut -c1-200 and | head -c 2000. Count before listing.
@@ -171,6 +171,6 @@ SHORT VARIANT
 
 MAINTENANCE
   - Section 1 lists skill directory names. Update it when skills are added or
-    removed, or replace the list with: `ls /dockerx/home/wunhuang/claude-skills/`.
+    removed, or replace the list with: `ls /workspace/claude-skills/`.
   - Keep section 2 in sync with cap-tool-output/SKILL.md; it is a deliberate
     duplicate so the rules survive a workspace where the repo is absent.

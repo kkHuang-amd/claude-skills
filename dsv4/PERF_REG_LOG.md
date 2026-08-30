@@ -83,12 +83,12 @@ just a stability band-aid.**
 - `--mem-fraction-static 0.90 --chunked-prefill-size 65536` (=8192/rank) `--cuda-graph-max-bs 1024 --max-running-requests 1024 --swa-full-tokens-ratio 0.15`
 - `--disable-radix-cache --disable-shared-experts-fusion`
 - env: `GPU_MAX_HW_QUEUES=5`, `SGLANG_USE_ROCM700A=0`, gatherv+reduce-scatter+SE-local ON, `PYTHONPATH` pinned to upstream tree.
-- Model: `/dockerx/data/deepseek-ai/DeepSeek-V4-Pro`. HW: 8x MI355X (gfx950).
+- Model: `/shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro`. HW: 8x MI355X (gfx950).
 
 **Commands**
 ```bash
 # 1. launch (one server, reused for gsm8k + perf)
-cd /dockerx/home/wunhuang/tmp/useful-scripts/benchmarking/dsv4
+cd /workspace/useful-scripts/benchmarking/dsv4
 PORT=8000 MODE=dp-tbo bash run_sgl_dsv4_unified.sh    # ready in ~150s (weights cached)
 
 # 2. gsm8k 5-shot

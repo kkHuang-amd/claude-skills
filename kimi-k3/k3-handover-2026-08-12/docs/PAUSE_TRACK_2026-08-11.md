@@ -14,7 +14,7 @@ C4 stayed flat after B4 dispatch was removed. See
 Resume from:
 
 ```text
-/dockerx/var/amdsgl/kk/workspace/claude-skills/kimi-k3/
+/workspace/claude-skills/kimi-k3/
 aiter-optimization-tracker/HANDOFF_2026-08-11.md
 ```
 

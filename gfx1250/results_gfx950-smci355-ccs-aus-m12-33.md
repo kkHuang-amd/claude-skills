@@ -3,7 +3,7 @@
 Dedicated raw-run log for THIS gfx950 box (hostname `smci355-ccs-aus-m12-33`), to avoid
 write conflicts on the shared `EXPERIMENT_LOG.md` / `STATUS.md` / `results_gfx950.md`.
 Tree: `/sgl-workspace/sglang_gfx-1250` @ `000a61a2`. Model:
-`/dockerx/data/amd/DeepSeek-R1-0528-MXFP4` (tokenizer.json md5 `60264268dbd8a72aa3c8d813faec0ed3`).
+`/shared_nfs/huggingface_models/amd/DeepSeek-R1-0528-MXFP4` (tokenizer.json md5 `60264268dbd8a72aa3c8d813faec0ed3`).
 Native a4w4 GSM8K reference on this node ~0.93-0.95.
 
 Promote short summaries into the shared logs only when safe; write new runs here first.

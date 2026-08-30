@@ -143,13 +143,13 @@ Copies: `07-ecosystem/`.
 Copied documents that referenced the stale prefix:
 
 ```text
-/dockerx/home/wunhuang/tmp/claude-skills
+/workspace/claude-skills
 ```
 
 were normalized inside the hub copies to:
 
 ```text
-/dockerx/var/amdsgl/kk/workspace/claude-skills
+/workspace/claude-skills
 ```
 
 Original source documents were not modified.

@@ -470,7 +470,7 @@ Files: `python/sglang/srt/layers/dp_attention.py`,
 - `run_gatherv_ab.sh` / `run_gatherv_sweep.sh`: throughput A/B + concurrency sweep.
 - `run_gatherv_gsm8k_ab.sh`: gsm8k correctness A/B.
 - `moe_comm_microbench.py`: isolated collective-primitive microbench.
-- aligned launch: `/dockerx/home/wunhuang/tmp/useful-scripts/benchmarking/dsv4/run_sgl_dsv4_aligned.sh`
+- aligned launch: `/workspace/useful-scripts/benchmarking/dsv4/run_sgl_dsv4_aligned.sh`
 
 ---
 

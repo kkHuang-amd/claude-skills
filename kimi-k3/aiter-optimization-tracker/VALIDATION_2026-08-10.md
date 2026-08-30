@@ -13,7 +13,7 @@
 Artifacts:
 
 ```text
-/dockerx/var/amdsgl/kk/workspace/claude-skills/kimi-k3/
+/workspace/claude-skills/kimi-k3/
   stage2-runs/2026-08-10-pr-stack-validation/
 ```
 

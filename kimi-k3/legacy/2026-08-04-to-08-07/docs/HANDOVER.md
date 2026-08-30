@@ -8,16 +8,16 @@
 
 ## Current state
 
-- The old weights at `/dockerx/data/kmd` were deleted.
+- The old weights at `/shared_nfs/huggingface_models/kmd` were deleted.
 - Latest public weights were downloaded from
-  `moonshotai/Kimi-K3` to `/dockerx/data/models/Kimi-K3`.
+  `moonshotai/Kimi-K3` to `/shared_nfs/huggingface_models/moonshotai/Kimi-K3`.
 - Download verification: about 1.6 TB, `config.json`,
   `model.safetensors.index.json`, and all 96 safetensors shards are present.
 - The benchmark checkout is
   `/sgl-workspace/kvv-bench/kvv-k3-0727-update`.
 - The original ad-hoc launcher is `/sgl-workspace/sglang/run_kmd.sh`.
 - Reusable handover scripts are in
-  `/dockerx/var/amdsgl/kk/workspace/useful-scripts/benchmarking/kimi-k3`.
+  `/workspace/useful-scripts/benchmarking/kimi-k3`.
 - No server or benchmark should be running at handover time. Verify before
   switching Docker images.
 
@@ -77,9 +77,9 @@ configs. Record the exact image name and digest before benchmarking.
 The container needs:
 
 ```text
-/dockerx/data/models/Kimi-K3
+/shared_nfs/huggingface_models/moonshotai/Kimi-K3
 /sgl-workspace/kvv-bench/kvv-k3-0727-update
-/dockerx/var/amdsgl/kk/workspace/useful-scripts/benchmarking/kimi-k3
+/workspace/useful-scripts/benchmarking/kimi-k3
 ```
 
 Recommended Docker runtime flags:
@@ -124,7 +124,7 @@ SGLANG_AITER_K3_OPT=1 \
 AITER_FLYDSL_FORCE=1 \
 AITER_SITUV2_A8W4=1 \
 sglang serve \
-  --model-path /dockerx/data/models/Kimi-K3 \
+  --model-path /shared_nfs/huggingface_models/moonshotai/Kimi-K3 \
   --trust-remote-code \
   --enable-multimodal \
   --tp 8 \
@@ -159,7 +159,7 @@ Then verify:
 curl -sS http://localhost:8000/v1/models
 ```
 
-The expected ID is `/dockerx/data/models/Kimi-K3` when that local path is passed to
+The expected ID is `/shared_nfs/huggingface_models/moonshotai/Kimi-K3` when that local path is passed to
 the launcher.
 
 ## KVV benchmark setup
@@ -187,7 +187,7 @@ Run order: OCRBench, MMMU-Pro, Tool-call, then BEAM.
 ## Baseline results from the deleted pre-release weights
 
 These results are historical references only. Do not report them as results
-from `/dockerx/data/models/Kimi-K3`.
+from `/shared_nfs/huggingface_models/moonshotai/Kimi-K3`.
 
 | Benchmark | Measured | Screenshot reference |
 |---|---:|---:|
@@ -208,7 +208,7 @@ BEAM uses two stages:
 Generation requirements:
 
 - Keep Radix Cache enabled.
-- Use `/dockerx/data/models/Kimi-K3` as `--tokenizer`.
+- Use `/shared_nfs/huggingface_models/moonshotai/Kimi-K3` as `--tokenizer`.
 - Do not use the bundled Kimi-K2.6 tokenizer. It undercounted some K3 prompts
   by about 22K tokens and produced context-length 400 errors.
 - Wait for full server warmup before starting.

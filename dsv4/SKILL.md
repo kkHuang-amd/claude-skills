@@ -26,7 +26,7 @@ Scripts live in `useful-scripts/benchmarking/dsv4/`:
 ```bash
 ATOM_DISABLE_MMAP=true ATOM_MOE_GU_ITLV=1 AITER_BF16_FP8_MOE_BOUND=0 \
 python3 -m atom.entrypoints.openai_server \
-  --model /dockerx/data/deepseek-ai/DeepSeek-V4-Pro/ \
+  --model /shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro/ \
   --server-port 8000 -tp 8 --kv_cache_dtype fp8 \
   --trust-remote-code --enable-dp-attention
 ```

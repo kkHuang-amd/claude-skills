@@ -263,7 +263,7 @@ localization remains partial.
 ## Artifacts
 
 ```text
-/dockerx/var/amdsgl/kk/workspace/kimi-k3-runs/stage2-runs/
+/workspace/kimi-k3-runs/stage2-runs/
   2026-08-13-triton36-vs37-stage-traces/
 ```
 
@@ -283,6 +283,6 @@ below.
 The retained compact prefill+decode traces are under:
 
 ```text
-/dockerx/var/amdsgl/kk/workspace/kimi-k3-runs/stage2-runs/
+/workspace/kimi-k3-runs/stage2-runs/
   2026-08-13-triton36-vs37-compact-global-traces/
 ```

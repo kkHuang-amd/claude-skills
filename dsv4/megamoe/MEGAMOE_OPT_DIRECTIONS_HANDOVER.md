@@ -6,7 +6,7 @@ For the A2A EP umbrella, mori-EP, FlyDSL-EP dynamic recv, correctness, and TBO w
 read:
 
 ```text
-/dockerx/home/wunhuang/tmp/claude-skills/dsv4/A2A_EP_HANDOVER.md
+/workspace/claude-skills/dsv4/A2A_EP_HANDOVER.md
 ```
 
 Taxonomy:

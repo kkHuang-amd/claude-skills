@@ -2,7 +2,7 @@
 
 Read this handover first:
 
-`/dockerx/home/wunhuang/tmp/claude-skills/dsv4/A2A_TBO_GAP_HANDOVER.md`
+`/workspace/claude-skills/dsv4/A2A_TBO_GAP_HANDOVER.md`
 
 Then investigate the remaining DeepSeek-V4-Pro performance gap between DP-TBO and
 FlyDSL-EP-TBO on 8x MI355X.

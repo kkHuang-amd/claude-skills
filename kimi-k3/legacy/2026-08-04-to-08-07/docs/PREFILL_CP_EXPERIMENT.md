@@ -8,7 +8,7 @@
 - Recommendation: use `ENABLE_PREFILL_CP=0`. Enable Radix Cache separately when
   the workload has reusable prefixes.
 - Final artifacts:
-  `/dockerx/home/wunhuang/tmp/benchmark-results/kimi-k3-prefill-cp/20260804T043116Z-cp8-mem093-bs8-chunk8k`.
+  `/workspace/benchmark-results/kimi-k3-prefill-cp/20260804T043116Z-cp8-mem093-bs8-chunk8k`.
 - Exact next step, if investigating CP further: determine why
   `--attn-cp-size 8` increases per-GPU weights from 194.38 GB to 253.20 GB
   before running another performance sweep.
@@ -16,7 +16,7 @@
 ## Environment
 
 - Hardware: 8x AMD Instinct MI355X (`gfx950`)
-- Model: `/dockerx/data/models/Kimi-K3`, 96 shards, approximately 1.6 TB
+- Model: `/shared_nfs/huggingface_models/moonshotai/Kimi-K3`, 96 shards, approximately 1.6 TB
 - SGLang: `0.5.16.dev20260803+ge6311f7559`
 - Source commit: `e6311f7559dfab9ae6bc5ba36a34872ed738cd6f`
 - Workload: random fixed-length ISL 68000 / OSL 350
@@ -76,7 +76,7 @@ insufficient KDA transient headroom.
   ROCm. A standalone SiTU compile/run test passed afterward.
 - Added reusable long-context benchmark, A/B orchestration, and summarization
   scripts under
-  `/dockerx/var/amdsgl/kk/workspace/useful-scripts/benchmarking/kimi-k3`.
+  `/workspace/useful-scripts/benchmarking/kimi-k3`.
 
 The server was stopped after the run. All eight GPUs returned to 0% allocated
 VRAM and no KFD processes remained.

@@ -1,6 +1,6 @@
 # Results — SGLang prefill coalescer vs ATOM
 
-Env: 8xMI355X (gfx950), DeepSeek-V4-Pro (`/dockerx/data/deepseek-ai/DeepSeek-V4-Pro`),
+Env: 8xMI355X (gfx950), DeepSeek-V4-Pro (`/shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro`),
 TP8 + DP-attention (+ TBO), kv fp8, page 256, mem 0.90, max-num-batched-tokens
 16384. Client `random`, `--request-rate inf`. All ON/OFF pairs are same-session,
 same server config, only the coalescer toggled.

@@ -99,7 +99,7 @@ stream wiring unless new evidence contradicts the validated state below.
 ## Environment
 
 - hardware: 8x MI355X gfx950
-- model: `/dockerx/data/deepseek-ai/DeepSeek-V4-Pro`
+- model: `/shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro`
 - serving: TP8/DP8, DP attention, A8W4, FP8 KV
 - workload: fixed 8192 input / 1024 output, concurrency 256
 - harness: 2048 prompts, 512 warmups, `sglang-oai`, request-rate infinity
@@ -432,7 +432,7 @@ SGLANG_FLYDSL_TBO_DISPATCH_BLOCK_NUM=80 \
 SGLANG_FLYDSL_TBO_COMBINE_BLOCK_NUM=32 \
 MODE=flydsl-tbo DELAYER=on PORT=8000 \
 SGLANG_PYTHONPATH=/sgl-workspace/sglang-flydsl-a2a/python \
-bash /dockerx/home/wunhuang/tmp/useful-scripts/benchmarking/dsv4/run_sgl_dsv4_unified.sh
+bash /workspace/useful-scripts/benchmarking/dsv4/run_sgl_dsv4_unified.sh
 ```
 
 ### Recv, split, and priority probes
@@ -1113,14 +1113,14 @@ FlyDSL TBO:
 
 ```bash
 MODE=flydsl-tbo PORT=8000 \
-bash /dockerx/home/wunhuang/tmp/useful-scripts/benchmarking/dsv4/run_sgl_dsv4_unified.sh
+bash /workspace/useful-scripts/benchmarking/dsv4/run_sgl_dsv4_unified.sh
 ```
 
 DP TBO:
 
 ```bash
 MODE=dp-tbo PORT=8000 \
-bash /dockerx/home/wunhuang/tmp/useful-scripts/benchmarking/dsv4/run_sgl_dsv4_unified.sh
+bash /workspace/useful-scripts/benchmarking/dsv4/run_sgl_dsv4_unified.sh
 ```
 
 Serving:
@@ -1128,7 +1128,7 @@ Serving:
 ```bash
 WORKLOADS="8192:1024" CONCS="256" NP_MULT=8 WARM_MULT=2 \
 BACKEND=sglang-oai \
-bash /dockerx/home/wunhuang/tmp/useful-scripts/benchmarking/dsv4/sweep_dsv4_sglang_client.sh
+bash /workspace/useful-scripts/benchmarking/dsv4/sweep_dsv4_sglang_client.sh
 ```
 
 Trace:

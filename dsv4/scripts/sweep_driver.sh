@@ -2,12 +2,12 @@
 # usage: sweep_driver.sh RESULT_DIR "1k_conc_list" "8k_conc_list"
 RD="$1"; CONC1K="$2"; CONC8K="$3"
 mkdir -p "$RD"
-B="python3 /dockerx/home/wunhuang/tmp/useful-scripts/benchmarking/dsv4/bench_dsv4.py"
+B="python3 /workspace/useful-scripts/benchmarking/dsv4/bench_dsv4.py"
 run(){ local isl=$1 osl=$2 c=$3 np=$4 nw=$5
   local name="sglangClient_dsv4_isl${isl}_osl${osl}_c${c}"
   echo "### START $name np=$np conc=$c $(date +%T)"
   if $B --backend sglang-oai --base-url http://127.0.0.1:8000 \
-       --model /dockerx/data/deepseek-ai/DeepSeek-V4-Pro/ \
+       --model /shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro/ \
        --dataset-name random --random-input-len $isl --random-output-len $osl \
        --random-range-ratio 0.8 --num-prompts $np --max-concurrency $c \
        --request-rate inf --warmup-requests $nw \

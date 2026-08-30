@@ -16,7 +16,7 @@ import json
 import torch
 from safetensors import safe_open
 
-MODEL = "/dockerx/data/models/DeepSeek-R1-0528-MXFP4"
+MODEL = "/shared_nfs/huggingface_models/amd/DeepSeek-R1-0528-MXFP4"
 LAYER = 3
 N_EXPERTS = 8
 T = 512  # tokens

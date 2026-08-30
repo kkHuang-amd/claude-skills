@@ -9,7 +9,7 @@ Continue the Kimi-K3 MI355X/gfx950 optimization project from the durable state
 under:
 
 ```text
-/dockerx/var/amdsgl/kk/workspace/claude-skills/kimi-k3
+/workspace/claude-skills/kimi-k3
 ```
 
 Do not restart the investigation from scratch. Treat the documents, canonical
@@ -416,7 +416,7 @@ Open/review the SGLang integration PR.
 Large run artifacts are physically stored at:
 
 ```text
-/dockerx/var/amdsgl/kk/workspace/kimi-k3-runs/stage2-runs
+/workspace/kimi-k3-runs/stage2-runs
 ```
 
 The project-local `stage2-runs` path is a symlink to that directory. Continue

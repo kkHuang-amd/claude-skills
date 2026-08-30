@@ -22,7 +22,7 @@ we found*, for review.
 
 - **Date**: 2026-06-09
 - **Hardware**: 8× AMD Instinct MI355X (gfx950)
-- **Model**: `/dockerx/data/deepseek-ai/DeepSeek-V4-Pro/` (FP8 checkpoint, 64 shards)
+- **Model**: `/shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro/` (FP8 checkpoint, 64 shards)
 - **Bench client**: ATOM `atom.benchmarks.benchmark_serving` (`--backend vllm` → `/v1/completions`)
 - **Common bench params**: `random-range-ratio=0.8`, `--ignore-eos` (exact OSL, verified
   `total_generated == num_prompts*OSL`), `request-rate inf` (closed loop),

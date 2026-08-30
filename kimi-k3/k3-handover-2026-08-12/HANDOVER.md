@@ -70,7 +70,7 @@ Triton: 3.6.0
 Model:
 
 ```text
-/dockerx/data/models/Kimi-K3
+/shared_nfs/huggingface_models/moonshotai/Kimi-K3
 ```
 
 ## Selected production environment
@@ -143,7 +143,7 @@ C4:     1741.98 -> 1743.45 tok/s
 Artifacts:
 
 ```text
-/dockerx/var/amdsgl/kk/workspace/claude-skills/kimi-k3/
+/workspace/claude-skills/kimi-k3/
 stage2-runs/2026-08-12-fresh-integration/
 ```
 
@@ -185,7 +185,7 @@ stage2-runs/2026-08-12-fresh-integration/
 Primary tracker:
 
 ```text
-/dockerx/var/amdsgl/kk/workspace/claude-skills/kimi-k3/
+/workspace/claude-skills/kimi-k3/
 aiter-optimization-tracker/
 ```
 

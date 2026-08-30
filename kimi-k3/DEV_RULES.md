@@ -92,7 +92,7 @@ After editing a canonical canvas:
 Large run artifacts are physically stored at:
 
 ```text
-/dockerx/var/amdsgl/kk/workspace/kimi-k3-runs/stage2-runs
+/workspace/kimi-k3-runs/stage2-runs
 ```
 
 The project-local `stage2-runs` path is a symlink to that directory. Continue

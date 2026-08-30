@@ -57,7 +57,29 @@ cmd_serve() {
             | sed 's/^/export /' > /tmp/agentx_debug_env.sh
         echo "restored $(wc -l < /tmp/agentx_debug_env.sh) SGLANG_* vars from $ref/server.log"
     } >&2
+    # Throughput refs record SGLANG_SIMULATE_ACC_* (launcher pins acceptance to
+    # the golden AL unless EVAL_ONLY=true). Replaying those into an ACCURACY run
+    # pins target verification and the model scores ~0.72 instead of ~0.93 -- this
+    # is what invalidated all four gsm8k arms of 2026-08-29. Accuracy callers set
+    # NO_ACC_PIN=1.
+    if [ "${NO_ACC_PIN:-0}" = "1" ]; then
+        sed -i '/SGLANG_SIMULATE_ACC/d' /tmp/agentx_debug_env.sh
+        echo "NO_ACC_PIN=1: stripped SGLANG_SIMULATE_ACC_* from the replayed env" >&2
+    fi
     set -a; . /tmp/agentx_debug_env.sh; set +a
+
+    # The launcher also exports NON-SGLANG_ vars that never reach server.log's
+    # dump, so replaying only the SGLANG_* block is NOT a faithful replay.
+    # AITER_BF16_FP8_MOE_BOUND is load-bearing: unset it and aiter's default of
+    # 256 sends any MoE call with M < 256 down the bf16-activation path, which
+    # has no a4w4/a8w4 CK kernel -> "Unsupported kernel config for moe heuristic
+    # dispatch" and every rank dies during decode cuda-graph capture at bs=6
+    # (M = 6*4*8 = 192). Cost us ~3 h on 2026-08-29, misattributed to
+    # shared-experts fusion. Values mirror the launcher (lines 58/88/168).
+    export PYTHONNOUSERSITE=1
+    export AITER_BF16_FP8_MOE_BOUND=0
+    grep -q -- "--enable-dp-attention" "$ref/sglang_command.txt" && export GPU_MAX_HW_QUEUES=5
+    echo "restored non-SGLANG launcher env (AITER_BF16_FP8_MOE_BOUND=$AITER_BF16_FP8_MOE_BOUND)" >&2
 
     ( eval "exec $(cat "$ref/sglang_command.txt")" ) > "$log" 2>&1 &
     echo $! > "$PIDFILE"

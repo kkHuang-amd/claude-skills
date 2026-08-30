@@ -226,7 +226,7 @@ GSM8K (5-shot completion greedy):
 ## Working recipe (env + args), on a healthy gfx1250
 `AITER_FORCE_A8W4=1`, `SGLANG_MOE_SHUFFLE_GFX1250=1`, `AITER_GROUPED_FORCE_SPLIT_K1=1`,
 `--kv-cache-dtype auto` (bf16; fp8 KV breaks decode), `--attention-backend triton`,
-cuda-graph ON. Model at `/dockerx/data/models/DeepSeek-R1-0528-MXFP4`. Launch:
+cuda-graph ON. Model at `/shared_nfs/huggingface_models/amd/DeepSeek-R1-0528-MXFP4`. Launch:
 `/sgl-workspace/sglang/run_ds-r1.sh`. Serves, decode coherent, GSM8K ~0.85.
 
 ## 3 code changes THIS environment needed (re-apply after any machine switch)

@@ -158,7 +158,7 @@ Launch the retained TP8 configuration:
 DCP_SIZE=1 ATTENTION_BACKEND=triton MAX_RUNNING_REQUESTS=32 \
 CUDA_GRAPH_MAX_BS_DECODE=32 RADIX_CACHE=0 \
 ENABLE_INT8_MAMBA_CHECKPOINT=1 ENABLE_CACHE_REPORT=1 \
-bash /dockerx/var/amdsgl/kk/workspace/useful-scripts/benchmarking/kimi-k3/launch_server.sh
+bash /workspace/useful-scripts/benchmarking/kimi-k3/launch_server.sh
 ```
 
 Run the standard serving workload:
@@ -166,7 +166,7 @@ Run the standard serving workload:
 ```bash
 python -m sglang.benchmark.serving \
   --backend sglang-oai --base-url http://127.0.0.1:8000 \
-  --dataset-name random --model /dockerx/data/models/Kimi-K3 \
+  --dataset-name random --model /shared_nfs/huggingface_models/moonshotai/Kimi-K3 \
   --tokenizer moonshotai/Kimi-K3 --num-prompts 256 \
   --random-input-len 8192 --random-output-len 1024 \
   --random-range-ratio 1.0 --max-concurrency 32 \

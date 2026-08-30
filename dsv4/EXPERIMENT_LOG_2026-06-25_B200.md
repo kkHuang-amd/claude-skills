@@ -9,7 +9,7 @@ B200; (2) find the best B200 serving config per concurrency, and check whether
 
 - **Date**: 2026-06-25
 - **HW**: 8× **NVIDIA B200**, 183 GB/GPU (vs MI35x 288 GB) — host `dgx-021`.
-- **Model**: `/dockerx/raid/models--deepseek-ai--DeepSeek-V4-Pro` (fp8 ckpt,
+- **Model**: `/shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro` (fp8 ckpt,
   MoE experts are **mxfp4** → `is_fp4_experts=True`, served via
   `--moe-runner-backend flashinfer_mxfp4`). `max_position_embeddings=1048576`.
 - **sglang**: `/sgl-workspace/sglang-upstream` (HEAD `ffb1afd5e`; PR #28216
@@ -23,8 +23,8 @@ B200; (2) find the best B200 serving config per concurrency, and check whether
   `run_sgl_dsv4_b200.sh` (canonical B200 launch + dp toggle, used for gsm8k),
   `gsm8k_b200.sh` (gsm8k via in-tree few_shot_gsm8k, no lm_eval needed),
   reused `sweep_dsv4_sglang_client.sh`.
-- Results under `/dockerx/raid/home/wunhuang/workspace/bench_results_dsv4_70k_b200/`,
-  logs under `/dockerx/raid/home/wunhuang/workspace/dsv4_b200_logs/`.
+- Results under `/workspace/bench_results_dsv4_70k_b200/`,
+  logs under `/workspace/dsv4_b200_logs/`.
 
 > **Headline (best-of, B200, 70k/300):**
 > | conc | mode | total tok/s | TTFT(s) | TPOT(ms) | E2E(s) | retract | vs MI35x |
@@ -61,12 +61,12 @@ All scripts in `useful-scripts/benchmarking/dsv4/`; codebase pinned to
 
 **Server (config A — conc 2 → TP8, table row `8,`):**
 ```bash
-cd /dockerx/raid/home/wunhuang/workspace/useful-scripts/benchmarking/dsv4
+cd /workspace/useful-scripts/benchmarking/dsv4
 MODE=tp8 CHUNK=32768 MEM=0.90 bash run_sgl_dsv4_70k_b200.sh
 ```
 expands to:
 ```bash
-sglang serve --model-path /dockerx/raid/models--deepseek-ai--DeepSeek-V4-Pro \
+sglang serve --model-path /shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro \
   --host 0.0.0.0 --port 8000 --trust-remote-code --tp 8 \
   --disable-radix-cache --max-running-requests 64 --mem-fraction-static 0.90 \
   --swa-full-tokens-ratio 0.1 --moe-runner-backend flashinfer_mxfp4 \
@@ -76,12 +76,12 @@ sglang serve --model-path /dockerx/raid/models--deepseek-ai--DeepSeek-V4-Pro \
 
 **Server (config B — conc 4/8/16/32 → TP8+DP-attention, table rows `8,8`):**
 ```bash
-cd /dockerx/raid/home/wunhuang/workspace/useful-scripts/benchmarking/dsv4
+cd /workspace/useful-scripts/benchmarking/dsv4
 MODE=tp8dp8 CHUNK=16384 SWA=0.1 MEM=0.80 DELAYER=off bash run_sgl_dsv4_70k_b200.sh
 ```
 expands to (note `--chunked-prefill-size 131072` = 16384×8; dp divides by dp_size):
 ```bash
-sglang serve --model-path /dockerx/raid/models--deepseek-ai--DeepSeek-V4-Pro \
+sglang serve --model-path /shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro \
   --host 0.0.0.0 --port 8000 --trust-remote-code --tp 8 --dp 8 --enable-dp-attention \
   --disable-radix-cache --max-running-requests 64 --mem-fraction-static 0.80 \
   --swa-full-tokens-ratio 0.1 --moe-runner-backend flashinfer_mxfp4 \
@@ -105,25 +105,25 @@ export SGLANG_DP_USE_GATHERV=1          # dp only
 **Client (run after the server is ready):** num-prompts=conc×4, warmups=conc×1,
 fixed lengths (ratio 1.0), ignore-eos (default).
 ```bash
-cd /dockerx/raid/home/wunhuang/workspace/useful-scripts/benchmarking/dsv4
+cd /workspace/useful-scripts/benchmarking/dsv4
 # against config A (conc 2):
 PYTHONPATH=/sgl-workspace/sglang-upstream/python BENCH="python3 -m sglang.bench_serving" \
-MODEL=/dockerx/raid/models--deepseek-ai--DeepSeek-V4-Pro \
-RESULT_DIR=/dockerx/raid/home/wunhuang/workspace/bench_results_dsv4_70k_b200 \
+MODEL=/shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro \
+RESULT_DIR=/workspace/bench_results_dsv4_70k_b200 \
 WORKLOADS="70000:300" CONCS="2" NP_MULT=4 WARM_MULT=1 RATIO=1.0 \
 bash sweep_dsv4_sglang_client.sh
 
 # against config B (conc 4 8 16 32):
 PYTHONPATH=/sgl-workspace/sglang-upstream/python BENCH="python3 -m sglang.bench_serving" \
-MODEL=/dockerx/raid/models--deepseek-ai--DeepSeek-V4-Pro \
-RESULT_DIR=/dockerx/raid/home/wunhuang/workspace/bench_results_dsv4_70k_b200/dp8 \
+MODEL=/shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro \
+RESULT_DIR=/workspace/bench_results_dsv4_70k_b200/dp8 \
 WORKLOADS="70000:300" CONCS="4 8 16 32" NP_MULT=4 WARM_MULT=1 RATIO=1.0 \
 bash sweep_dsv4_sglang_client.sh
 ```
 Each point expands to (conc 8 example):
 ```bash
 python3 -m sglang.bench_serving --backend sglang-oai --base-url http://127.0.0.1:8000 \
-  --model /dockerx/raid/models--deepseek-ai--DeepSeek-V4-Pro \
+  --model /shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro \
   --dataset-name random --random-input-len 70000 --random-output-len 300 \
   --random-range-ratio 1.0 --num-prompts 32 --max-concurrency 8 \
   --request-rate inf --warmup-requests 8 \
@@ -277,8 +277,8 @@ launcher `b200/run_sgl_dsv4_pro_b200.sh MODE=dp8` (see
 - **sglang**: the `/sgl-workspace/sglang-upstream` PYTHONPATH pin is **gone**; the
   default installed tree `/sgl-workspace/sglang` is now `f63458b` (2026-07-09),
   **0.5.15**, and already carries the DP work — so **no PYTHONPATH pin needed**.
-- **Model path**: now `/dockerx/raid/models/deepseek-ai/DeepSeek-V4-Pro` (the old
-  flat `/dockerx/raid/models--deepseek-ai--DeepSeek-V4-Pro` path is gone).
+- **Model path**: now `/shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro` (the old
+  flat `/shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro` path is gone).
 - Same client methodology (sglang-oai, ratio 1.0, inf rate, np=conc×4, warm=conc×1).
 - All configs: **0 retract, 0 OOM, all requests successful.**
 
@@ -345,7 +345,7 @@ plain TP8; `8,8,8` = TP8+DP-attn+DeepEP(EP=8). `Interactivity = 1000 / Median IT
 
 ## Per-concurrency fastest-throughput recipe (current image)
 
-`MODEL=/dockerx/raid/models/deepseek-ai/DeepSeek-V4-Pro`. Scripts in
+`MODEL=/shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro`. Scripts in
 `useful-scripts/benchmarking/dsv4/` (`b200/` for the deepep launcher).
 
 | conc | winner | server command |
@@ -360,7 +360,7 @@ launcher defaults to 20, which hurts measured TTT and makes ITL per-burst.)
 
 ## Fully-expanded commands (verbatim from the run; no wrapper scripts)
 
-`export MODEL=/dockerx/raid/models/deepseek-ai/DeepSeek-V4-Pro` for all.
+`export MODEL=/shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro` for all.
 
 ### conc 2 → tp8 (16,420 tok/s)
 env:
@@ -467,7 +467,7 @@ sglang serve --model-path $MODEL --host 0.0.0.0 --port 8000 --trust-remote-code 
 (client same as conc 4 above.)
 
 ## Artifacts (rerun)
-- Full writeup + raw data: `/dockerx/raid/home/wunhuang/workspace/dsv4_70k_rerun_2026-07-13/`
+- Full writeup + raw data: `/workspace/dsv4_70k_rerun_2026-07-13/`
   (`RESULTS_70k300_b200_rerun.md`, `server_config{A,B}.log`, `server_deepep.log`
   (si=20), `server_deepep_si1.log` (si=1), `client_{tp8,dp8,deepep,deepep_si1}.log`,
   `bench_results/{tp8,dp8,deepep,deepep_si1}/*.jsonl`, `extract.py`).

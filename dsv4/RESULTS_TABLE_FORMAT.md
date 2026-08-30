@@ -30,7 +30,7 @@ Notes:
 ## How to generate
 
 ```bash
-python3 /dockerx/home/wunhuang/tmp/useful-scripts/benchmarking/dsv4/summarize_sgl_dsv4.py \
+python3 /workspace/useful-scripts/benchmarking/dsv4/summarize_sgl_dsv4.py \
   tp8=<result_dir_tp8> tp8dp8=<result_dir_tp8dp8>
 ```
 The summarizer already emits all columns above (including `interact`); just

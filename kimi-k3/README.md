@@ -33,7 +33,7 @@ top-level handover file.
 Large run artifacts are physically stored under:
 
 ```text
-/dockerx/var/amdsgl/kk/workspace/kimi-k3-runs/stage2-runs
+/workspace/kimi-k3-runs/stage2-runs
 ```
 
 The local `stage2-runs` symlink preserves canonical document and script paths.

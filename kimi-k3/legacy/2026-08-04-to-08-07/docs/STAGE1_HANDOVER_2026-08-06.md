@@ -34,14 +34,14 @@ is expected to contain the prerequisite DCP code. The retained Stage 1 commit
 has therefore been exported as:
 
 ```text
-/dockerx/var/amdsgl/kk/workspace/claude-skills/kimi-k3/e9d8cb9472-remove-repeated-moe-copies.patch
+/workspace/claude-skills/kimi-k3/e9d8cb9472-remove-repeated-moe-copies.patch
 SHA-256: c8aaf2c536b2901e3a8bf5ca52b79a8b5d7ef21ea181d6fef544bcdb489f10ae
 ```
 
 Apply it from the new image's SGLang checkout with:
 
 ```bash
-git am /dockerx/var/amdsgl/kk/workspace/claude-skills/kimi-k3/e9d8cb9472-remove-repeated-moe-copies.patch
+git am /workspace/claude-skills/kimi-k3/e9d8cb9472-remove-repeated-moe-copies.patch
 ```
 
 If the new image already contains equivalent changes, inspect the patch and
@@ -53,10 +53,10 @@ For Stage 1 code testing, preserve/mount at least:
 
 ```text
 /sgl-workspace/sglang
-/dockerx/data/models/Kimi-K3
-/dockerx/data/models/Kimi-K3-DSpark
-/dockerx/var/amdsgl/kk/workspace/useful-scripts/benchmarking/kimi-k3
-/dockerx/var/amdsgl/kk/workspace/claude-skills/kimi-k3
+/shared_nfs/huggingface_models/moonshotai/Kimi-K3
+/shared_nfs/huggingface_models/moonshotai/Kimi-K3-DSpark
+/workspace/useful-scripts/benchmarking/kimi-k3
+/workspace/claude-skills/kimi-k3
 ```
 
 After selecting the new checkout, make sure it wins Python package resolution.
@@ -208,13 +208,13 @@ Use the persistent reports below for exact conditions and metrics.
 All of these survive Docker replacement:
 
 ```text
-/dockerx/var/amdsgl/kk/workspace/claude-skills/kimi-k3/AIPERF_SUMMARY.md
-/dockerx/var/amdsgl/kk/workspace/claude-skills/kimi-k3/TP8_ROCM_TRACE_ANALYSIS.md
-/dockerx/var/amdsgl/kk/workspace/claude-skills/kimi-k3/TP8_ROCM_structured_analysis.txt
-/dockerx/var/amdsgl/kk/workspace/claude-skills/kimi-k3/TP8_ROCM_trace_summary.json
-/dockerx/var/amdsgl/kk/workspace/claude-skills/kimi-k3/context-accuracy-comparison.json
-/dockerx/var/amdsgl/kk/workspace/claude-skills/kimi-k3/kimi-k3-dcp-aiperf.canvas.tsx
-/dockerx/var/amdsgl/kk/workspace/claude-skills/kimi-k3/kimi-k3-tp8-rocm-trace.canvas.tsx
+/workspace/claude-skills/kimi-k3/AIPERF_SUMMARY.md
+/workspace/claude-skills/kimi-k3/TP8_ROCM_TRACE_ANALYSIS.md
+/workspace/claude-skills/kimi-k3/TP8_ROCM_structured_analysis.txt
+/workspace/claude-skills/kimi-k3/TP8_ROCM_trace_summary.json
+/workspace/claude-skills/kimi-k3/context-accuracy-comparison.json
+/workspace/claude-skills/kimi-k3/kimi-k3-dcp-aiperf.canvas.tsx
+/workspace/claude-skills/kimi-k3/kimi-k3-tp8-rocm-trace.canvas.tsx
 ```
 
 The raw AIPerf artifacts and ROCm traces remain under `/sgl-workspace` and may
@@ -225,7 +225,7 @@ not survive a container replacement unless that workspace is preserved.
 Directory:
 
 ```text
-/dockerx/var/amdsgl/kk/workspace/useful-scripts/benchmarking/kimi-k3
+/workspace/useful-scripts/benchmarking/kimi-k3
 ```
 
 Most relevant scripts:
@@ -263,7 +263,7 @@ The script README documents the common sequence and environment overrides.
 6. Launch TP8 non-DCP Triton:
 
    ```bash
-   cd /dockerx/var/amdsgl/kk/workspace/useful-scripts/benchmarking/kimi-k3
+   cd /workspace/useful-scripts/benchmarking/kimi-k3
    DCP_SIZE=1 ATTENTION_BACKEND=triton \
    MAX_RUNNING_REQUESTS=32 CUDA_GRAPH_MAX_BS_DECODE=32 \
    RADIX_CACHE=0 ENABLE_INT8_MAMBA_CHECKPOINT=1 \

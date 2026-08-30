@@ -23,10 +23,10 @@ DeepSeek-V4-Pro A8W4、EP8/DP8、8k/1k concurrency 256 serving workload
 ## 先讀文件
 
 ```text
-/dockerx/home/wunhuang/tmp/claude-skills/dsv4/FLYDSL_A2A_FINAL_REPORT_2026-07-30.md
-/dockerx/home/wunhuang/tmp/claude-skills/dsv4/A2A_EP_HANDOVER.md
-/dockerx/home/wunhuang/tmp/claude-skills/dsv4/A2A_TBO_GAP_HANDOVER.md
-/dockerx/home/wunhuang/tmp/claude-skills/dsv4/FLYDSL_KERNEL_OPT_PLAYBOOK.md
+/workspace/claude-skills/dsv4/FLYDSL_A2A_FINAL_REPORT_2026-07-30.md
+/workspace/claude-skills/dsv4/A2A_EP_HANDOVER.md
+/workspace/claude-skills/dsv4/A2A_TBO_GAP_HANDOVER.md
+/workspace/claude-skills/dsv4/FLYDSL_KERNEL_OPT_PLAYBOOK.md
 ```
 
 ## 重要設計差異

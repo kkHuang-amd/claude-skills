@@ -5,7 +5,7 @@ promote a 1-3 line summary into the shared `EXPERIMENT_LOG.md` / `STATUS.md`. Th
 concurrent multi-node pushes from clobbering the shared files.
 
 Env: sglang `000a61a2`, aiter `8815f4b5` (bisect fix REVERTED, E38), model
-`/dockerx/models/DeepSeek-R1-0528-MXFP4`. Launch scripts: `run_ds-r1.sh` (serve),
+`/shared_nfs/huggingface_models/amd/DeepSeek-R1-0528-MXFP4`. Launch scripts: `run_ds-r1.sh` (serve),
 `run_ds-r1_dump.sh` / `run_ds-r1_emuldump.sh` (per-layer dump), `run_ds-r1_nonmoeprobe.sh`
 (non-MoE probe).
 

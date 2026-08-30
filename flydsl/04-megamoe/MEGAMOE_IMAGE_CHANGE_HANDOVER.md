@@ -26,11 +26,11 @@ this workaround is unnecessary and perf returns to the faster triton-blockscale 
 See `../../sglang-prefill-coalescer/HANDOVER_blockscale_triton_compile.md` for the root cause.
 
 ## MUST re-apply after image change (uncommitted working-tree changes)
-Patches saved in `megamoe_image_change_patches/` (this dir; on /dockerx = persists across images):
+Patches saved in `megamoe_image_change_patches/` (this dir; on /workspace = persists across images):
 1. **sglang** `sglang_megamoe.patch` — environ.py knobs, mega_moe.py 3 dispatch hooks, fp8.py
    megamoe build hook, cohere2_moe.py `@strict` no-op, utils.cuh HIP `getSMVersion`.
    ```bash
-   cd <sglang-repo> && git apply /dockerx/var/amdsgl/kk/workspace/claude-skills/dsv4/megamoe/megamoe_image_change_patches/sglang_megamoe.patch
+   cd <sglang-repo> && git apply /workspace/claude-skills/dsv4/megamoe/megamoe_image_change_patches/sglang_megamoe.patch
    cp .../megamoe_image_change_patches/mega_moe_flydsl.py python/sglang/srt/layers/moe/mega_moe_flydsl.py
    ```
    (mega_moe_flydsl.py is a NEW file — copy it, not in the patch.)
@@ -53,16 +53,16 @@ the patches are small and self-explanatory).
   try/except); (c) the stage1/2 fold removed `mega.stage1.w1`, weights now live on the
   instance as `mega._s1_w1` / `_s1_w1_scale` — `_swap_layer_weights` uses `hasattr(_s1_w1)`
   (the synced `mega_moe_flydsl.py` in this patches dir already has this fix).
-- mori (STATIC_HEAP shmem), aiter, the V4-Pro checkpoint at `/dockerx/data/deepseek-ai/DeepSeek-V4-Pro`.
+- mori (STATIC_HEAP shmem), aiter, the V4-Pro checkpoint at `/shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro`.
 
 ## How to launch + verify (new image)
 ```bash
-cd /dockerx/home/wunhuang/tmp/useful-scripts/benchmarking/dsv4/
+cd /workspace/useful-scripts/benchmarking/dsv4/
 # unified script already has a `megamoe` MODE (added). MEM=0.65 (40G mori shmem heap).
 # Add AITER_DISABLE_BLOCKSCALE_TRITON=1 ONLY if the new image still can't compile the triton kernel.
 SGLANG_AMD_FLYDSL_MEGA_MOE_MTPR=8192 MEM=0.65 MODE=megamoe PORT=8000 bash run_sgl_dsv4_unified.sh
 # verify:
-lm_eval --model local-completions --model_args model=/dockerx/data/deepseek-ai/DeepSeek-V4-Pro,base_url=http://localhost:8000/v1/completions,num_concurrent=128,max_retries=3,tokenized_requests=False --tasks gsm8k --num_fewshot 5   # expect ~0.94
+lm_eval --model local-completions --model_args model=/shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro,base_url=http://localhost:8000/v1/completions,num_concurrent=128,max_retries=3,tokenized_requests=False --tasks gsm8k --num_fewshot 5   # expect ~0.94
 # A/B (dp vs mori-ep vs megamoe): /workspace/ab_megamoe_driver.sh  (conc256 NP8/WARM2)
 ```
 Gotchas (all already handled in the patched code, listed so you can sanity-check):

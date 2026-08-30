@@ -41,7 +41,7 @@ Environment at time of writing:
 Confirm arch + that the model is W4A4:
 ```bash
 python3 -c "import torch; print(torch.cuda.get_device_properties(0).gcnArchName)"  # gfx1250
-python3 -c "import json;c=json.load(open('/dockerx/models/amd/DeepSeek-R1-0528-MXFP4/config.json'));print(c['quantization_config']['global_quant_config'])"
+python3 -c "import json;c=json.load(open('/shared_nfs/huggingface_models/amd/DeepSeek-R1-0528-MXFP4/config.json'));print(c['quantization_config']['global_quant_config'])"
 # weight dtype=fp4 (static, per_group/32/e8m0), input_tensors dtype=fp4 (dynamic, per_group/32/e8m0) => W4A4
 ```
 
@@ -383,7 +383,7 @@ The full working recipe (env + args): `AITER_FORCE_A8W4=1`,
 cuda-graph ON, on a healthy GPU. See CHANGES.md for the exact code diffs.
 
 **UPDATE 2026-07-08 (EXPERIMENT_LOG E17-E20): the accuracy-gap root-cause below is
-OVERTURNED.** On a newer docker (model at `/dockerx/data/models/DeepSeek-R1-0528-MXFP4`,
+OVERTURNED.** On a newer docker (model at `/shared_nfs/huggingface_models/amd/DeepSeek-R1-0528-MXFP4`,
 sglang `000a61a2`, aiter `8815f4b5`) the a8w4 MoE was **decisively exonerated**:
 - a real FlyDSL contiguous-M bisect off-by-one bug was found+fixed (power-of-two
   expert count; R1=256 experts) — op-test contiguous 3.2e-3 -> 3.4e-6 — but it is

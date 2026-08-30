@@ -14,7 +14,7 @@ only both -> 0.925; each alone -> 0.825). See `EXPERIMENT_LOG.md`.
 ## 2026-07-10 — [node: H21-18 gfx1250] fp8 KV cache FIXED (overturns SKILL §4.7 / E13)
 
 New docker image `henryx/xsgl:v0.5.14-gfx1250-rocm-nightlies-20260709-trial-3`
-(sglang `3923a34d`, aiter `9af05b91`). Model `/dockerx/data/models/amd/DeepSeek-R1-0528-MXFP4`
+(sglang `3923a34d`, aiter `9af05b91`). Model `/shared_nfs/huggingface_models/amd/DeepSeek-R1-0528-MXFP4`
 (W4A4 confirmed). Production fixes (FIX A fp32 P·V, gfx1250 weight shuffle,
 AITER_GROUPED_FORCE_SPLIT_K1) are already baked into this image.
 

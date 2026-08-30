@@ -6,6 +6,12 @@ Single entry point for resuming this project. Read this file plus
 Source of record: `HANDOFF_2026-08-21.md` (state), `SUMMARY.md` (detail).
 State last updated 2026-08-21. Paths re-verified 2026-08-24 — see §0.
 
+> **2026-08-25 — read `HANDOFF_2026-08-25_REBASE.md` first if you are
+> touching sglang.** `perf/k3_opts_0812` was rebased onto upstream main
+> `67853c58` (23 commits -> 18; PR #35499 now included). Untested, unpushed.
+> It also supersedes §0 below: `/workspace` now exists and both K3
+> worktrees are present.
+
 ---
 
 ## 0. Environment preflight — RUN THIS FIRST

@@ -1,0 +1,10 @@
+=== 09:28:37 isl1024-osl1024-c2-tp4 (np=16 warmup=4) ===
+  server up (pid 1916348), running client
+  -> 143.1438953787277 out tok/s | 358.78111950296443 ms ttft
+  leftover pids: 1931305
+1931306
+1931307
+1931308
+1931309 -> KILL
+  torn down
+=== sweep complete: /workspace/results/dsv4-fixed_seq_len/runs/summary.csv ===

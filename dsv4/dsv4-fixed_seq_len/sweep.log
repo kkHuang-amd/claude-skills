@@ -1,0 +1,80 @@
+=== smoke finished, starting full sweep 09:32:23 ===
+=== 09:32:23 isl1024-osl1024-c2-tp4 (np=16 warmup=4) ===
+  SERVER FAILED (rc=1) -- see /workspace/results/dsv4-fixed_seq_len/runs/isl1024-osl1024-c2-tp4/server.log
+=== 09:32:58 isl1024-osl1024-c4-tp4 (np=32 warmup=8) ===
+  server up (pid 1934127), running client
+  -> 261.6376995543149 out tok/s | 456.43580924297567 ms ttft
+  torn down
+=== 09:37:27 isl1024-osl1024-c8-tp4 (np=64 warmup=16) ===
+  server up (pid 1959563), running client
+  -> 450.7601461646428 out tok/s | 761.4129091271025 ms ttft
+  torn down
+=== 09:42:17 isl1024-osl1024-c16-tp4 (np=128 warmup=32) ===
+  server up (pid 1978521), running client
+  -> 739.1019347600038 out tok/s | 1268.7514154158634 ms ttft
+  torn down
+=== 09:47:34 isl1024-osl1024-c32-tp4 (np=256 warmup=64) ===
+  server up (pid 1999987), running client
+  -> 1112.9552209214623 out tok/s | 2343.1738656445305 ms ttft
+  torn down
+=== 09:54:06 isl1024-osl1024-c64-tp4-dp4 (np=512 warmup=128) ===
+  server up (pid 2033531), running client
+  -> 1600.3805404071954 out tok/s | 1947.4250390119323 ms ttft
+  torn down
+=== 10:02:21 isl1024-osl1024-c128-tp4-dp4 (np=1024 warmup=256) ===
+  server up (pid 2072780), running client
+  -> 2662.2764162739954 out tok/s | 4289.602248482083 ms ttft
+  torn down
+=== 10:11:51 isl1024-osl1024-c256-tp8-dp8 (np=2048 warmup=512) ===
+  server up (pid 2112221), running client
+  -> 5989.981604191651 out tok/s | 4452.00058978935 ms ttft
+  torn down
+=== 10:20:36 isl1024-osl1024-c512-tp8-dp8 (np=4096 warmup=1024) ===
+  server up (pid 2155180), running client
+  -> 8504.333854252556 out tok/s | 8709.824696100553 ms ttft
+  torn down
+=== 10:32:09 isl1024-osl1024-c1024-tp8-dp8 (np=8192 warmup=2048) ===
+  server up (pid 2213615), running client
+  -> 11348.88060681073 out tok/s | 17318.076473827263 ms ttft
+  torn down
+=== 10:48:44 isl8192-osl1024-c2-tp4 (np=16 warmup=4) ===
+  server up (pid 2285409), running client
+  -> 135.75778669605847 out tok/s | 775.449496381043 ms ttft
+  torn down
+=== 10:53:07 isl8192-osl1024-c4-tp4 (np=32 warmup=8) ===
+  server up (pid 2310143), running client
+  -> 240.58054923100053 out tok/s | 1203.6511864243948 ms ttft
+  torn down
+=== 10:57:47 isl8192-osl1024-c8-tp4 (np=64 warmup=16) ===
+  server up (pid 2327987), running client
+  -> 401.17342416078685 out tok/s | 2084.2551112073124 ms ttft
+  torn down
+=== 11:03:02 isl8192-osl1024-c16-tp4 (np=128 warmup=32) ===
+  server up (pid 2361721), running client
+  -> 615.9964301207349 out tok/s | 3803.2723233764045 ms ttft
+  torn down
+=== 11:09:07 isl8192-osl1024-c32-tp4 (np=256 warmup=64) ===
+  server up (pid 2386091), running client
+  -> 849.7432877503743 out tok/s | 7379.0829459735505 ms ttft
+  torn down
+=== 11:17:03 isl8192-osl1024-c64-tp4-dp4 (np=512 warmup=128) ===
+  server up (pid 2423528), running client
+  -> 1289.7215327502988 out tok/s | 5505.047301841159 ms ttft
+  torn down
+=== 11:27:00 isl8192-osl1024-c128-tp4-dp4 (np=1024 warmup=256) ===
+  server up (pid 2472097), running client
+  -> 1872.4267661332217 out tok/s | 11983.994582249466 ms ttft
+  torn down
+=== 11:40:04 isl8192-osl1024-c256-tp8-dp8 (np=2048 warmup=512) ===
+  server up (pid 2530434), running client
+  -> 3916.388186617104 out tok/s | 12361.661444449397 ms ttft
+  torn down
+=== 11:52:43 isl8192-osl1024-c512-tp8-dp8 (np=4096 warmup=1024) ===
+  server up (pid 2587401), running client
+  -> 4886.0089818465 out tok/s | 28027.358862142744 ms ttft
+  torn down
+=== 12:12:00 isl8192-osl1024-c1024-tp8-dp8 (np=8192 warmup=2048) ===
+  server up (pid 2672370), running client
+  -> 5693.1746663485055 out tok/s | 58960.41833364572 ms ttft
+  torn down
+=== sweep complete: /workspace/results/dsv4-fixed_seq_len/runs/summary.csv ===

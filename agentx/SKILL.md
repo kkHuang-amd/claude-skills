@@ -21,6 +21,18 @@ The launcher scripts under `benchmarks/single_node/agentic/` are labelled
 **MVP / experimental** by the repo itself — they are a reference implementation
 of the plumbing, not a published benchmark.
 
+**Platform scope: this file is the MI355X / ROCm node.** Per-platform notes are
+isolated in subdirectories — for NVIDIA B200 read `b200/CONTINUE_HERE.md` first
+(different launcher, different checkpoint, different repo root); the pipeline
+mechanics below still apply, the measured numbers and ROCm workarounds do not.
+
+**For ITL / throughput attribution on either platform, read
+`analysis/METHOD.md`** — the ITL decomposition, the `step_time(batch)` curve
+method, and the `prefill_decode_interval` confound (MI355X 10 vs B200 24) that
+inflated the cross-platform ITL gap by ~38 %. Tools there
+(`decode_stats.py`, `show_result.py`) are platform-neutral and take a
+`server.log` / agg json from either node.
+
 ## CONTINUE HERE
 
 **Status (2026-08-30, 09:00 UTC): NEW MAIN IS +7.52 % AT c64 -- suggestive, n=1,

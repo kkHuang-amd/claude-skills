@@ -5,42 +5,57 @@ this git repo; see `agentx/exchange/README.md`.
 
 ## CONTINUE HERE
 
-**Status (2026-09-16 11:4x UTC+8):** MI355X's side of the c128 cross-platform
-ITL comparison is captured, analysed, corrected once, and pushed. Node is clean
-(0 sglang processes, 0 ports bound; VRAM was still draining at handoff — see
-"plateau-then-cliff" below). Nothing is running.
+**Status (2026-09-16 14:5x UTC+8):** Merged B200's 6 new commits (`3bcc032`) and
+answered all three of their open asks from the existing traces — no GPU needed,
+nothing is running. The cross-platform gap now has **two named targets**:
 
-**Latest commits:** `2c7b0c9` (correction, current truth) supersedes `564a590`.
+1. **`_paged_decode_split_kernel` (MLA decode) is 4.06x B200's
+   `flash_fwd_splitkv_mla_fp8`** — 9.974 vs 2.454 ms/step at 61 calls each
+   (163.5 vs 40.2 µs/call). That is 93 % of the whole `attn` gap.
+2. **`megamoe_prepare_compact` 16.24 ms/step has no B200 counterpart** — B200's
+   nearest-named kernel is 0.242 ms. Holds 66 % of the `moe` gap.
 
-**Next, in priority order:**
+Everything else matches within 0.78-1.94x. Also established: MI355X's `compute`
+is **not** pace-pinned (only `moe` absorbs wait, where B200 has both `moe` and
+`gemm` doing it), `comm` 6.17 **is** a real collective (`ep_combine_intranode_0`),
+and `record_shapes` **cannot** give B200's proposed bandwidth estimator here
+(all 34,486 dim-carrying events are `aten::*` cpu_ops; zero attn/MoE ops).
 
-1. **Fix `trace_ranks.py` the same way `trace_summary.py` was fixed.** It still
-   groups `TARGET_VERIFY` without splitting the DSPARK draft step from the
-   full-model step, so every cross-rank table it has ever printed mixes a 4 ms
-   step with a 74 ms one. `trace_common.verify_classes(steps, owned)` already
-   exists and returns `{step_index: "" | " draft" | " full"}`; wire it into the
-   grouping key exactly as `trace_summary.py:52` does.
-2. **Barrier-free comparison — doable here, no B200 needed.** Filter verify
-   steps to those with no concurrent `EXTEND` anywhere in the 8-rank group and
-   report that step wall. Today's 74.0 ms includes waiting for prefilling ranks
-   (barrier is 41-60 % of it), so it is an upper bound on decode cost. This is
-   the single most valuable local analysis left.
-3. **Blocked on B200:** they must re-derive their numbers at steady state *and*
-   with the class split before any ratio is quoted. Their 15.9 ms is retracted
-   as mid-ramp and is very likely class-mixed too.
+**Uncommitted:** `analysis/trace_ranks.py` (draft/full split + EXTEND-overlap
+table), new `analysis/kernel_dump.py`, `exchange/FINDINGS.md`,
+`exchange/mi355x-decode-trace.md` §10-12, this file. **Push so B200 sees it.**
 
-**Pass criteria for (2):** a step-wall number for full-model verify steps that
-are provably not waiting on a prefill, on at least 3 ranks, with the rank spread
-reported. If it lands near 74 ms the barrier is not prefill-driven; if it drops
-a lot, the cross-platform gap shrinks accordingly.
+**Latest commits on origin:** `3bcc032` (B200). Mine are not pushed yet.
+
+**Next:**
+
+1. **Commit and push.** This node has no other channel to B200.
+2. **Own the MLA decode kernel.** It is the single narrowest target on either
+   node: 163.5 µs/call against B200's 40.2, same call count, same layer count.
+   Start at aiter's `_paged_decode_split_kernel` / `_paged_decode_reduce_kernel`
+   and the KV layout they read. This does not need B200.
+3. **`megamoe_prepare_compact`** — decide whether 16.24 ms is real prepare work
+   or the fused all-to-all wait. A TP-only run separates them.
+4. **TP-only / single-DP-rank capture** is now the cheapest uncontaminated
+   compute number for either node, since `record_shapes` is a dead end here.
+5. **Not blocking any more:** B200 has published steady-state class-split
+   numbers, so the comparison is live. The `compute` *ratio* stays withdrawn —
+   B200's side is pace-pinned, mine is not, and one usable side is not a
+   comparison. Quote step wall (30.0 vs 74.0, 2.47x) or the kernel pairs above.
 
 **Repro — re-run the analysis on the existing traces (no GPU needed):**
 ```bash
 cd /workspace/claude-skills/agentx
 python3 analysis/trace_summary.py /shared_nfs/kk/pr35619/trace_c128_pdi24_steady/*TP-7-*.gz
 python3 analysis/trace_ranks.py   /shared_nfs/kk/pr35619/trace_c128_pdi24_steady
+python3 analysis/kernel_dump.py   /shared_nfs/kk/pr35619/trace_c128_pdi24_steady
 python3 analysis/decode_stats.py  /workspace/results/megamoe-eplb-c128-b200aligned/server.log
 ```
+
+**Earlier result, still standing:** full-model `TARGET_VERIFY` with no
+time-overlap against any of the 8 `EXTEND` annotations — 5 ranks, 16-17 steps
+each, p50 73.9-74.1 ms (max/min 1.002x), `n_hit=0`. The 74 ms is not waiting on
+a prefill. Ranks 2/4/5 have no verify in this window and 0 kernels during it.
 
 ## Where things are
 

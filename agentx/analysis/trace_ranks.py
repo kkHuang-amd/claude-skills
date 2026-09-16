@@ -21,22 +21,31 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from trace_common import attribute, classify, load, rank_of  # noqa: E402
+from trace_common import (attribute, classify, load, rank_of,  # noqa: E402
+                          verify_classes)
 
 COMPUTE = ("attn", "gemm", "quant", "norm_rope", "sample")
 BARRIER = ("moe", "comm")
 
 
+def _overlap(lo, hi, lo2, hi2):
+    return lo < hi2 and lo2 < hi
+
+
 def rows_for(path):
     steps, kernels = load(path)
     owned = attribute(steps, kernels)
+    # Split DSPARK draft vs full-model verify; they share a bs and must not
+    # share a row (see verify_classes). Same grouping as trace_summary.py.
+    vclass = verify_classes(steps, owned)
     per_type = collections.defaultdict(lambda: collections.defaultdict(list))
     for i, s in enumerate(steps):
         roles = collections.defaultdict(float)
         for dur, name in owned.get(i, []):
             roles[classify(name)] += dur
-        # Keyed by (type, bs): different bs = different work, not comparable.
-        key = f"{s['type']} bs={s['bs']}" if s["bs"] is not None else s["type"]
+        name = s["type"] + vclass.get(i, "")
+        # Keyed by (type[+class], bs): different bs = different work.
+        key = f"{name} bs={s['bs']}" if s["bs"] is not None else name
         rec = per_type[key]
         rec["step_ms"].append(s["ms"])
         rec["toks"].append(s["toks"] or 0)
@@ -44,7 +53,11 @@ def rows_for(path):
         rec["barrier"].append(sum(roles[r] for r in BARRIER) / 1000.0)
         rec["attn"].append(roles["attn"] / 1000.0)
         rec["gemm"].append(roles["gemm"] / 1000.0)
-    return per_type
+        rec["_lo"].append(s["lo"])
+        rec["_hi"].append(s["hi"])
+        rec["_type"].append(s["type"])
+        rec["_class"].append(vclass.get(i, ""))
+    return per_type, steps
 
 
 def report(d):
@@ -54,8 +67,11 @@ def report(d):
         return
     print(f"\n=== {d}  ({len(files)} ranks)")
     table = {}
+    all_steps = {}
     for f in files:
-        table[rank_of(f)] = rows_for(f)
+        rows, steps = rows_for(f)
+        table[rank_of(f)] = rows
+        all_steps[rank_of(f)] = steps
 
     stypes = sorted({t for r in table.values() for t in r},
                     key=lambda t: -sum(len(r[t]["step_ms"]) for r in table.values() if t in r))
@@ -104,6 +120,47 @@ def report(d):
                   f"   barrier {min(barr):.1f}-{max(barr):.1f} ms, {trend}")
             print(f"     straggler: rank {lead[0]} with {lead[5]:.2f} ms compute/step"
                   f" at {lead[2]:.0f} tokens -- it sets the step for every rank")
+
+    # Full-model verify wall with no concurrent EXTEND anywhere in the group.
+    # Overlap is by GPU-annotation timestamps (this capture's clocks align).
+    extends = [(r, s["lo"], s["hi"])
+               for r, ss in all_steps.items() for s in ss if s["type"] == "EXTEND"]
+    print("\n  -- TARGET_VERIFY full, no concurrent EXTEND in the 8-rank group")
+    ext_ranks = sorted({r for r, _, _ in extends})
+    print(f"     EXTEND intervals: {len(extends)} (ranks {ext_ranks})")
+    print(f"  {'rank':>4s} {'n_full':>6s} {'n_free':>6s} {'n_hit':>6s}"
+          f" {'p50':>8s} {'mean':>8s} {'min':>8s} {'max':>8s}")
+    rank_p50 = []
+    for rank in sorted(table):
+        free, hit = [], []
+        for stype, rec in table[rank].items():
+            if rec["_type"][0] != "TARGET_VERIFY" or rec["_class"][0] != " full":
+                continue
+            for ms, lo, hi in zip(rec["step_ms"], rec["_lo"], rec["_hi"]):
+                if any(_overlap(lo, hi, elo, ehi) for _, elo, ehi in extends):
+                    hit.append(ms)
+                else:
+                    free.append(ms)
+        n_full = len(free) + len(hit)
+        if n_full == 0:
+            continue
+        if free:
+            p50 = st.median(free)
+            rank_p50.append((rank, p50, len(free), min(free), max(free)))
+            print(f"  {rank:4d} {n_full:6d} {len(free):6d} {len(hit):6d}"
+                  f" {p50:8.1f} {st.fmean(free):8.1f} {min(free):8.1f} {max(free):8.1f}")
+        else:
+            print(f"  {rank:4d} {n_full:6d} {len(free):6d} {len(hit):6d}"
+                  f" {'-':>8s} {'-':>8s} {'-':>8s} {'-':>8s}")
+    if len(rank_p50) >= 3:
+        p50s = [p for _, p, _, _, _ in rank_p50]
+        print(f"\n     free-of-EXTEND full-verify step wall: "
+              f"{len(rank_p50)} ranks, p50 spread {min(p50s):.1f}-{max(p50s):.1f} ms"
+              f" (max/min {max(p50s) / max(min(p50s), 1e-9):.3f}x)")
+    elif rank_p50:
+        print("\n     fewer than 3 ranks with EXTEND-free full verify -- not enough")
+    else:
+        print("\n     no EXTEND-free full TARGET_VERIFY steps in this window")
 
 
 if __name__ == "__main__":

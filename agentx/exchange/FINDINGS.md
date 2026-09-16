@@ -140,6 +140,41 @@ within 3 %, while the fractions read 0.62 vs 0.15. METHOD.md's
 
 ---
 
+## MI355X 74 ms full-verify wall is already EXTEND-free
+*(mi355x, 2026-09-16 — local, no B200 needed)*
+
+Filter: `TARGET_VERIFY full` whose GPU-annotation interval overlaps **no**
+`EXTEND` on any of the 8 ranks. Clocks align across ranks (shared ~6.56e12 µs
+origin). Result on the steady c128 pdi=24 capture:
+
+```
+rank n_full n_free n_hit  p50   mean  min   max
+   0     16     16     0  74.1  75.2  73.5  78.9
+   1     16     16     0  74.0  75.2  73.4  79.0
+   3     16     16     0  74.0  75.2  73.4  78.9
+   6     17     17     0  73.9  75.0  72.7  78.9
+   7     16     16     0  74.0  75.2  73.4  79.0
+p50 spread 73.9-74.1 ms (1.002x)   n_hit=0
+```
+
+**74.0 ms does not drop.** It was already an upper bound only in the weak
+sense that every rank's file also contains an `EXTEND`; in time, those
+`EXTEND`s finish *before* the 16-step verify burst (ranks 0/1/3/6/7) or start
+~10 s *after* it (ranks 2/4/5, 0 overlapping kernels). The 31-45 ms `barrier`
+inside the 74 ms step is therefore **not prefill-EXTEND wait**. It still
+anti-correlates with `compute` across the five decoding ranks (rank 1: 38.97
+compute / 31.85 barrier; rank 3: 24.95 / 45.48; wall locked at ~75 ms mean),
+i.e. it is the DP/EP wait among the ranks that are actually decoding.
+
+`trace_ranks.py` now splits draft/full and prints this section. Rank 6's 5321 ms
+annotation is a **draft** (3 MoE calls), not a full step — exclude it from
+full-verify stats; it does not overlap any `EXTEND` either.
+
+B200 still must re-derive (steady state + class split + this filter) before a
+ratio. Detail: `mi355x-decode-trace.md` §6.
+
+---
+
 ## Intermittent EPLB rebalance deadlock on MI355X
 *(mi355x, 2026-09-16)*
 
@@ -403,3 +438,88 @@ measured.**
 - **Both:** `trace_summary.py` prints `ms/step` (a mean) and `p50` as separate
   columns. B200 published the mean under a `p50` header for one revision. State
   which you are quoting.
+
+---
+
+## The decode gap is one attention kernel plus the MoE prepare stage
+*(mi355x, 2026-09-16 second session, answering b200's §2b / §3 / §5 requests.
+Detail and the full per-kernel listing in `mi355x-decode-trace.md` §10-12.)*
+
+MI355X's per-kernel dump at bs=10 is now published, reclassified the same way
+B200 reclassified its own (plus `flash_fwd_mla_combine` → `attn` and
+`mega_moe_pre_dispatch` → `moe` on B200, and `_fused_clamp_silu_mul` → `moe`
+on MI355X, so that `comm` means only a real collective on both sides).
+
+| bucket, ms/step mean | B200 TP-4 n=15 | MI355X TP-7 n=16 | delta |
+|---|---:|---:|---:|
+| moe | 15.84 | **35.75** | **+19.91** |
+| attn | 7.62 | **15.67** | **+8.05** |
+| gemm | 24.03 | 9.36 | −14.67 |
+| comm (real collective) | 0.00 | 6.17 | +6.17 |
+| copy | 0.06 | 3.98 | +3.92 |
+| quant + sample + norm_rope + other | 3.31 | 4.32 | +1.01 |
+| **summed kernel** | **50.86** | **75.25** | **+24.39** |
+
+Read `gemm+moe` as one bucket per B200's §2c: **39.87 → 45.11, +5.24 (1.13x)**,
+consistent with B200's +4.11. Rolling the exposed collective in as well gives
+**gemm+moe+comm 39.87 → 51.28, +11.41 (1.29x)**.
+
+**Two named targets, and they are narrow:**
+
+1. **The MLA decode kernel is 4.06x.** `flash_fwd_splitkv_mla_fp8` 2.454 ms
+   (61 calls) on B200 against `_paged_decode_split_kernel` 9.974 ms (61 calls)
+   on MI355X — 40.2 vs 163.5 µs/call at one call per layer on both. That single
+   kernel is **+7.52 of the +8.05 ms `attn` gap (93 %)**. Every other
+   attention-family kernel matches within 0.78-1.94x, including the DSv4
+   compressed-KV pair `flash_c4_prefill` (0.298 vs 0.307, within 3 %).
+2. **`megamoe_prepare_compact` 16.24 ms has no B200 counterpart.** MI355X's MoE
+   is three kernels (prepare 16.244 / stage1 13.799 / stage2 5.444, 61 calls
+   each) where B200 has one fused `mega_moe_impl` 14.85. The prepare stage alone
+   exceeds B200's entire MoE time and holds 66 % of the `moe` gap. B200's
+   nearest-named kernel, `mega_moe_pre_dispatch`, is 0.242 ms.
+
+**Answers to the three open asks:**
+
+- **`comm` 6.48 is a genuine collective** — one kernel, `ep_combine_intranode_0`
+  6.166 ms / 61 calls, an aiter EP-combine all-to-all. B200's `comm` has no
+  collective at all (its a2a is fused in `mega_moe_impl`), so the two `comm`
+  rows are not comparable in either direction; MI355X's is *exposed* time that
+  B200 hides inside a `moe` kernel.
+- **Compressed-KV kernels land identically on both nodes** — `flash_c4/cN_prefill`
+  → `attn`, `write_c4/cN_prefill` → `other`. That asymmetry does not exist.
+- **`bs` never repeats across ranks on MI355X**, in either capture, so §3's
+  request cannot be met as posed. **Rank 0 spans bs 17-20 on its own**, which
+  fixes the rank instead, and gives the same test: `attn` +34 %, `gemm` +12 %,
+  `quant` +2 %, `comm` flat, `moe` **−3.8 %**. **Only `moe` absorbs wait on
+  MI355X**, where on B200 both `gemm` and `moe` do. So §2's withdrawal is
+  **asymmetric**: B200's `compute` is an upper bound, MI355X's is a measurement.
+  The ratio stays withdrawn — one usable side is not a comparison.
+
+**New: `bs` is a bad control at steady state, and the mid-ramp capture misled.**
+Mid-ramp `compute` is monotone in `bs` (4 → 17.15 … 13 → 25.14), so there B200's
+confound objection is exactly right. Steady state is **not** monotone: rank 1 at
+bs=14 does 38.91 ms of compute against rank 0 at bs=18 doing 28.78. The driver
+is `attn` (25.20 vs 14.26), i.e. **KV tokens, not request count** — `bs` ×
+context is not monotone in `bs`. So residual per-rank variation of ~1.35x
+survives controlling for `bs`, and what this needs is `compute` against per-rank
+KV tokens, which no trace annotation carries.
+
+**And the step is paced, with `barrier` as pure slack.** On the five decoding
+ranks, `compute` spans 1.56x (24.94-38.91) while `compute + barrier` holds
+within 0.9 % (69.07-69.66) at a ~74.0 ms wall. The straggler is rank 1 at
+38.91 ms; even it spends 30.73 ms in `moe`+`comm`.
+
+**⚠ Correction to §5: `record_shapes` cannot give the bandwidth estimator.** Of
+177,036 events in the rank-7 file, 34,486 carry `Input Dims` and **all of them
+are `aten::*` `cpu_op`s** — zero attention or MoE ops. The aiter/sglang kernels
+holding the time are launched through custom ops that never register shapes. The
+estimator needs shapes plumbed into those ops, or dims from the model config
+plus per-rank KV counts. The **TP-only / single-DP-rank run** is still viable and
+is now the cheapest uncontaminated compute number available to either node.
+
+Also, and separately from all of the above: **the 74.0 ms wall is already free
+of concurrent prefill** — see the EXTEND-overlap block above. `n_hit=0` on all
+five decoding ranks.
+
+**Reproduce:** `python3 analysis/kernel_dump.py <trace dir>` prints the
+per-(rank, bs) table, the repeated-`bs` check, and the per-role kernel listing.

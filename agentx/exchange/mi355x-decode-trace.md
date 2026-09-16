@@ -140,17 +140,27 @@ captures. MI355X's critical path is its whole kernel sum.
 step time, and MI355X already sits at that setting — stream count cannot carry a
 gap of this size. Recorded as a measured difference, not an explanation.
 
-## 6. The bound that still applies
+## 6. The 74 ms wall is already free of concurrent EXTEND
 
-Ranks 0/1/3/6/7 have `TARGET_VERIFY` steps while **all eight** have `EXTEND`.
-DP steps are group-synchronous and the wait lands inside the fused MoE
-all-to-all, so a decoding rank's verify step includes waiting for prefilling
-ranks — `barrier` is 30.7-44.3 ms of the 74 ms step, i.e. 41-60 %.
+The previous reading — "all eight ranks have `EXTEND` in the file, so 74 ms
+includes waiting for prefills" — is **file-level coexistence, not time overlap**.
+GPU clocks align. Every rank's `EXTEND` is either before the verify burst
+(ranks 0/1/3/6/7, ~820-1080 ms, ending just as verify starts) or ~10 s after it
+(ranks 2/4/5; 0 kernels on those ranks during rank 0's 1286 ms verify window).
 
-So **74.0 ms is an upper bound on decode cost**, and the clean comparison needs
-both nodes to report the same thing: either both filtered to steps with no
-concurrent `EXTEND` in the group, or both quoting `compute`, which is
-barrier-free by construction. MI355X `compute` at bs=10 is **28.36 ms**.
+`trace_ranks.py` now filters `TARGET_VERIFY full` to steps with no interval
+overlap against any of the 8 `EXTEND`s. **n_hit=0** on all five decoding
+ranks; p50 73.9-74.1 ms (1.002x). The number does not drop.
+
+What remains inside the 74 ms is still ~half `barrier`, but it is the wait
+*among decoding ranks*: wall locked at ~75 ms mean while compute ranges
+24.95 (rank 3, bs=9) to 38.97 (rank 1, bs=14) and barrier runs the other way.
+`compute` at bs=10 (rank 7) is still **28.37 ms**. That is the barrier-free
+decode-compute figure; the 74 ms wall is the group-synchronous decode step
+with no concurrent prefill in this window.
+
+Rank 6 also has a 5321 ms `TARGET_VERIFY` — classed **draft** (3 MoE calls),
+not full. Ignore it for full-verify stats.
 
 ## 7. Scheduler-log numbers (complete run, not the trace run)
 
@@ -195,8 +205,9 @@ Left in `other` deliberately, because bucketing them is a guess I should not mak
 unilaterally: `sglang::write_c4_prefill` / `write_cN_prefill` (DSv4 compressed-KV
 writes — `attn` or `copy`?) and residual `at::native::*elementwise*`.
 
-`trace_ranks.py` was **not** updated and still mixes the two classes — its
-cross-rank tables in commit 564a590 and above carry that caveat.
+`trace_ranks.py` now uses the same `(type, class, bs)` grouping and prints a
+final "no concurrent EXTEND" table. Older cross-rank tables (commit 564a590
+and the mixed numbers in 2c7b0c9) still mix the two classes — ignore them.
 
 ## 9. Operational note
 
@@ -206,3 +217,178 @@ still full. Last server activity was `Resetting ExpertDistributionRecorder...`
 from all 8 ranks; every rank then hung in a collective and the NCCL watchdog took
 the process down 600 s later with `c10::DistBackendError`. Nothing reached
 launcher stdout. A straight retry worked.
+
+## 10. MI355X per-kernel listing at bs=10 — answering B200's §2b request
+
+*(mi355x, 2026-09-16, second session. Source: rank 7 `TARGET_VERIFY full`
+bs=10, n=16, steady capture. Reproduce with `/tmp/mi355x_for_b200.py`, kept at
+`analysis/kernel_dump.py`.)*
+
+Summed kernel **74.03 ms p50 / 75.24 ms mean** per step. B200 published 74.17
+for this cell from my earlier table; the difference is p50-vs-mean, not data.
+All MI355X numbers below are **means**, to match B200's dump.
+
+Both sides are reclassified the same way before comparing: B200's `nvjet_*`
+→ `gemm` and `silu_mul_clamp` → `moe` (as B200 did), plus B200's
+`flash_fwd_mla_combine` → `attn` and `mega_moe_pre_dispatch` → `moe`, which
+empties B200's `comm` bucket; and MI355X's `_fused_clamp_silu_mul_kernel`
+(0.262) out of `comm` → `moe`. After that, `comm` means *only* a real
+cross-rank collective on both sides.
+
+| bucket | B200 (TP-4, n=15) | MI355X (TP-7, n=16) | delta | share of gap |
+|---|---:|---:|---:|---:|
+| moe | 15.84 | **35.75** | **+19.91** | 81.6 % |
+| attn | 7.62 | **15.67** | **+8.05** | 33.0 % |
+| gemm | 24.03 | 9.36 | **−14.67** | −60.1 % |
+| comm | 0.00 | 6.17 | +6.17 | 25.3 % |
+| copy | 0.06 | 3.98 | +3.92 | 16.1 % |
+| quant | 1.52 | 2.21 | +0.69 | 2.8 % |
+| sample | 0.14 | 0.40 | +0.26 | 1.1 % |
+| norm_rope | 0.56 | 0.72 | +0.16 | 0.7 % |
+| other | 1.09 | 0.99 | −0.10 | −0.4 % |
+| **summed kernel** | **50.86** | **75.25** | **+24.39** | |
+
+`gemm` and `moe` still must be read as one bucket, for B200's reason (its
+`deep_gemm` absorbs wait) — **39.87 → 45.11, +5.24 (1.13x)**, close to B200's
++4.11. The new information is *inside* that bucket: the two platforms split it
+completely differently, 60/40 gemm:moe on B200 against 21/79 on MI355X. So the
+−14.67 `gemm` row is **not** MI355X being faster at GEMM; most of it is B200's
+absorbed wait sitting in `deep_gemm` (which B200 measured at 56.8 → 48.9
+µs/call as work grows). Do not quote it as a GEMM efficiency result.
+
+### `attn` 15.67 is one kernel — 93 % of the attention gap
+
+Matched by role, per step, with calls/step in parentheses:
+
+| what | B200 | MI355X | ratio |
+|---|---|---|---:|
+| **MLA decode core** | `flash_fwd_splitkv_mla_fp8` **2.454** (61) | `_paged_decode_split_kernel` **9.974** (61) | **4.06x** |
+| split-K reduce | `flash_fwd_mla_combine` 0.428 | `_paged_decode_reduce_kernel` 0.831 (61) | 1.94x |
+| MLA post fusion | `mhc_post_tilelang` 0.737 (125) | `mhc_fused_post_pre_gemm_sqrsum` 1.250 (121) | 1.70x |
+| MLA pre + norm | `mhc_pre_big_fuse_with_norm` 0.948 (122) | `mhc_pre_big_fuse_rmsnorm` 0.894 (121) | 0.94x |
+| indexer logits | `smN_paged_mqa_logits` 0.901 (30) | `pa_mqa_logits_fp4_prefill` 1.092 (30) | 1.21x |
+| indexer topk | `topk_main` + `topk_persistent_cluster` 0.710 (30+30) | `sglang::topk_main_kernel` 0.830 (30) | 1.17x |
+| compressed-KV read c4 | `flash_c4_prefill` 0.298 (60) | `flash_c4_prefill` 0.307 (60) | 1.03x |
+| compressed-KV read cN | `flash_cN_prefill` 0.193 (31) | `flash_cN_prefill` 0.151 (31) | 0.78x |
+| fused norm/rope for MLA | 0.182 + 0.138 (61) | `fused_norm_rope_flashmla` 0.271 (61) | 0.85x |
+
+**The MLA decode kernel alone is +7.52 ms of the +8.05 ms `attn` gap (93 %)**, at
+an identical 61 calls/step — one per layer — so it is 40.2 µs/call against
+163.5 µs/call. Every other attention-family kernel is within 0.78-1.94x, and the
+five DSv4-specific ones (mhc pre/post, indexer, c4/cN) are within 1.7x. This is
+the narrowest target either node has produced so far.
+
+`attn` is *not* pace-pinned on MI355X (see below), and the c4/cN pair matching
+within 3 % is a good sign the two traces are measuring the same work.
+
+### The compressed-KV kernels land identically — no reclassification needed
+
+B200 asked where they go on ROCm. Same place: `flash_c4_prefill` /
+`flash_cN_prefill` → `attn`, `write_c4_prefill` / `write_cN_prefill` → `other`
+(0.259 / 0.131 here). Both nodes split them the same way, so that asymmetry does
+not exist.
+
+### `comm` 6.17 is a genuine collective — and the buckets are structurally different
+
+B200 asked. Answer: **yes.** It is one kernel, `ep_combine_intranode_0`, 6.166
+ms over 61 calls/step, an aiter EP-combine all-to-all. B200's `comm` bucket by
+contrast contains **no** collective at all — its all-to-all is fused inside
+`mega_moe_impl`. So the two `comm` rows are not comparable in either direction,
+and MI355X's is 6.17 ms of *exposed* collective that on B200 is hidden inside a
+`moe` kernel. Adding it to the joint bucket gives **gemm+moe+comm 39.87 →
+51.28, +11.41 (1.29x)**, which is the most defensible single roll-up.
+
+### MoE is three kernels on MI355X, and the prepare stage has no B200 analogue
+
+| | B200 | MI355X |
+|---|---|---|
+| | `mega_moe_impl` 14.85 (61) | `megamoe_prepare_compact` **16.244** (61) |
+| | `mega_moe_pre_dispatch` 0.242 | `megamoe_stage1_compact` 13.799 (61) |
+| | `silu_mul_clamp` 0.740 (61) | `megamoe_stage2_compact` 5.444 (61) |
+| | `moe_hash_topk_fused` 0.02 | `_fused_clamp_silu_mul` 0.262 (61) |
+| total | **15.85** | **35.75** (2.26x) |
+
+`megamoe_prepare_compact` is the **largest single kernel in the whole step** and
+on its own exceeds B200's entire MoE time. B200's `pre_dispatch` equivalent is
+0.242 ms. Whether that is real work, the fused all-to-all wait, or both cannot
+be told from this trace — but it is where 66 % of the `moe` gap sits.
+
+## 11. Answering §3 — bs never repeats across ranks, so I deconfounded it the other way
+
+B200 asked for `compute` on two ranks at the same `bs`. **Not available on this
+node, in either capture** — every rank sits at its own `bs` and no value
+repeats (checked both the steady and the mid-ramp directory). But **rank 0
+spans four `bs` values on its own**, which fixes the rank and varies the batch,
+and that answers the same question from the other side.
+
+Rank 0 only, steady capture, `TARGET_VERIFY full` p50:
+
+| bs | n | wall | compute | attn | gemm | moe | comm | quant |
+|---:|--:|---:|---:|---:|---:|---:|---:|---:|
+| 17 | 4 | 73.55 | 28.76 | 14.17 | 10.90 | 35.34 | 5.31 | 2.32 |
+| 18 | 7 | 74.04 | 28.78 | 14.26 | 10.89 | 35.50 | 5.48 | 2.32 |
+| 19 | 3 | 77.86 | 34.45 | 18.44 | 12.22 | 33.71 | 5.42 | 2.37 |
+| 20 | 2 | 78.75 | 35.06 | 19.02 | 12.25 | 33.99 | 5.39 | 2.37 |
+
+**MI355X's `compute` is not pace-pinned, and only `moe` absorbs wait.** Applying
+B200's own §2c test at fixed rank, bs 17 → 20: `attn` +34 %, `gemm` +12 %,
+`quant` +2 %, `comm` flat, and **`moe` −3.8 %** — the only bucket that shrinks
+as work grows. On B200 *both* `gemm` (−3.04) and `moe` (−3.10) shrink. So the
+withdrawal in FINDINGS §2 applies **asymmetrically**: B200's `compute` is an
+upper bound contaminated by slack, MI355X's `compute` is a measurement. That
+does not resurrect the ratio (B200's side is still unusable), but it does mean
+MI355X's 28.36 ms at bs=10 needs no caveat.
+
+### Cross-rank spread: `bs` explains the mid-ramp capture entirely and the steady one only partly
+
+All ranks, `TARGET_VERIFY full` p50 `compute`:
+
+| capture | bs → compute |
+|---|---|
+| mid-ramp | 4 → 17.15, 5 → 18.69, 7 → 19.78, 10 → 23.24, 11 → 24.25, 12 → 24.40, 13 → 25.14 |
+| steady | 9 → 24.94, 10 → 28.36, 14 → **38.91**, 16 → 35.25, 17 → 28.76, 18 → 28.78, 19 → 34.45, 20 → 35.06 |
+
+Mid-ramp is **monotone in `bs`**, so B200's objection is exactly right there:
+that capture shows no rank imbalance once `bs` is controlled. Steady is **not
+monotone** — rank 1 at bs=14 does 38.91 ms of compute while rank 0 at bs=18 does
+28.78 — so at steady state `bs` does *not* explain the spread and there is
+residual per-rank variation of about 1.35x. The driver is `attn` (25.20 vs
+14.26), i.e. **KV tokens, not request count**: `bs` × context is not monotone in
+`bs`, so `bs` is a poor proxy for attention work at steady state. Reporting
+`compute` against per-rank KV tokens is what this actually needs, and no
+annotation in the trace carries it.
+
+### The step is paced, and `barrier` is pure slack — `compute` + `barrier` is constant
+
+Across the five decoding ranks, for every step whose wall is ~74.0 ms:
+
+| rank | bs | compute | barrier | sum |
+|---:|---:|---:|---:|---:|
+| 3 | 9 | 24.94 | 44.27 | 69.21 |
+| 7 | 10 | 28.36 | 40.71 | 69.07 |
+| 1 | 14 | 38.91 | 30.73 | 69.64 |
+| 6 | 16 | 35.25 | 33.95 | 69.20 |
+| 0 | 17 | 28.76 | 40.62 | 69.38 |
+| 0 | 18 | 28.78 | 40.88 | 69.66 |
+
+`compute` spans **1.56x** (24.94-38.91) while the sum holds within **0.9 %**
+(69.07-69.66). That is as clean a demonstration as this data can give that
+`barrier` is slack and the group step is paced by its straggler — rank 1, at
+38.91 ms of compute. Even the straggler still spends 30.73 ms in `moe`+`comm`,
+so that time is not all wait.
+
+## 12. B200's proposed estimator does not work on MI355X
+
+FINDINGS §5 suggests achieved FLOPs/bandwidth per kernel "which `record_shapes`
+already supports". **It does not, on this node's traces.** Of 177,036 events in
+the rank-7 file, 34,486 carry `Input Dims`, and **every one of them is an
+`aten::*` `cpu_op`** (`as_strided`, `empty`, `view`, `slice`, `copy_`, ...).
+Zero attention or MoE ops carry dims — the aiter/sglang kernels that hold the
+time are launched through custom ops that never register shapes. So the
+bandwidth estimator needs either shapes plumbed into those custom ops or the
+dimensions taken from the model config plus the per-rank KV token count, not
+from `record_shapes`.
+
+The other candidate estimator — a **TP-only / single-DP-rank run** — is still
+viable here and is now the cheapest way to get an uncontaminated compute number
+on either node.

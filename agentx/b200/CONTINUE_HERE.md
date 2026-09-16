@@ -10,14 +10,47 @@ results.
 
 ## CONTINUE HERE
 
-**Goal: a reference baseline for profiling.** The bar is *parity or better vs
-CI* on the same arm — not a new record. So arm shape must match a CI arm
-exactly, and the comparison needs CI's own numbers to compare against
-(see §9). Anything that makes the run non-comparable matters more than
-anything that makes it fast.
+**Goal (evolved): explain the B200-vs-MI355X ITL gap on AgentX c128.** It began
+as "get a profiling reference at parity with CI"; that reference exists and the
+work moved on to the cross-platform gap. Read §8 (parity/CI), the A/B sections,
+and `../exchange/b200-decode-trace.md` for the current front.
 
-**Status (2026-09-15 12:20): reference arm COMPLETE, n=1. Needs one replicate
-before it is used as the profiling baseline.**
+**Status (2026-09-16 10:25): the apparent 2.5× ITL gap is down to a
+config-matched 1.55×, and the open question is whether that 1.55× is in decode
+kernels or in the prefill barrier around them.**
+
+Settled so far:
+
+- `prefill_decode_interval` was 10 on MI355X and hardcoded 24 on B200. Matching
+  it moved the gap from an apparent 2.5× to a stable ~1.6× at *both* settings
+  (33.9/20.7 at pdi=24, 50.6/32.1 at pdi=10), so the knob inflated the gap, it
+  never was the cause.
+- Multi-stream overlap (CUDA-only, no ROCm branch) is worth ~4-5 % of step time.
+  It fills gaps rather than inflating kernels, so per-kernel times **are**
+  comparable across platforms without normalising streams.
+- Four controls now matched: pdi, `accept len` (3.770 vs 3.78), per-request KV
+  working set (151,908 vs ~151,000 tokens), cuda-graph replay (100 % both).
+  Queueing explains only ~6.5 % of the gap; KV pressure and lost graph replay
+  are excluded.
+- At matched batch the residual is **1.54-1.57× on log-implied step time**
+  across batch 9/12/16.
+
+**The discriminator, and the one number still missing:** log-implied step time
+includes amortised prefill. B200's *pure decode* step wall is **15.9 ms** while
+its log-implied step is ~72 ms at batch 9 — only ~22 % of wall time is inside
+decode steps. So if MI355X's pure decode step wall is ~25 ms the gap is in
+kernels; if it is ~16 ms the gap is in the prefill/waiting portion and the
+kernel breakdown is the wrong place to look. **These have different fixes.**
+
+**Next action:** `git pull` in `/workspace/claude-skills`, read
+`agentx/exchange/` for a new `mi355x-*.md`, and compare against
+`agentx/exchange/b200-decode-trace.md`. If MI355X has not reported yet, the
+request is written out in `agentx/exchange/README.md` and the capture
+instructions in `agentx/analysis/MI355X_CAPTURE_PROMPT.md`.
+
+### The CI-parity reference arm, for the record
+
+**Reference arm (pdi=24, multi-stream, 2026-09-15): COMPLETE, n=1.**
 
 | metric | value |
 |---|---|
@@ -50,17 +83,13 @@ Two things to know about this number before comparing it to anything:
   CI's json — if CI matches expected more closely, the throughput numbers are
   not measuring the same work.
 
-**Next:** rerun the identical arm for the noise floor, then compare the two:
+A replicate of this arm was never run; the spread bound came from the trace run
+instead (output tok/s/GPU reproduced to −0.29 %, ITL p90 within ~9 % under
+non-matched conditions). Treat ITL differences under ~10 % as unresolved unless
+conditions are matched.
 
-```bash
-cd /workspace/agentx
-RESULT_DIR=/workspace/agentx/results/b200-tp8-ep8-dpatrue-c128-rep2 \
-  ./agentx_run_b200.sh > logs/arm3_c128_rep2.log 2>&1 &
-./watch_arm.sh arm3_c128_rep2 b200-tp8-ep8-dpatrue-c128-rep2 > logs/watch_rep2.log 2>&1 &
-```
-
-**Free the GPUs first** — the launcher leaves the server orphaned when it exits
-(see §7), and a second run will OOM against 178 GB/GPU of stale allocation.
+**Always run `/workspace/agentx/free_gpus.sh` before launching an arm** — the
+launcher orphans a whole process family and holds the dist-init ports (§7).
 
 ### First run, for the record
 

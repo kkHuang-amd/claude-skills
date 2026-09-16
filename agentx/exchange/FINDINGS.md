@@ -195,22 +195,54 @@ fused MoE all-to-all (`compute + barrier` is near-constant per rank while
 So the question has moved from "kernels or prefill" to **"why does MI355X's
 group wait cost 2.8x B200's"**, with two measured candidates below.
 
-### 3. Candidate A — MI355X's DP load imbalance is much larger
+### 3. Candidate A — DP load imbalance: NOT ESTABLISHED, and the earlier
+### framing of it was invalid
 
-Spread of `compute` across ranks in one capture: B200 **31.0-31.6 ms**
-(0.6 ms, flat from bs=1 to bs=12), MI355X **24.9-38.9 ms** (14 ms). In a
-group-synchronous step the slowest rank sets the wall, so a 14 ms spread is
-directly 14 ms of wait for everyone else. Critical-path `compute` is 38.9 vs
-31.6 ms, i.e. 1.23x — most of the 1.50x summed-kernel gap.
+An earlier version of this block compared a B200 `compute` spread of 0.6 ms
+against an MI355X spread of 14 ms (24.9-38.9) and called the difference
+imbalance. **That comparison does not hold: each rank sits at its own `bs`, so
+rank and batch size move together and neither table separates them.**
 
-**Caveat, not yet controlled: each rank sits at its own `bs`**, so batch size is
-confounded with imbalance in that 14 ms. It is not a clean bs effect — MI355X
-goes 9 -> 24.94, 10 -> 28.36, 14 -> 38.91, 16 -> 35.25, 17-20 -> 28.87, i.e.
-non-monotonic, with the largest-batch rank second *lowest* — and B200's
-`compute` is flat across bs 1-12, which argues bs does not drive `compute` at
-all on that node. But "non-monotonic" is not "excluded". To settle it, compare
-ranks at equal `bs` within one MI355X capture, or bucket `compute` by bs the way
-`decode_stats.py` buckets `step_ms`.
+What *is* established, because B200's capture happens to repeat several `bs`
+values across different ranks — **at fixed `bs`, B200's cross-rank spread is
+0.0-0.3 ms**:
+
+| bs | ranks | `compute` p50 | spread |
+|---:|---|---|---:|
+| 9 | TP-4 / TP-6 / TP-7 | 31.48 / 31.16 / 31.36 | 0.32 |
+| 10 | TP-4 / TP-7 | 31.45 / 31.60 | 0.15 |
+| 11 | TP-0 / TP-4 | 31.38 / 31.29 | 0.09 |
+| 12 | TP-0 / TP-4 | 31.47 / 31.48 | 0.01 |
+
+MI355X's published table has one `bs` per rank and no repeats, so the matching
+statement cannot be made there. **Until it is, there is no measured claim that
+MI355X's imbalance exceeds B200's.**
+
+To settle it, MI355X should report `compute` for two or more ranks *at the same
+`bs`* within one capture, or bucket `compute` by bs the way `decode_stats.py`
+buckets `step_ms`.
+
+### 3b. What the overlapping batch sizes do establish
+
+`bs` 9 and 10 appear on both nodes, which makes these two rows controlled:
+
+| bs | B200 `compute` | MI355X `compute` | MI355X vs B200 |
+|---:|---|---:|---:|
+| 9 | 31.16-31.48 | 24.94 | **0.79-0.80x** |
+| 10 | 31.45-31.60 | 28.36 | **0.90x** |
+
+So "MI355X's barrier-free compute is lower than B200's" **survives matching on
+bs, and is slightly stronger than the 0.90x quoted from the unmatched bs=12 vs
+bs=10 pair.** The headline conclusion — the gap is `barrier`, not `compute` —
+does not depend on the imbalance claim withdrawn above.
+
+**Hypothesis, two points only, do not act on it yet:** B200's `compute` is flat
+in batch (31.03 at bs=1 to 31.47 at bs=12, i.e. fixed-cost dominated) while
+MI355X's rises 24.94 -> 28.36 from bs 9 to 10 (+13.7 %). If that slope held, the
+curves would cross near bs 11-12 — and MI355X's `running-req/rank` p50 is 12.
+But MI355X's own table is non-monotonic beyond bs=14 (16 -> 35.25,
+17-20 -> 28.87, the latter a p50 over mixed bs), so the slope is not real yet.
+The test is a `compute`-vs-bs curve per node, not two points.
 
 ### 4. Candidate B — the "stream overlap is worth 4-5 %" bound does NOT apply here
 
@@ -227,14 +259,14 @@ measured.**
 
 ### 5. What each side should do next
 
-- **MI355X:** report per-rank `compute` spread against the arm's
-  `running-req/rank` distribution — is the 14 ms spread batch imbalance
-  (fixable by admission/routing) or per-rank expert imbalance (EPLB)? And
-  establish whether any kernel overlap is reachable at all on ROCm, since 1.00x
-  is the single largest multiplier in the table.
-- **B200:** batches are not matched (B200 bs 1-12, MI355X 9-20; MI355X
-  `running-req/rank` p50=12). Re-capture at a matched batch before treating the
-  0.90x `compute` ratio as final.
+- **MI355X:** publish `compute` for two or more ranks **at the same `bs`**, so
+  rank and batch stop moving together — that is what §3 needs and it needs no
+  new run, only a regroup of the existing capture. Then a `compute`-vs-bs curve
+  for §3b. And establish whether any kernel overlap is reachable at all on ROCm,
+  since 1.00x is the single largest multiplier in the table.
+- **B200:** batch ranges barely overlap (B200 bs 1-12, MI355X 9-20, common
+  ground only at 9 and 10). Re-capture at a larger batch to extend the
+  `compute`-vs-bs curve into MI355X's operating range.
 - **Both:** always publish step wall, its `bs`, *and* the capture window's KV
   working set together. Two of the three were missing from every capture before
   today, and that is what made three separate numbers wrong.

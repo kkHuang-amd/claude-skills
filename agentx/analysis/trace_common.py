@@ -16,14 +16,29 @@ GPU_CATS = {"kernel", "gpu_memcpy", "gpu_memset"}
 # Order matters: the first match wins. `mega_moe` must be tested before `gemm`,
 # communication before everything (a wait shows up as comm, not as compute).
 ROLES = [
+    # OVERRIDES, tested before `comm`. Agreed by both nodes 2026-09-16 after
+    # each had been patching `classify` locally, which silently made their
+    # published tables use different buckets. The `comm` patterns below are
+    # substring matches on words that also appear in non-collective kernels:
+    #   b200 `flash_fwd_mla_combine_kernel`  -> "combine", but it is attention
+    #                                           split-K reduction
+    #   b200 `mega_moe_pre_dispatch_kernel`  -> "dispatch", but it is MoE prep
+    #   mi355x `_fused_clamp_silu_mul_...`   -> matched via a `dispatch` in its
+    #                                           long config suffix; MoE activation
+    # Measured effect of getting this wrong: b200's `comm` bucket held NO
+    # collective at all, and its two nodes' `comm` rows were not comparable.
+    ("attn", r"mla_combine|mha_combine|splitkv.*combine"),
+    ("moe", r"pre_dispatch|silu_mul_clamp|clamp_silu_mul|silu_mul"),
     ("comm", r"all_gather|allgather|all_reduce|allreduce|nccl|rccl|gloo|"
-             r"a2a|dispatch|combine|barrier|broadcast"),
+             r"a2a|dispatch|combine|barrier|broadcast|ep_combine|ep_dispatch"),
     ("moe", r"mega_moe|fused_moe|asm_moe|ck_moe|moe_|_moe|expert|grouped_gemm|group_gemm"),
     ("attn", r"attn|attention|fmha|mha|flash|paged|mla|mqa_logits|indexer|"
              r"mhc_"),                     # mhc_* is DSv4's MLA pre/post fusion
     # `Cijk_` is rocBLAS/Tensile's generated GEMM naming (Cijk_Alik_Bljk_...);
     # on ROCm it is a real GEMM that otherwise lands in `other`.
-    ("gemm", r"gemm|matmul|hipblas|cublas|_mm_|linear|Cijk_"),
+    # `nvjet_*` is cuBLAS's generated GEMM family on Blackwell; it held 2.04
+    # ms/step of b200's `other` until this was added.
+    ("gemm", r"gemm|matmul|hipblas|cublas|_mm_|linear|Cijk_|nvjet"),
     ("quant", r"quant|dequant|scale|fp8|fp4|ue8m0|cast"),
     ("norm_rope", r"norm|rope|rotary|rms|embed"),
     ("sample", r"sample|topk|argmax|logit"),

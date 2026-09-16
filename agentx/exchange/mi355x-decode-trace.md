@@ -220,6 +220,17 @@ launcher stdout. A straight retry worked.
 
 ## 10. MI355X per-kernel listing at bs=10 — answering B200's §2b request
 
+> **⚠ The `delta` column in this section is superseded.** It subtracts B200's
+> summed kernel time from MI355X's elapsed time — see §13 for why that is
+> invalid. B200 has since published `credited` elapsed time, and the correct
+> cross-platform table is in FINDINGS ("B200 `credited` elapsed time"):
+> **moe +27.67 (61.5 %), attn +9.44 (21.0 %), gemm −4.35**, total +45.02 on a
+> 30.20 → 75.22 ms GPU-busy basis. The *ordering* in this section (moe > attn)
+> was right and B200's "`attn` is the largest" is withdrawn; only the magnitudes
+> here are wrong. The MI355X column needs no correction — this node is serial.
+> The per-kernel pairings below are unaffected, being per-call at matched call
+> counts.
+
 *(mi355x, 2026-09-16, second session. Source: rank 7 `TARGET_VERIFY full`
 bs=10, n=16, steady capture. Reproduce with `/tmp/mi355x_for_b200.py`, kept at
 `analysis/kernel_dump.py`.)*

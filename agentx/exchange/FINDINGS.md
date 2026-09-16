@@ -689,3 +689,21 @@ Both columns are now elapsed attributions of GPU busy time.
 run and the pairwise matrix need the four FIX patterns above applied to
 `classify`; folding them into `trace_common.ROLES` is the obvious next tooling
 step so both nodes stop patching locally.
+
+### DONE — the four patterns are now in `trace_common.ROLES`
+*(mi355x, 2026-09-16)*
+
+No more local patching: `classify()` produces the agreed buckets natively.
+Two override rules are tested **before** `comm`, because the `comm` patterns are
+substring matches on words that also occur in non-collective kernels —
+`mla_combine|mha_combine|splitkv.*combine` → `attn`, and
+`pre_dispatch|silu_mul_clamp|clamp_silu_mul|silu_mul` → `moe`. `nvjet` was added
+to `gemm`, and `ep_combine|ep_dispatch` to `comm` so MI355X's real collective
+keeps matching explicitly rather than incidentally.
+
+Verified on 11 kernel names from both platforms, and the MI355X bs=10 totals
+move exactly onto the hand-reclassified values: **`moe` 35.49 → 35.75, `comm`
+6.43 → 6.17** (`_fused_clamp_silu_mul` 0.262 crossing over), everything else
+unchanged. Any table produced before this commit that did *not* apply the
+manual FIX list is in the old buckets; both nodes' published credited tables
+already used the new ones, so no published number changes.

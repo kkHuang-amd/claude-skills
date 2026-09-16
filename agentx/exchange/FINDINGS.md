@@ -980,3 +980,94 @@ recovery of ~16 ms. The falsification is cheap and local: **co-schedule real
 work against the prepare stage and see whether the step wall moves.** Also worth
 one config probe first — whether `pcu1`/`qcu28` are simply mistuned for a
 256-CU part, which is a parameter in `mega_moe_prepare.py`, not a rewrite.
+## ✅ MEASURED: a truly serial B200 arm. Overlap is worth 8 %, the gap is `moe`,
+## and `gemm` is equal on the two platforms
+*(b200, 2026-09-16. Proposed by the b200 operator: stop inferring the cost of
+no-overlap and measure it. This supersedes every summed-kernel and `credited`
+bucket comparison in this file.)*
+
+### Why no previous arm was serial — a real flag bug
+
+`deepseek_v4.py:2736`: `use_stream_pool = _is_cuda or (_is_hip and ...)`. **On
+CUDA the stream pool is created unconditionally**, and `moe_alt_stream`
+(`:1798`) only tests `_is_cuda`. `SGLANG_OPT_USE_MULTI_STREAM_OVERLAP` gates
+*only* the three attention streams (`:853`). So the flag never disabled the one
+overlap that matters, and the "single-stream" arm still ran at `sum/busy` 1.55x.
+
+One-line fix, default-preserving because the flag defaults True:
+
+```python
+use_stream_pool = (
+    (_is_cuda and envs.SGLANG_OPT_USE_MULTI_STREAM_OVERLAP.get())   # was: _is_cuda
+    or (_is_hip and (...)) or (_is_npu and ...)
+)
+```
+
+With it, `SGLANG_OPT_USE_MULTI_STREAM_OVERLAP=0` gives **`sum/busy`
+1.034-1.052x on all six ranks** — verified as an outcome, not assumed from the
+flag.
+
+### The result, at matched steady state (169,932 tok/req vs 165,220 and MI355X's 167,538)
+
+| | multi-stream | **serial** | delta |
+|---|---:|---:|---:|
+| step wall p50 | 29.95 ms | **32.68 ms** | **+8.0 %** |
+| summed kernel | 50.87 | **34.16** | **−33 %** |
+| GPU busy | 30.20 | 32.61 | +8.0 % |
+| `sum/busy` | 1.684x | **1.043x** | |
+| the 217 us GEMM population | 61/step @ 217 us, 99 % moe-overlap, 13.26 ms | **gone** — all 152 calls/step @ 18.2 us, 0 % overlap, 2.77 ms | |
+
+**Predictions were stated in advance and one is falsified.** Starvation
+predicted +5-13 % on the wall; "overlap hides real work" predicted +50-67 %.
+Measured **+8.0 %**. The 16.7 ms that vanished from the summed kernel was
+phantom — an earlier estimate put the phantom at ~11.8 ms, so it was
+*understated*.
+
+**So overlap on B200 is worth 8 % of the step**, and of the 2.47x wall gap
+against MI355X, **2.26x is kernel work and only 1.09x is overlap.**
+
+### The clean per-role attribution — both sides serial, both sums are elapsed
+
+B200 rank 0, bs=9, n=17 (`sum ≈ union ≈ exclusive`) against MI355X rank 7,
+bs=10:
+
+| bucket | B200 serial | MI355X | delta | % of gap |
+|---|---:|---:|---:|---:|
+| **moe** | 13.42 | **35.75** | **+22.33** | **54 %** |
+| **attn** | 8.20 | **15.67** | **+7.47** | **18 %** |
+| comm (real collective) | 0.00 | 6.17 | +6.17 | 15 % |
+| copy | 0.13 | 3.98 | +3.85 | 9 % |
+| quant | 1.14 | 2.21 | +1.07 | 3 % |
+| other+norm_rope+sample | 1.47 | 2.11 | +0.64 | 2 % |
+| **gemm** | **9.81** | **9.36** | **−0.45** | −1 % |
+| **total** | **34.17** | **75.24** | **+41.07** | **2.20x** |
+
+**`gemm` is equal between the platforms** (B200 5 % higher). Both earlier
+readings — summed `+14.67` and credited `−4.35` — were starvation artefacts in
+opposite directions. There is no dense-GEMM gap.
+
+**MI355X's ordering was right all along**: `moe` is the gap, at +22.33 ms and
+54 % of it, with `attn` second at +7.47. `megamoe_prepare_compact` alone
+(16.24 ms, no B200 counterpart) exceeds B200's *entire* `moe` of 13.42.
+
+### One reverse-direction contention effect, for the record
+
+`mega_moe_impl` is **220 us/call serial against 243 us multi-stream** — it was
+being slowed ~9 % by the starved GEMM stealing 2 of its SMs. So contention is
+real, and it ran *against* the overlap, not for it.
+
+### Consequences for MI355X
+
+- The overlap upside on ROCm is now bounded by measurement, not inference:
+  **~8 %**, and only if aiter's MegaMoE leaves CUs free (B200's takes 146 of
+  148). The grid-vs-CU number is still the thing to check, but the prize is
+  small either way — it cannot touch a 2.20x kernel-work gap.
+- **Everything now points at `moe`.** +22.33 ms of 41.07, and the named
+  suspect is `megamoe_prepare_compact`. That is where the work is.
+
+### Retractions this supersedes
+
+The decomposition "2.49x = 1.48x work x 1.68x overlap" is wrong; it is
+**2.26x work x 1.09x overlap**. Every summed-kernel bucket delta in §2b and
+every `credited` delta in the `busy_ms.py` block is superseded by the serial
+table above — on B200 both were measuring starvation, in opposite directions.

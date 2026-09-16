@@ -1342,3 +1342,70 @@ sitting. If either fails, the question becomes why B200 *is* balanced on the sam
 workload — and the first check would be whether both launchers really pass the
 same `--load-balance-method` and router `--policy`, which has only ever been
 verified from script intent on the B200 side, not from its `sglang_command.txt`.
+## End-to-end cost of TRUE full serialization on B200: 3 %, not 8 % — and the
+## dominant trace overlap is worth ~nothing
+*(b200, 2026-09-16. Full arm, no profiler, `DURATION` 3600 so it matches the
+pdi=24 reference's 3,628 s. `RESULT_DIR=...-c128-pdi24-serial`. Launcher gate
+passed: aiperf error rate 1/11,428 = 0.009 %.)*
+
+`SGLANG_OPT_USE_MULTI_STREAM_OVERLAP=0` **with** the `use_stream_pool` patch, so
+this is the first arm on this node with no alt streams at all:
+
+| metric | multi-stream (ref) | **serial** | delta |
+|---|---:|---:|---:|
+| output tok/s/GPU | 403.6 | **390.4** | **−3.26 %** |
+| total tok/s/GPU | 46,170 | **44,610** | **−3.39 %** |
+| **ITL p90** | 20.7 ms | **21.32 ms** | **+3.00 %** |
+| interactivity p90 | 48.31 | 46.91 | −2.89 % |
+| TTFT p50 | 4.59 s | 5.031 s | **+9.62 %** |
+| cache hit | 0.9635 | 0.9624 | −0.11 % |
+| ISL / OSL mean | 114.4k / 1,009 | 112.3k / 992 | −1.8 % / −1.7 % |
+| avg GPU power | 5,723 W | 5,606 W | −2.05 % |
+| duration | 3,628 s | 3,629 s | matched |
+
+### It reconciles with the trace, via the pdi dilution
+
+The trace measured the **decode step wall** at +8.0 % (29.95 → 32.68 ms). End to
+end it is +3.0 % on ITL, because at pdi=24 only ~40 % of the scheduler's step is
+inside decode steps (32 of 79.2 ms log-implied). **8.0 % x 0.40 = 3.2 %**,
+against 3.00 % measured. The two numbers are the same effect at two scopes;
+quote the step wall for kernel work and the 3 % for user-visible latency.
+
+### The overlap that dominates the trace is worth approximately zero
+
+Two A/Bs bracket it:
+
+| removed | out tok/s/GPU | ITL p90 |
+|---|---:|---:|
+| attention streams only (flag alone, pdi=10) | −3.07 % | +5.88 % |
+| **everything, incl. MoE/shared-expert (patch + flag, pdi=24)** | **−3.26 %** | **+3.00 %** |
+
+The `pdi` differs, so this brackets rather than proves. But removing *all*
+overlap costs about what removing only the attention streams costs — so the
+`gemm` x `moe` co-residency, which is **84 % of B200's co-resident time and the
+entire reason `sum/busy` reads 1.68x**, buys essentially nothing end to end.
+That is what a starved kernel on 2 of 148 SMs should be worth, and it closes
+the loop with the 217 us population vanishing under serialization.
+
+**TTFT is the one real casualty** (+9.6 %): prefill loses its attention-stream
+overlap too, and prefill is where those streams actually pay.
+
+### Bottom line for the cross-platform work
+
+Overlap is worth **3 % end to end** on B200. Against MI355X's 2.20x kernel-work
+gap it is noise. The targets remain `megamoe_prepare_compact` (16.24 ms/step at
+30 of 256 CUs, 40 % of the gap) and the MLA decode kernel (4.06x per call, 18 %).
+
+**The patch is not upstreamed and has been reverted on this node.** Re-apply it
+to reproduce:
+
+```python
+# deepseek_v4.py:2736
+use_stream_pool = (
+    (_is_cuda and envs.SGLANG_OPT_USE_MULTI_STREAM_OVERLAP.get())   # was: _is_cuda
+    or (_is_hip and (...)) or (_is_npu and ...)
+)
+```
+
+It is arguably a bug fix worth sending upstream: without it the flag silently
+does not control the largest overlap on CUDA.

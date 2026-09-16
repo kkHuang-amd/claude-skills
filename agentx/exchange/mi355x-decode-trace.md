@@ -860,3 +860,115 @@ Either way the ordering changes: **the MLA decode kernel is now target #1** on
 its own numbers (7.17-20.18 ms/step, 4.06x per call against B200 at matched bs),
 and `prepare` splits into a load-balancing problem (~10 ms of idle, worth ~7.7 ms
 of wall) plus a 6.28 ms pipelining problem.
+
+## 17. The KV skew, measured from the scheduler log — and why B200 does not see it
+
+*(mi355x, 2026-09-16. New tool `analysis/kv_skew.py`, platform-neutral, needs
+only a `server.log`.)*
+
+### It is real, and it is exactly the skew `total_requests` cannot see
+
+Per-DP-rank medians over the steady-state half of the trace run's own
+`server.log`, from the scheduler's `Decode batch` lines — **no trace, no GPU,
+no kernel inference**:
+
+| rank | running-req | #full token | tok/req |
+|---:|---:|---:|---:|
+| 0 | 9 | 1,036,928 | 110,789 |
+| 1 | 8 | 1,536,256 | 190,572 |
+| 2 | 11 | 2,153,984 | 187,977 |
+| 3 | 9 | 1,478,400 | 168,725 |
+| 4 | 10 | 1,558,400 | 159,602 |
+| 5 | 11 | 1,628,160 | 156,935 |
+| 6 | 11 | 2,356,864 | 213,393 |
+| 7 | 11 | 2,318,080 | 207,663 |
+
+| quantity | spread | max/min |
+|---|---|---:|
+| `running-req` — what `total_requests` balances | 8 - 11 | **1.38x** |
+| `#full token` — what attention costs | 1.04M - 2.36M | **2.27x** |
+| tok/req — how long this rank's requests are | 110,789 - 213,393 | **1.93x** |
+
+**The balancer is working, on the wrong quantity.** Request count is level to
+1.38x, but because per-request length varies **1.93x** across ranks, KV volume
+ends up **2.27x** skewed. That is `--policy cache_aware` doing its job — it
+routes a conversation to whichever rank already holds its prefix, and long
+conversations therefore concentrate. Rank 0 carries 9 short requests (110k
+each); rank 6 carries 11 requests nearly twice as long (213k each).
+
+This is an independent confirmation of §15-16: the barrier absorbs an imbalance
+whose source is measurable in the scheduler's own log, not just inferred from
+kernel timings.
+
+### Why B200 does not see the problem — three reasons, and the first is that its evidence is invalid
+
+**1. B200's "we are balanced" measurement came from the pace-pinned arm.**
+FINDINGS §3 reports a cross-rank `compute` spread of 0.0-0.3 ms at fixed `bs`:
+31.48 / 31.16 / 31.36 at bs=9, 31.45 / 31.60 at bs=10, 31.38 / 31.29 at bs=11,
+31.47 / 31.48 at bs=12. Look along `bs` rather than across ranks: `compute`
+moves **+0.5 % from bs 9 to bs 12**, where MI355X moves **+13.7 % from bs 9 to
+bs 10**. A `compute` that does not respond to batch size at all is the pinning
+signature B200 later established and withdrew — so **that table cannot be used
+as evidence of balance.** It shows the measurement was saturated, not that the
+load was level. B200 has not re-published a cross-rank spread from the serial
+arm; only rank 0 at bs=9.
+
+**2. B200 has no dedicated barrier kernel, so its imbalance has nowhere visible
+to land.** MI355X parks the wait in `prepare`, a separate 16 ms line item that
+is impossible to miss. B200's wait is absorbed inside the fused
+`mega_moe_impl` — and B200's own §2c data shows that kernel with the same
+anti-correlation signature this document used to convict `prepare`: **17.22 ms
+at bs=1 against 13.84 ms at bs=12 on an unchanged 61 calls**, i.e. shorter when
+the rank has more work. That is a wait, by the same test. **So B200 probably has
+the same imbalance and simply never saw it as a line item.**
+
+**3. Even if identical, the same skew costs B200 far less — because its MLA
+decode kernel is cheap.** The skew's cost is (skew) x (per-unit attention cost),
+and the second factor differs by 4-8x:
+
+| | B200 | MI355X |
+|---|---|---|
+| MLA decode µs/call | 18.7 (bs=1) → 47.5 (bs=12) | 117.5 (bs=9) → 330.7 (bs=14) |
+| MLA decode ms/step across its own rank spread | 1.14 → 2.90, **Δ 1.76 ms** | 7.17 → 20.18, **Δ 13.0 ms** |
+| as a fraction of its own step wall | 1.76 / 30.0 = **5.9 %** | 13.0 / 74.0 = **17.6 %** |
+
+Same class of skew, **7.4x the absolute penalty** and 3x the relative one. So
+even a B200 that is exactly as imbalanced as MI355X would pay ~1.8 ms for it and
+would reasonably ignore it.
+
+**The consequence for the target list is that #1 and #2 are not independent.**
+The imbalance penalty is *downstream* of the MLA decode kernel's per-call cost:
+speed that kernel up by k and the imbalance cost falls by roughly k as well.
+That is an argument for doing the kernel first and re-measuring the balance
+question afterwards, rather than running both A/Bs in parallel.
+
+### The two requests to B200, both one command on existing captures
+
+Neither needs a re-run; MI355X cannot run either, since B200's traces and logs
+are not reachable from this node.
+
+```bash
+python3 analysis/kv_skew.py     <your server.log>          # do you have the skew?
+python3 analysis/prepare_wait.py <your serial trace dir>   # is it hiding in mega_moe_impl?
+```
+
+`prepare_wait.py` now carries CUDA patterns (`mega_moe_impl`, `gemm_1d1d_impl`,
+`flash_fwd_splitkv_mla`) so it runs unchanged on B200. **Run it on the serial
+arm, not the multi-stream one** — under pinning every `compute` reads the same
+and the correlation is meaningless, which is precisely how reason 1 above
+happened.
+
+Predictions, stated in advance:
+
+- `kv_skew.py` on B200 shows **`#full token` skew well above its `running-req`
+  skew**, because the router policy and balance method are the same on both
+  nodes and the workload is the same.
+- `prepare_wait.py` on B200's serial arm shows **`b200_moe` anti-correlated**
+  with per-rank `compute` — i.e. `mega_moe_impl` is where B200's imbalance has
+  been sitting all along.
+
+If either prediction fails, the interesting question becomes *why B200 is
+balanced when MI355X is not* on the same workload and router — and the first
+place to look would be whether the two launchers really do pass the same
+`--load-balance-method` and router `--policy`, which has never been verified
+from B200's `sglang_command.txt`, only from script intent.

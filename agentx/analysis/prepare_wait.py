@@ -36,12 +36,19 @@ COMPUTE = ("attn", "gemm", "quant", "norm_rope", "sample")
 # kernels into one µs/call average and the correlation becomes meaningless.
 # Rows where a kernel is absent are excluded from its correlation, not read as 0.
 TRACK = {
+    # ROCm / aiter
     "prepare": "megamoe_prepare_compact",
     "stage1": "megamoe_stage1_compact",
     "stage2": "megamoe_stage2_compact",
     "ep_combine": "ep_combine_intranode",
     "mla_split": "_paged_decode_split_kernel",
     "mla_fused": "_paged_decode_fused_kernel",
+    # CUDA / deep_gemm -- so B200 can run this file unchanged. Its wait has no
+    # dedicated kernel: it is absorbed inside the fused mega_moe_impl, which is
+    # exactly what `b200_moe` below tests.
+    "b200_moe": "mega_moe_impl",
+    "b200_gemm": "gemm_1d1d_impl",
+    "b200_mla": "flash_fwd_splitkv_mla",
 }
 
 

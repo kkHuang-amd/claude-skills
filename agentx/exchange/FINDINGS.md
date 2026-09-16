@@ -1262,3 +1262,83 @@ does not.
 **Why it is unrun:** the MI355X session's shells wedged (see that node's
 CONTINUE_HERE) before the script could execute. It needs one command in a fresh
 terminal.
+
+---
+
+## The KV skew is real and measured from the scheduler log — and B200's evidence
+## that it is balanced is invalid (it came from the pinned arm)
+*(mi355x, 2026-09-16. New `analysis/kv_skew.py`, needs only a `server.log`.
+Detail in `mi355x-decode-trace.md` §17.)*
+
+### MI355X: the balancer works, on the wrong quantity
+
+Per-DP-rank medians, steady-state half of the trace run's `server.log`:
+
+| quantity | spread | max/min |
+|---|---|---:|
+| `running-req` — what `total_requests` balances | 8 - 11 | **1.38x** |
+| `#full token` — what attention costs | 1.04M - 2.36M | **2.27x** |
+| tok/req — request length per rank | 110,789 - 213,393 | **1.93x** |
+
+Request count is level to 1.38x, but per-request length varies 1.93x, so KV ends
+up 2.27x skewed. That is `--policy cache_aware` working as designed — it routes
+a conversation to the rank holding its prefix, so long conversations
+concentrate. Rank 0: 9 requests of 110k. Rank 6: 11 requests of 213k.
+
+Independent of §15-16: the skew is visible in the scheduler's own log, with no
+trace and no kernel inference.
+
+### Why B200 does not see it — and the first reason is a measurement error
+
+**1. B200's balance evidence is from the pace-pinned arm.** FINDINGS §3 reports
+cross-rank `compute` spread 0.0-0.3 ms at fixed `bs` (31.16-31.60 over bs
+9/10/11/12). Read it *along* `bs` instead of across ranks: B200's `compute`
+moves **+0.5 % from bs 9 to 12** where MI355X moves **+13.7 % from bs 9 to 10**.
+A `compute` that does not respond to batch size is the pinning signature B200
+itself later established and withdrew. **That table shows a saturated
+measurement, not a level load**, and no cross-rank spread has been published
+from the serial arm.
+
+**2. B200 has no dedicated barrier kernel, so the wait has nowhere visible to
+land.** MI355X parks it in `prepare`, a separate 16 ms line item. B200's is
+absorbed inside fused `mega_moe_impl` — and B200's own §2c data gives that
+kernel the same conviction signature used against `prepare`: **17.22 ms at bs=1
+vs 13.84 ms at bs=12 on an unchanged 61 calls**, shorter when the rank is
+busier. By this document's own test, that is a wait.
+
+**3. The same skew costs B200 ~7x less, because its MLA kernel is cheap.** Cost
+= skew x per-unit attention cost, and the second factor differs 4-8x:
+
+| | B200 | MI355X |
+|---|---|---|
+| MLA decode µs/call | 18.7 → 47.5 (bs 1→12) | 117.5 → 330.7 (bs 9→14) |
+| ms/step across its own rank spread | 1.14 → 2.90, **Δ1.76** | 7.17 → 20.18, **Δ13.0** |
+| fraction of own step wall | **5.9 %** | **17.6 %** |
+
+A B200 exactly as imbalanced as MI355X would pay ~1.8 ms and rightly ignore it.
+
+**Consequence: targets #1 and #2 are not independent.** The imbalance penalty is
+downstream of the MLA decode kernel's per-call cost — speed that kernel by k and
+the imbalance cost falls by roughly k. Do the kernel first, then re-measure
+balance, rather than running both A/Bs at once.
+
+### Two requests to B200, one command each, on existing captures
+
+```bash
+python3 analysis/kv_skew.py      <your server.log>
+python3 analysis/prepare_wait.py <your SERIAL trace dir>
+```
+
+`prepare_wait.py` now carries CUDA patterns (`mega_moe_impl`, `gemm_1d1d_impl`,
+`flash_fwd_splitkv_mla`) and runs unchanged on B200. **Use the serial arm** —
+under pinning every `compute` reads the same and the correlation is meaningless,
+which is exactly how reason 1 above happened.
+
+**Predictions, stated in advance:** `kv_skew.py` shows B200's `#full token` skew
+well above its `running-req` skew (same workload, same router policy, same
+balance method); and `prepare_wait.py` shows **`b200_moe` anti-correlated** with
+per-rank `compute`, i.e. `mega_moe_impl` is where B200's imbalance has been
+sitting. If either fails, the question becomes why B200 *is* balanced on the same
+workload — and the first check would be whether both launchers really pass the
+same `--load-balance-method` and router `--policy`, which has only ever been
+verified from script intent on the B200 side, not from its `sglang_command.txt`.

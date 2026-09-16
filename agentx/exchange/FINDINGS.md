@@ -232,31 +232,81 @@ The wall gap splits in two before any role is named:
 B200 fits 50.52 ms of kernels into a 30.0 ms wall (hides 20.48); MI355X fits
 74.17 into 74.0 (hides 0.17).
 
-The +23.65 ms of kernel time attributes as:
+The +23.65 ms of kernel time attributes as follows. **B200's roles are
+reclassified first** — a full per-kernel dump (below) showed `other` holding
+2.04 ms of nvjet/cuBLAS GEMM and 0.74 ms of `silu_mul_clamp` MoE activation, so
+those are moved into `gemm` and `moe`:
 
-| bucket | B200 | MI355X | delta | % of gap | % of B200 step | % of MI step | nature |
-|---|---:|---:|---:|---:|---:|---:|---|
-| attn | 7.35 | 15.67 | **+8.32** | **35.2 %** | 14.5 % | 21.1 % | pure execution both sides |
-| gemm+moe | 36.40 | 43.74 | **+7.34** | **31.0 %** | **72.0 %** | **59.0 %** | contains absorbed wait both sides |
-| comm | 0.64 | 6.48 | **+5.84** | **24.7 %** | 1.3 % | 8.7 % | pure |
-| copy+other | 3.85 | 4.95 | +1.10 | 4.6 % | 7.6 % | 6.7 % | classification boundary differs |
-| quant | 1.58 | 2.21 | +0.62 | 2.6 % | 3.1 % | 3.0 % | pure |
-| sample | 0.14 | 0.40 | +0.26 | 1.1 % | 0.3 % | 0.5 % | |
-| norm_rope | 0.56 | 0.72 | +0.16 | 0.7 % | 1.1 % | 1.0 % | |
+| bucket | B200 | MI355X | delta | % of gap | comparable? |
+|---|---:|---:|---:|---:|---|
+| attn | 7.19 | 15.67 | **+8.48** | **36.4 %** | composition unverified on MI355X |
+| comm | 0.67 | 6.48 | +5.81 | 24.9 % | **no — see below** |
+| gemm+moe | 39.63 | 43.74 | **+4.11** | **17.6 %** | contains absorbed wait both sides |
+| copy | 0.06 | 3.97 | +3.91 | 16.8 % | likely real |
+| quant | 1.52 | 2.21 | +0.69 | 3.0 % | yes |
+| sample+norm_rope+other | 1.79 | 2.10 | +0.31 | 1.3 % | yes |
 
-**The largest clean difference is attention, not MoE.** `attn` is 2.13x and is
-verified pure execution on both nodes, so it is the one row where a kernel-level
-comparison is meaningful today. With `comm` (10x, also pure) it is 60 % of the
-kernel gap, and neither needs a barrier-free assumption.
+**`attn` is the largest difference, not MoE** — 2.18x, and `gemm+moe` is only
++4.11 once B200's misclassified GEMM is returned to it, against the +7.34 an
+earlier revision of this block reported.
 
-`gemm+moe` dominates each step's *share* (72 % / 59 %) but its +7.34 is not a
-result — both platforms absorb their group wait into this bucket.
+**The `comm` row is not a comparison and must not be quoted.** B200's `comm`
+bucket contains **no cross-rank collective at all**: it is
+`flash_fwd_mla_combine_kernel` (0.428 ms, attention split-K reduction) and
+`mega_moe_pre_dispatch_kernel` (0.242 ms, MoE dispatch prep). B200's actual
+all-to-all is fused inside `mega_moe_impl`. Whether MI355X's 6.48 ms is a real
+collective is unknown from its published table.
 
-`copy` and `other` are merged deliberately. Split, they read +3.93 and −2.82,
-which is mostly MI355X's new `fillbuffer|fill_padded_rows|fill_compress_tail`
-patterns moving time out of `other` while B200's `other` still holds
-`mhc_*_tilelang` and unclassified `nvjet_*`. Merged, the real difference is
-+1.10.
+**`copy` is probably real, and an earlier revision was wrong to explain it away
+as a classification artefact.** That argument assumed B200's `other` held
+fill-type kernels; the dump shows it holds GEMM and activation instead. MI355X's
+`fillbuffer` / `fill_padded_rows` / `fill_compress_tail` have no B200
+counterpart.
+
+#### B200 per-kernel composition, TARGET_VERIFY full bs=10, TP-4, n=15
+
+Summed kernel 50.87 ms/step. Only the B200 side can be listed here: MI355X's
+raw traces (`mi355x:/shared_nfs/kk/pr35619/trace_c128_pdi24_steady/`) are not
+reachable from B200 — this node's `/shared_nfs` is
+`10.238.19.129:/AI55QU/models`, six model directories and no `kk/`, a different
+export that merely shares the mount point. Every MI355X number in this document
+comes from its published tables in `mi355x-decode-trace.md`, not from
+re-analysis.
+
+- **gemm 21.99** (3 kernels): `deep_gemm::smN_fp8_fp4_gemm_1d1d_impl` 20.17
+  (396 calls), `cublasLt::splitKreduce_kernel` 1.25 (182),
+  `deep_gemm::smN_tfN_hc_prenorm_gemm_impl` 0.57 (122)
+- **moe 14.86** (2): `deep_gemm::smN_fp8_fp4_mega_moe_impl` 14.85 (61),
+  `moe_hash_topk_fused` 0.02
+- **attn 7.19** (16) — the real MLA decode kernel is only a third of it:
+  `flash_fwd_splitkv_mla_fp8` 2.454 (61),
+  `mhc_pre_big_fuse_with_norm_tilelang` 0.948 (122),
+  `deep_gemm::smN_paged_mqa_logits` 0.901 (30),
+  `mhc_post_tilelang` 0.737 (125), `topk_persistent_cluster` 0.357 (30),
+  `topk_main` 0.353 (30), `flash_c4_prefill` 0.298 (60),
+  `fused_norm_rope_indexer_fp4` 0.214 (30), flashinfer `RMSNormKernel` 0.211
+  (62), `flash_cN_prefill` 0.193 (31), `fused_k_norm_rope_flashmla` 0.182 (61),
+  `fused_norm_rope_flashmla` 0.138 (61),
+  `fused_q_indexer_rope_hadamard_fp4_quant` 0.116 (30), + 3 below 0.05
+- **other 3.87** (33) — **2.78 ms of this is mis-bucketed**:
+  `silu_mul_clamp_kernel` 0.740 (61, MoE activation),
+  `nvjet_smN_tss_*` / `nvjet_smN_tst_*` 2.044 total (GEMM),
+  `_router_triton_kernel` 0.379 (58), `write_c4_prefill` 0.153 (60),
+  `at::native::vectorized_elementwise` 0.275, `write_cN_prefill` 0.079 (31),
+  + 22 kernels totalling ~0.19
+- **comm 0.67** (2): listed above, neither is a collective
+- **quant 1.52**: `per_token_group_quant_flat_kernel` 1.191 (335),
+  `fp8_wo_a_group_major_quant_ue8m0` 0.326 (61)
+- **norm_rope 0.56**: `fused_q_norm_rope` 0.305 (61), `deepseek_rope_kernel`
+  0.258 (61)
+- **sample 0.14**: `mask_topk_ids_padded_region` 0.141 (61)
+- **copy 0.06**: one `Memcpy DtoH`; 12 kernels, all ≤0.03
+
+**Request to MI355X: the same per-role kernel listing at bs=10.** Three things
+cannot be settled without it — how much of `attn` 15.67 is attention math
+versus indexer/topk/norm helpers, whether `comm` 6.48 is a genuine collective,
+and where the DSv4 compressed-KV kernels (`flash_c4_prefill` / `write_c4_prefill`
+family) land on ROCm. B200 splits them across `attn` and `other`.
 
 ### 2c. Which B200 kernels absorb wait — measured, not assumed
 

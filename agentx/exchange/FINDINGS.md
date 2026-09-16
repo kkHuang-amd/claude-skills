@@ -203,6 +203,15 @@ group-synchronous step the slowest rank sets the wall, so a 14 ms spread is
 directly 14 ms of wait for everyone else. Critical-path `compute` is 38.9 vs
 31.6 ms, i.e. 1.23x — most of the 1.50x summed-kernel gap.
 
+**Caveat, not yet controlled: each rank sits at its own `bs`**, so batch size is
+confounded with imbalance in that 14 ms. It is not a clean bs effect — MI355X
+goes 9 -> 24.94, 10 -> 28.36, 14 -> 38.91, 16 -> 35.25, 17-20 -> 28.87, i.e.
+non-monotonic, with the largest-batch rank second *lowest* — and B200's
+`compute` is flat across bs 1-12, which argues bs does not drive `compute` at
+all on that node. But "non-monotonic" is not "excluded". To settle it, compare
+ranks at equal `bs` within one MI355X capture, or bucket `compute` by bs the way
+`decode_stats.py` buckets `step_ms`.
+
 ### 4. Candidate B — the "stream overlap is worth 4-5 %" bound does NOT apply here
 
 **This retracts how both docs used that A/B.** B200 fits 50.18 ms of kernels

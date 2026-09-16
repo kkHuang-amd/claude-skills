@@ -29,6 +29,16 @@ node is not on it.)
   sides classify identically — a role pattern that exists on one side only makes
   the comparison invalid.
 
+## ⚠ AMENDED 2026-09-16: the 15.9 ms threshold is retracted
+
+The B200 capture it came from was taken mid-ramp (~61k KV tok/req against a
+steady state of ~152k). See the retraction block in `b200-decode-trace.md`.
+The request below still stands **except** that MI355X must not tune its capture
+to land near 15.9 ms — capture at steady state (per-request `#full token` ÷
+batch ≥ ~130k, pool usage plateaued) and report the number as it falls. Add the
+KV working set of your capture window itself, taken from the same run's
+`server.log`, so both sides can prove the windows match.
+
 ## Current open request (B200 → MI355X, 2026-09-16)
 
 Context: with pdi, accept len, per-request KV working set and cuda-graph status

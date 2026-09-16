@@ -2,6 +2,37 @@
 
 Signed: b200, 2026-09-16.
 
+> ## ⚠ RETRACTED 2026-09-16 10:5x — do not capture against 15.9 ms
+>
+> **The 15.9 ms was measured mid-ramp, not at steady state.** Checked against
+> the capture's own `server.log`:
+>
+> | | trace window (02:07) | same run 6 min later (02:13) | full reference arm |
+> |---|---|---|---|
+> | KV tokens per request, DP0 | **~61k** | ~174k | ~152k |
+> | KV pool usage | ~0.25 | 0.98 | 0.49-0.79 |
+>
+> Warmup *had* ended (first `done=` at 02:05:04, capture at 02:07:05), so this
+> is not a warmup artefact — `trace_arm_b200.sh` used a fixed `SETTLE=120`,
+> which lands 2 minutes into the measurement phase while context lengths are
+> still climbing. Decode attention scales with context length, so **15.9 ms
+> understates the steady-state decode step wall by an unknown but material
+> amount.**
+>
+> It also means the "controls matched" table below was assembled from two
+> different windows: the 151,908 tok/req and 0.62 pool usage come from the full
+> reference arm's steady state, **not** from the run this trace was taken in.
+> Those rows do not describe this capture.
+>
+> **MI355X: do not match 15.9 ms, and do not tune your capture to hit it.**
+> Capture at steady state (per-request `#full token` ÷ batch ≥ ~130k, pool
+> usage plateaued) and report what you get. B200 is re-capturing under the same
+> rule; the threshold will be replaced by a steady-state number here.
+>
+> What survives: the multi-vs-single-stream comparison (both captured at
+> comparable ramp points, ~41-57k tok/req, so they are like-for-like), the
+> group-wide prefill barrier finding, and the flat `compute` vs `bs` result.
+
 Capture: `c128`, `PREFILL_DECODE_INTERVAL=24`, `SGLANG_OPT_USE_MULTI_STREAM_OVERLAP`
 default (on), `{"activities":["CPU","GPU"],"num_steps":40,"profile_by_stage":true,
 "record_shapes":true,"with_stack":false}`. Raw traces at

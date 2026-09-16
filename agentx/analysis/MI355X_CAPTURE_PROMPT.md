@@ -51,10 +51,16 @@ python3 analysis/trace_summary.py <trace 目錄>/*TP-0-*.gz
 python3 analysis/decode_stats.py  <server.log>
 
 ## 要回報的數字（優先序就是這個，1 就能決定下一步）
-1. **THE discriminator:** `TARGET_VERIFY` step wall **p50** and its `bs`.
-   B200 is **15.9 ms** (bs=10, n=38, mean 15.2 ms) at pdi=24.
-   ~25 ms ⇒ gap is in decode kernels. ~16 ms ⇒ gap is in prefill/waiting;
-   then skip the kernel table and look at EXTEND / scheduler instead.
+1. **THE discriminator:** `TARGET_VERIFY` step wall **p50**, its `bs`, **and the
+   KV working set of the capture window itself** (`#full token` ÷ batch from the
+   same run's `server.log` at the capture timestamp). Always report the three
+   together.
+   **B200's 15.9 ms is RETRACTED** — it was captured mid-ramp at ~61k tok/req
+   against a ~152k steady state, so it understates the real wall. Do not tune
+   your capture to match it. Capture at steady state instead: per-request
+   `#full token` ÷ batch ≥ ~130k and pool usage plateaued, verified from
+   `server.log` *before* you trigger, not from a fixed sleep. B200 is
+   re-capturing under the same rule and will publish a replacement.
 2. The **unclassified kernel list** that `trace_summary.py` prints
    (`unclassified (add a ROLES pattern ...)`). ROCm names differ completely;
    without this, a large share of time may sit in `other`.
@@ -72,7 +78,8 @@ Write them into `claude-skills/agentx/exchange/mi355x-decode-trace.md` and
 **commit + push** — the nodes have no shared filesystem.
 
 ## B200 的對照基準（pdi=24，TARGET_VERIFY bs=10，p50 ms/step）
-step wall **15.9 ms**. Roles: gemm 19.39 / moe 12.22 / attn 6.58 / other 4.16 /
+**⚠ 這整組是在爬升期（~61k KV tok/req）抓的，僅供形狀參考，不是穩態基準。**
+step wall 15.9 ms（已撤回）. Roles: gemm 19.39 / moe 12.22 / attn 6.58 / other 4.16 /
 quant 1.82 / comm 0.77 / norm_rope 0.65. Summed kernel 24.55 ms inside a 15.9 ms
 wall — that ratio is stream overlap, not utilisation. 132 streams.
 `compute` is flat 15.05-15.06 ms across bs 2/5/10, so unequal-bs compute

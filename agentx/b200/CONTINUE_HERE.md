@@ -15,9 +15,24 @@ as "get a profiling reference at parity with CI"; that reference exists and the
 work moved on to the cross-platform gap. Read §8 (parity/CI), the A/B sections,
 and `../exchange/b200-decode-trace.md` for the current front.
 
-**Status (2026-09-16 10:32): blocked on MI355X.** `git pull` is current;
-`agentx/exchange/` still has no `mi355x-*.md`. B200 discriminator is TARGET_VERIFY
-p50 **15.9 ms**; without the matching MI355X number the 1.55× cannot be placed.
+**Status (2026-09-16 10:5x): the B200 discriminator is INVALID and must be
+re-captured.** The 15.9 ms TARGET_VERIFY p50 came from a window taken 2 min into
+the measurement phase, when DP0 held **~61k KV tokens/request** against ~174k
+later in the same run and ~152k in the full reference arm (pool usage 0.25 vs
+0.49-0.79). Warmup had ended (first `done=` 02:05:04, capture 02:07:05) — the
+cause is `SETTLE=120` being a timer rather than a condition on context length.
+Decode attention scales with context, so 15.9 ms understates the steady-state
+step wall. The "matched controls" table in `exchange/b200-decode-trace.md` also
+mixed windows: its 151,908 tok/req and 0.62 usage are the reference arm's
+steady state, not the traced run's.
+
+Retraction pushed to `exchange/` so MI355X does not capture against it.
+`trace_arm_b200.sh` now gates on per-request KV ≥ `MIN_KV_PER_REQ` (130k,
+`KV_GATE_TIMEOUT` 900 s) instead of `SETTLE`; replaying the gate over the old
+log rejects 02:07 (68,835 tok/req) and passes 02:13 (138,066).
+
+Unaffected: multi-vs-single-stream (both captured at ~41-57k tok/req, so
+like-for-like), the group-wide prefill barrier, and flat `compute` vs `bs`.
 
 Settled so far:
 
@@ -42,11 +57,23 @@ decode steps. So if MI355X's pure decode step wall is ~25 ms the gap is in
 kernels; if it is ~16 ms the gap is in the prefill/waiting portion and the
 kernel breakdown is the wrong place to look. **These have different fixes.**
 
-**Next action:** wait for `agentx/exchange/mi355x-decode-trace.md`. On pull,
-compare TARGET_VERIFY step wall p50 to B200's 15.9 ms first — do not open the
-role table until that number exists. Capture prompt refreshed 2026-09-16 10:32
-so MI355X is asked for the discriminator, not a kernel dump. GPUs on this node
-are idle (0 MiB). Do not launch another B200 arm while that number is missing.
+**Next action:** re-capture the B200 pdi=24 trace at steady state with the KV
+gate, and replace 15.9 ms in `exchange/b200-decode-trace.md`. GPUs are idle
+(0 MiB). Run `free_gpus.sh` first; ~40 min per trace run.
+
+```bash
+cd /workspace/agentx && ./free_gpus.sh && \
+  PREFILL_DECODE_INTERVAL=24 NUM_STEPS=40 CONC=128 \
+  ./trace_arm_b200.sh pdi24trace_steady > logs/pdi24trace_steady.log 2>&1 &
+```
+
+Pass criteria: `trigger.log` shows `kv gate: >=130000 tok/req`, and the capture
+window's KV working set from `server.log` is within ~15 % of the reference arm's
+~152k. Report step wall p50 **with** the KV working set of its own window, every
+time — that pairing is what was missing.
+
+Then wait for `agentx/exchange/mi355x-decode-trace.md` and compare only
+steady-state to steady-state.
 
 ### The CI-parity reference arm, for the record
 

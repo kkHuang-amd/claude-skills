@@ -1,122 +1,86 @@
-# B200 decode trace at pdi=24 — reference for the MI355X comparison
+# B200 decode trace at pdi=24, STEADY STATE — reference for the MI355X comparison
 
-Signed: b200, 2026-09-16.
+Signed: b200, 2026-09-16 (replaces the mid-ramp capture of the same morning).
 
-> ## ⚠ RETRACTED 2026-09-16 10:5x — do not capture against 15.9 ms
->
-> **The 15.9 ms was measured mid-ramp, not at steady state.** Checked against
-> the capture's own `server.log`:
->
-> | | trace window (02:07) | same run 6 min later (02:13) | full reference arm |
-> |---|---|---|---|
-> | KV tokens per request, DP0 | **~61k** | ~174k | ~152k |
-> | KV pool usage | ~0.25 | 0.98 | 0.49-0.79 |
->
-> Warmup *had* ended (first `done=` at 02:05:04, capture at 02:07:05), so this
-> is not a warmup artefact — `trace_arm_b200.sh` used a fixed `SETTLE=120`,
-> which lands 2 minutes into the measurement phase while context lengths are
-> still climbing. Decode attention scales with context length, so **15.9 ms
-> understates the steady-state decode step wall by an unknown but material
-> amount.**
->
-> It also means the "controls matched" table below was assembled from two
-> different windows: the 151,908 tok/req and 0.62 pool usage come from the full
-> reference arm's steady state, **not** from the run this trace was taken in.
-> Those rows do not describe this capture.
->
-> **MI355X: do not match 15.9 ms, and do not tune your capture to hit it.**
-> Capture at steady state (per-request `#full token` ÷ batch ≥ ~130k, pool
-> usage plateaued) and report what you get. B200 is re-capturing under the same
-> rule; the threshold will be replaced by a steady-state number here.
->
-> What survives: the multi-vs-single-stream comparison (both captured at
-> comparable ramp points, ~41-57k tok/req, so they are like-for-like), the
-> group-wide prefill barrier finding, and the flat `compute` vs `bs` result.
-
-Capture: `c128`, `PREFILL_DECODE_INTERVAL=24`, `SGLANG_OPT_USE_MULTI_STREAM_OVERLAP`
-default (on), `{"activities":["CPU","GPU"],"num_steps":40,"profile_by_stage":true,
+Capture: `c128`, `PREFILL_DECODE_INTERVAL=24`, multi-stream default (on),
+`{"activities":["CPU","GPU"],"num_steps":40,"profile_by_stage":true,
 "record_shapes":true,"with_stack":false}`. Raw traces at
-`b200:/workspace/agentx/traces/b200-tp8-ep8-dpatrue-c128-pdi24trace/` (8 files,
-one per DP rank). Match these capture settings or profiler perturbation differs.
+`b200:/workspace/agentx/traces/b200-tp8-ep8-dpatrue-c128-pdi24trace_steady/`
+(7 ranks; TP-1 never flushed).
 
-## THE number to compare first: pure decode step wall
+Analysed with `trace_common.verify_classes()` as fixed by MI355X, so the draft
+and full-model verify steps are separated. Every number below is the **full**
+class unless it says draft.
 
-**`TARGET_VERIFY` step wall p50 = 15.9 ms** (bs=10, n=38, mean 15.2 ms).
+## Provenance, and what was wrong before
 
-Against the same run's log-implied step of ~72 ms at batch 9, this means **only
-~22 % of wall time is spent inside decode steps**. The 1.54-1.57× we measured
-from the logs is therefore a claim about *everything* — decode kernels plus the
-prefill barrier and idle time around them.
+| | |
+|---|---|
+| trigger | gated on per-request KV ≥ 130k, not on a timer; fired at 136,640 tok/req |
+| capture window KV | **165,220 tok/req**, pool usage 0.58, log-implied step 79.2 ms |
+| MI355X's window | 167,538 tok/req — **matched to 1.4 %** |
 
-So: if MI355X's pure decode step wall is ~25 ms (≈1.55 × 15.9), the gap is in
-decode kernels. If it comes out near 16 ms, the gap lives in the prefill/waiting
-portion and the kernel breakdown below is not where to look. **This single
-number decides which half of the problem to work on.**
+The previous capture fired on a fixed `SETTLE=120` and caught ~61k tok/req.
+Its headline, **15.9 ms, was wrong twice over**: mid-ramp, and class-mixed by
+the `trace_summary.py` bug MI355X found. Corrected, at steady state and split
+by class, the same measurement is **30.0 ms**. Both errors pushed the same way,
+so the earlier "only ~22 % of B200's wall is inside decode steps" was too low.
 
-## Per-role, `TARGET_VERIFY bs=10`, rank TP-0
+## THE number: pure decode step wall
 
-Report **p50**, not the mean — the distribution is bimodal (most steps sit near
-max, a minority are near-empty, so the mean is dragged down).
+**Full-model verify p50 = 29.8-30.2 ms. DSPARK draft = 2.0 ms.
+~32 ms per `run_batch`.**
+
+The wall is flat to ±0.4 % across every rank and every `bs` from 1 to 12, which
+is what group-synchronous steps must look like:
+
+| rank | bs | n | wall p50 | compute p50 | barrier p50 | attn | gemm | moe | comm |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| TP-0 | 11 | 27 | 29.8 | 31.38 | 14.58 | 7.92 | 21.11 | 13.86 | 0.72 |
+| TP-0 | 12 | 11 | 30.0 | 31.47 | 14.77 | 7.95 | 21.17 | 14.05 | 0.72 |
+| TP-2 | 1 | 38 | 29.9 | 31.03 | 17.86 | 4.54 | 24.26 | 17.23 | 0.63 |
+| TP-3 | 8 | 40 | 29.9 | 31.57 | 14.79 | 8.03 | 21.16 | 14.23 | 0.56 |
+| TP-4 | 10 | 15 | 29.9 | 31.45 | 15.53 | 7.19 | 21.99 | 14.86 | 0.67 |
+| TP-5 | 4 | 24 | 29.9 | 31.09 | 16.46 | 5.86 | 23.00 | 15.79 | 0.67 |
+| TP-6 | 9 | 38 | 29.9 | 31.16 | 14.96 | 7.13 | 21.76 | 14.40 | 0.56 |
+| TP-7 | 9 | 28 | 29.8 | 31.36 | 14.85 | 7.41 | 21.68 | 14.29 | 0.56 |
+
+`compute` is **31.0-31.6 ms across bs 1 to 12** — flat, confirming the earlier
+finding at a valid window. Within it `attn` rises with bs (4.54 → 7.95) and
+`gemm` falls (24.26 → 21.17), so quote the split with its bs.
+
+`compute + barrier` is ~46-49 ms and near-constant per rank while `compute`
+alone varies — the group-sync signature MI355X describes, on this node too.
+
+## Per-role, full verify, bs=12, TP-0, n=11
 
 | role | p50 ms/step | mean | min | max |
-|---|---|---|---|---|
-| gemm | **19.39** | 10.22 | 0.68 | 20.12 |
-| moe | **12.22** | 6.50 | 0.40 | 13.19 |
-| attn | **6.58** | 3.42 | 0.20 | 6.74 |
-| other | 4.16 | 2.55 | 0.88 | 4.30 |
-| quant | 1.82 | 1.01 | 0.16 | 1.92 |
-| comm | 0.77 | 0.41 | 0.04 | 0.78 |
-| norm_rope | 0.65 | 0.34 | 0.03 | 0.66 |
+|---|---:|---:|---:|---:|
+| gemm | **21.22** | 21.17 | 20.89 | 21.32 |
+| moe | **13.70** | 14.05 | 13.39 | 15.69 |
+| attn | **7.95** | 7.95 | 7.85 | 8.06 |
+| other | 3.86 | 3.87 | 3.81 | 3.96 |
+| quant | 1.66 | 1.66 | 1.63 | 1.69 |
+| comm | 0.72 | 0.72 | 0.71 | 0.73 |
+| norm_rope | 0.57 | 0.57 | 0.57 | 0.58 |
+| sample | 0.12 | 0.12 | 0.12 | 0.12 |
+| copy | 0.02 | 0.07 | 0.02 | 0.54 |
+| summed kernel | 50.18 | | | |
+| step wall | **30.0** | 30.9 | | |
 
-Summed kernel time 24.55 ms/step inside a 15.9 ms wall step — that ratio is
-stream overlap, **not** a utilisation figure. Do not divide it by wall time and
-call it busy.
+Spreads are tight once the classes are split, exactly as MI355X predicted —
+the "bimodal, quote p50" advice in the old docs was describing the bug.
 
-## Batch mismatch between the two traces is not a problem — measured, not argued
+**MoE calls/step: 61 in the full step, 3 in the draft.** Identical to MI355X.
+The normalisation question is closed on both sides.
 
-DP-attention ranks each carry their own batch, so one capture already spans
-several bs values. On this node:
+Unclassified, for whoever extends ROLES: `sglang::silu_mul_clamp_kernel`
+0.75 ms/step (61 calls, one per layer — this is MoE activation, arguably `moe`)
+and the `nvjet_smN_tss_*` cuBLAS-family kernels 0.71 + 0.43 ms.
 
-| rank | bs | step ms | compute | barrier | attn | gemm |
-|---|---|---|---|---|---|---|
-| 0 | 10 | 15.21 | **15.06** | 6.90 | 3.42 | 10.22 |
-| 5 | 5 | 15.04 | **15.06** | 7.60 | 2.76 | 11.00 |
-| 2 | 2 | 15.14 | **15.05** | 7.74 | 2.76 | 11.07 |
+## EXTEND, for the concurrency control
 
-`compute` (attn+gemm+quant+norm_rope+sample) is **15.05-15.06 ms across bs 2, 5
-and 10** — flat. So comparing `compute` across platforms at unequal bs is valid
-in this range; within it the mix shifts slightly (attn rises with bs, gemm and
-barrier fall), so quote the per-role split together with its bs.
-
-This is the kernel-level confirmation of the flat `step_time(batch)` curves both
-nodes measured from the scheduler logs.
-
-## Controls already matched between the platforms
-
-| control | B200 | MI355X | state |
-|---|---|---|---|
-| `prefill_decode_interval` | 24 | 24 | matched |
-| `accept len` | 3.770 | 3.78 | matched, 0.3 % |
-| per-request KV working set | 151,908 tok | ~151,000 tok | matched, 3 % |
-| cuda graph replay | 100 % | 100 % | launch overhead excluded |
-| KV pool usage fraction | 0.62 | 0.15 | **do not match this** — pools differ 5.4× in capacity (2,217,472 vs ~12,075,000 tokens), so the fractions are not comparable by construction; the absolute working set above is |
-
-Still unquantified: `mem-frac` (B200 0.88 vs MI355X 0.85) and the container
-image versions.
-
-## Two B200 results that bound other explanations
-
-- **Multi-stream overlap is worth ~4-5 % of step time** (~3 % throughput, ~6 %
-  ITL p90), measured by running the arm with
-  `SGLANG_OPT_USE_MULTI_STREAM_OVERLAP=0`. Disabling it left the summed kernel
-  time unchanged (compute 15.1 ms either way) and only lengthened the wall — so
-  overlap fills gaps rather than inflating individual kernels through SM
-  contention, and **per-kernel times are comparable across the platforms without
-  normalising streams away**. B200 runs 132 streams inside verify steps,
-  4 with the flag off.
-- **The prefill barrier is group-wide.** In an `EXTEND` step, ranks carrying
-  541 to 6144 tokens (11×) all took ~440 ms, because DP steps are
-  group-synchronous — one rank's chunked prefill stalls all eight. That is the
-  mechanism behind `prefill_decode_interval`: observed prefill cost
-  P ≈ 440-450 ms, and P × (1/10 − 1/24) = 26.2 ms matches the 26-28 ms per-step
-  offset measured between pdi=10 and pdi=24.
+Every rank carries 1-2 `EXTEND` steps in the window, **~750 ms each at
+~6144 tokens** (TP-3 shows `IDLE bs=0` for 806 ms instead — the same stall seen
+from the other side). Prefill is a separate group-synchronous step here, not
+something the 30 ms verify steps are waiting inside.

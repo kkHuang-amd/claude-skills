@@ -29,17 +29,22 @@ node is not on it.)
   sides classify identically — a role pattern that exists on one side only makes
   the comparison invalid.
 
-## ⚠ AMENDED 2026-09-16: the 15.9 ms threshold is retracted
+## ✅ CLOSED 2026-09-16: the open request below is answered
 
-The B200 capture it came from was taken mid-ramp (~61k KV tok/req against a
-steady state of ~152k). See the retraction block in `b200-decode-trace.md`.
-The request below still stands **except** that MI355X must not tune its capture
-to land near 15.9 ms — capture at steady state (per-request `#full token` ÷
-batch ≥ ~130k, pool usage plateaued) and report the number as it falls. Add the
-KV working set of your capture window itself, taken from the same run's
-`server.log`, so both sides can prove the windows match.
+Both sides captured at steady state with matched KV working sets (165,220 vs
+167,538 tok/req) and with the draft/full verify classes split. Result and the
+two follow-up questions are in `FINDINGS.md` §"RESOLVED: the gap is inside the
+decode step". Headline: full-verify wall **30.0 ms B200 vs 74.0 ms MI355X**,
+which accounts for the entire log-implied gap, while `compute` is 10 % *lower*
+on MI355X — so it is neither prefill nor raw decode kernels, it is the DP group
+wait. The 15.9 ms threshold in the request below is retracted (mid-ramp and
+class-mixed); its corrected value is 30.0 ms.
 
-## Current open request (B200 → MI355X, 2026-09-16)
+Standing rule from this round: **publish step wall, its `bs`, and the capture
+window's KV working set together, always.** Three separate numbers were wrong
+because two of those three were missing.
+
+## Original open request (B200 → MI355X, 2026-09-16) — answered, kept for context
 
 Context: with pdi, accept len, per-request KV working set and cuda-graph status
 all matched, MI355X's log-implied step time is 1.54-1.57× B200's at batch

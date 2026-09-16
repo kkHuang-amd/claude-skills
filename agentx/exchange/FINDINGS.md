@@ -150,3 +150,82 @@ schedulers alive, VRAM still allocated. Last server activity is
 collective and the NCCL watchdog kills the process 600 s later with
 `c10::DistBackendError`. Nothing reaches launcher stdout. Judge liveness only by
 `returned=`/`done=` moving. A straight retry cleared it.
+
+---
+
+## RESOLVED: the gap is inside the decode step, and it is not compute
+*(b200, 2026-09-16, against mi355x's steady-state capture the same day)*
+
+Both nodes now have a steady-state, class-split capture at pdi=24 with matched
+KV working sets (**B200 165,220 tok/req vs MI355X 167,538, 1.4 % apart**). This
+is the first genuinely controlled comparison; every earlier one mismatched the
+ramp position, the step class, or both.
+
+| per full-model verify step | B200 (bs=12) | MI355X (bs=10) | ratio |
+|---|---:|---:|---:|
+| **step wall p50** | **30.0 ms** | **74.0 ms** | **2.47x** |
+| draft step wall | 2.0 | 4.0 | 2.0x |
+| summed kernel | 50.18 | 75.24 | 1.50x |
+| `compute` (attn+gemm+quant+norm_rope+sample) | 31.47 | 28.37 | **0.90x** |
+| `barrier` (moe+comm) | 14.77 | 40.85 | 2.77x |
+| summed kernel / wall (overlap) | **1.67x** | **1.00x** | |
+
+### 1. The discriminator is answered — and it inverts the earlier reading
+
+| | B200 | MI355X | ratio |
+|---|---:|---:|---:|
+| log-implied step (scheduler) | 79.2 ms | 121.76 ms | 1.54x |
+| decode step (full + draft) | 32 ms | 78 ms | **2.44x** |
+| remainder (prefill, gaps) | 47.2 ms | 43.8 ms | **0.93x** |
+
+The decode step accounts for **all** of the 42.6 ms log-implied gap — 46 ms of
+it — while the portion outside the decode step is slightly *better* on MI355X.
+**The prefill barrier is not where the gap lives.** The old "only 22 % of B200's
+wall is inside decode steps" pointed the other way and was an artefact of the
+retracted 15.9 ms.
+
+### 2. But it is not "decode kernels are slower" either
+
+`compute` is **28.37 ms on MI355X against 31.47 ms on B200** — MI355X is 10 %
+*faster* on the barrier-free kernels, at a smaller bs. The entire decode-step
+gap sits in `barrier`, which on both nodes absorbs the DP group wait inside the
+fused MoE all-to-all (`compute + barrier` is near-constant per rank while
+`compute` alone varies: ~46-49 ms on B200, ~69-75 ms on MI355X).
+
+So the question has moved from "kernels or prefill" to **"why does MI355X's
+group wait cost 2.8x B200's"**, with two measured candidates below.
+
+### 3. Candidate A — MI355X's DP load imbalance is much larger
+
+Spread of `compute` across ranks in one capture: B200 **31.0-31.6 ms**
+(0.6 ms, flat from bs=1 to bs=12), MI355X **24.9-38.9 ms** (14 ms). In a
+group-synchronous step the slowest rank sets the wall, so a 14 ms spread is
+directly 14 ms of wait for everyone else. Critical-path `compute` is 38.9 vs
+31.6 ms, i.e. 1.23x — most of the 1.50x summed-kernel gap.
+
+### 4. Candidate B — the "stream overlap is worth 4-5 %" bound does NOT apply here
+
+**This retracts how both docs used that A/B.** B200 fits 50.18 ms of kernels
+into a 30.0 ms wall (**1.67x**); MI355X fits 75.24 into 74.0 (**1.00x**). The
+B200 flag A/B that measured 4-5 % moved the ratio only **1.49x -> 1.33x** (132
+streams -> 4) — it never reached 1.00x, so it bounds the cost of *fewer*
+streams, not of *no overlap at all*. MI355X sits outside the range that
+experiment explored, and citing 4-5 % to dismiss overlap is unsupported.
+
+The wall gap decomposes cleanly into the two candidates:
+**1.50x (more kernel time) x 1.67x (less overlap) = 2.50x, against 2.47x
+measured.**
+
+### 5. What each side should do next
+
+- **MI355X:** report per-rank `compute` spread against the arm's
+  `running-req/rank` distribution — is the 14 ms spread batch imbalance
+  (fixable by admission/routing) or per-rank expert imbalance (EPLB)? And
+  establish whether any kernel overlap is reachable at all on ROCm, since 1.00x
+  is the single largest multiplier in the table.
+- **B200:** batches are not matched (B200 bs 1-12, MI355X 9-20; MI355X
+  `running-req/rank` p50=12). Re-capture at a matched batch before treating the
+  0.90x `compute` ratio as final.
+- **Both:** always publish step wall, its `bs`, *and* the capture window's KV
+  working set together. Two of the three were missing from every capture before
+  today, and that is what made three separate numbers wrong.

@@ -15,24 +15,31 @@ as "get a profiling reference at parity with CI"; that reference exists and the
 work moved on to the cross-platform gap. Read §8 (parity/CI), the A/B sections,
 and `../exchange/b200-decode-trace.md` for the current front.
 
-**Status (2026-09-16 10:5x): the B200 discriminator is INVALID and must be
-re-captured.** The 15.9 ms TARGET_VERIFY p50 came from a window taken 2 min into
-the measurement phase, when DP0 held **~61k KV tokens/request** against ~174k
-later in the same run and ~152k in the full reference arm (pool usage 0.25 vs
-0.49-0.79). Warmup had ended (first `done=` 02:05:04, capture 02:07:05) — the
-cause is `SETTLE=120` being a timer rather than a condition on context length.
-Decode attention scales with context, so 15.9 ms understates the steady-state
-step wall. The "matched controls" table in `exchange/b200-decode-trace.md` also
-mixed windows: its 151,908 tok/req and 0.62 usage are the reference arm's
-steady state, not the traced run's.
+**Status (2026-09-16 11:4x): the cross-platform question is ANSWERED. The gap is
+inside the decode step, and it is the DP group wait — not prefill, not raw
+decode kernels.** Full detail and the two follow-ups are in
+`exchange/FINDINGS.md` §"RESOLVED"; B200's numbers in
+`exchange/b200-decode-trace.md`. Headline, at matched steady-state KV
+(165,220 vs 167,538 tok/req) with draft/full verify split:
 
-Retraction pushed to `exchange/` so MI355X does not capture against it.
-`trace_arm_b200.sh` now gates on per-request KV ≥ `MIN_KV_PER_REQ` (130k,
-`KV_GATE_TIMEOUT` 900 s) instead of `SETTLE`; replaying the gate over the old
-log rejects 02:07 (68,835 tok/req) and passes 02:13 (138,066).
+- full-verify wall **30.0 ms B200 vs 74.0 ms MI355X** (2.47x), which accounts
+  for the whole log-implied gap; the portion *outside* the decode step is
+  0.93x, i.e. slightly better on MI355X.
+- `compute` **31.47 vs 28.37 ms** — MI355X is 10 % faster on barrier-free
+  kernels. The gap is entirely `barrier` (moe+comm) 14.77 vs 40.85.
+- decomposes as 1.50x more kernel time x 1.67x less overlap = 2.50x vs 2.47x
+  measured.
 
-Unaffected: multi-vs-single-stream (both captured at ~41-57k tok/req, so
-like-for-like), the group-wide prefill barrier, and flat `compute` vs `bs`.
+Three B200 numbers were retracted getting here: 15.9 ms (mid-ramp *and*
+class-mixed), the 151,908 tok/req "matched control" (came from a different run's
+steady state), and the use of "overlap is worth 4-5 %" to dismiss stream
+overlap (that A/B only moved 1.49x->1.33x and never reached MI355X's 1.00x).
+
+Two fixes are in place: `trace_arm_b200.sh` gates on per-request KV ≥
+`MIN_KV_PER_REQ` (130k, `KV_GATE_TIMEOUT` 900 s) instead of `SETTLE`, and
+`trace_common.verify_classes()` (authored by MI355X) splits the DSPARK draft
+step from the full-model verify step — spec decoding emits two `TARGET_VERIFY`
+annotations per `run_batch` with the same `bs`, and the old tool averaged them.
 
 Settled so far:
 
@@ -57,23 +64,30 @@ decode steps. So if MI355X's pure decode step wall is ~25 ms the gap is in
 kernels; if it is ~16 ms the gap is in the prefill/waiting portion and the
 kernel breakdown is the wrong place to look. **These have different fixes.**
 
-**Next action:** re-capture the B200 pdi=24 trace at steady state with the KV
-gate, and replace 15.9 ms in `exchange/b200-decode-trace.md`. GPUs are idle
-(0 MiB). Run `free_gpus.sh` first; ~40 min per trace run.
+**Next action (B200 side):** the batches are not matched — B200 captured bs 1-12
+against MI355X's 9-20 (`running-req/rank` p50=12 there). Re-capture at a matched
+batch before treating the 0.90x `compute` ratio as final, since that ratio is
+the reason we stopped looking at kernels. GPUs idle (0 MiB); ~40 min per run.
 
 ```bash
 cd /workspace/agentx && ./free_gpus.sh && \
   PREFILL_DECODE_INTERVAL=24 NUM_STEPS=40 CONC=128 \
-  ./trace_arm_b200.sh pdi24trace_steady > logs/pdi24trace_steady.log 2>&1 &
+  ./trace_arm_b200.sh pdi24trace_steady2 > logs/pdi24trace_steady2.outer.log 2>&1 &
 ```
 
-Pass criteria: `trigger.log` shows `kv gate: >=130000 tok/req`, and the capture
-window's KV working set from `server.log` is within ~15 % of the reference arm's
-~152k. Report step wall p50 **with** the KV working set of its own window, every
-time — that pairing is what was missing.
+Pass criteria: `trigger.log` shows `kv gate: >=130000 tok/req`, and the window's
+KV working set from `server.log` is within ~15 % of 167k. Always report step
+wall, its `bs`, and the window's KV working set together.
 
-Then wait for `agentx/exchange/mi355x-decode-trace.md` and compare only
-steady-state to steady-state.
+The larger open question is MI355X's: its per-rank `compute` spread is 14 ms
+(24.9-38.9) against B200's 0.6 ms (31.0-31.6), and in a group-synchronous step
+that spread is pure wait for every other rank. Whether that is batch imbalance
+or expert imbalance is the thing most likely to move the number.
+
+Analysis note: `trace_ranks.py` still mixes the draft and full verify classes.
+The per-rank table in `exchange/b200-decode-trace.md` was built by running
+`trace_summary.py` per rank file instead; do that until `trace_ranks.py` is
+ported to `verify_classes()`.
 
 ### The CI-parity reference arm, for the record
 

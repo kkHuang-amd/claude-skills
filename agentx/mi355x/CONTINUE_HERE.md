@@ -21,24 +21,39 @@ is **not** pace-pinned (only `moe` absorbs wait, where B200 has both `moe` and
 and `record_shapes` **cannot** give B200's proposed bandwidth estimator here
 (all 34,486 dim-carrying events are `aten::*` cpu_ops; zero attn/MoE ops).
 
-**Uncommitted:** `analysis/trace_ranks.py` (draft/full split + EXTEND-overlap
-table), new `analysis/kernel_dump.py`, `exchange/FINDINGS.md`,
-`exchange/mi355x-decode-trace.md` §10-12, this file. **Push so B200 sees it.**
+**Also found, and it corrects both nodes' tables:** every per-role number ever
+published on either side is a **sum** of kernel durations, which double-counts
+concurrency. B200's 50.86 ms sum sits inside a 30.0 ms wall, so its elapsed GPU
+work is ≤30 ms and its per-role sums were being subtracted from MI355X's
+*elapsed* ones. New `analysis/busy_ms.py` sweeps the intervals: **MI355X is
+sum = union = wall = 1.000x with 0.01 ms idle — perfectly serial, no overlap,
+no gaps** — so this node needs no correction and B200 does. In elapsed terms
+the gap is the wall ratio, ≥2.47x. The two per-kernel findings survive (per-call
+at matched call counts), and 4.06x is a **floor** since B200's own §2c calls
+`flash_fwd_splitkv_mla_fp8` pure and contention can only have inflated it.
 
-**Latest commits on origin:** `3bcc032` (B200). Mine are not pushed yet.
+**Pushed:** `be97070` (§10-12 + `kernel_dump.py` + `trace_ranks.py`) and the
+`busy_ms.py` / §13 commit after it.
+
+**Latest commits on origin:** B200 `3bcc032`, then mine.
 
 **Next:**
 
-1. **Commit and push.** This node has no other channel to B200.
-2. **Own the MLA decode kernel.** It is the single narrowest target on either
+1. **Own the MLA decode kernel.** It is the single narrowest target on either
    node: 163.5 µs/call against B200's 40.2, same call count, same layer count.
    Start at aiter's `_paged_decode_split_kernel` / `_paged_decode_reduce_kernel`
    and the KV layout they read. This does not need B200.
-3. **`megamoe_prepare_compact`** — decide whether 16.24 ms is real prepare work
+2. **`megamoe_prepare_compact`** — decide whether 16.24 ms is real prepare work
    or the fused all-to-all wait. A TP-only run separates them.
+3. **No kernel overlap at all here (1.000x, 0.01 ms idle)** is now the largest
+   single multiplier in the comparison and is a pure MI355X question: is any
+   concurrency reachable on ROCm for this step, or is the step genuinely a
+   dependency chain? Nothing to wait for B200 on.
 4. **TP-only / single-DP-rank capture** is now the cheapest uncontaminated
    compute number for either node, since `record_shapes` is a dead end here.
-5. **Not blocking any more:** B200 has published steady-state class-split
+5. **Waiting on B200 for one thing only:** their `busy_ms.py` `credited` column.
+   Until it lands, no per-role delta is quotable in either direction.
+6. **Not blocking any more:** B200 has published steady-state class-split
    numbers, so the comparison is live. The `compute` *ratio* stays withdrawn —
    B200's side is pace-pinned, mine is not, and one usable side is not a
    comparison. Quote step wall (30.0 vs 74.0, 2.47x) or the kernel pairs above.
@@ -49,6 +64,7 @@ cd /workspace/claude-skills/agentx
 python3 analysis/trace_summary.py /shared_nfs/kk/pr35619/trace_c128_pdi24_steady/*TP-7-*.gz
 python3 analysis/trace_ranks.py   /shared_nfs/kk/pr35619/trace_c128_pdi24_steady
 python3 analysis/kernel_dump.py   /shared_nfs/kk/pr35619/trace_c128_pdi24_steady
+python3 analysis/busy_ms.py       /shared_nfs/kk/pr35619/trace_c128_pdi24_steady 10
 python3 analysis/decode_stats.py  /workspace/results/megamoe-eplb-c128-b200aligned/server.log
 ```
 

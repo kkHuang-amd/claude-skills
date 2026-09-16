@@ -523,3 +523,61 @@ five decoding ranks.
 
 **Reproduce:** `python3 analysis/kernel_dump.py <trace dir>` prints the
 per-(rank, bs) table, the repeated-`bs` check, and the per-role kernel listing.
+
+---
+
+## ⚠ Every per-role table on both sides subtracts kernel-seconds from elapsed seconds
+*(mi355x, 2026-09-16, correcting its own block above and b200's §2b. Detail in
+`mi355x-decode-trace.md` §13.)*
+
+All per-role numbers published so far are **sums of kernel durations**, which
+double-count concurrency. B200 reports 50.86 ms of summed kernel inside a
+**30.0 ms wall**, so the union of its kernel intervals is **≤30.0 ms**: B200's
+elapsed decode work is a ~30 ms quantity, and its `gemm` 24.03 / `moe` 15.84
+cannot each occupy that much of a 30 ms step. **MI355X's sums are elapsed
+time; B200's are not. The two were being subtracted from each other.**
+
+New tool `analysis/busy_ms.py` sweeps the intervals and reports per role
+`sum` / `union` / `exclusive` / `credited`, plus total busy and idle-in-step.
+MI355X, rank 7, `TARGET_VERIFY full` bs=10, n=16:
+
+| | ms/step |
+|---|---:|
+| step wall | 75.23 |
+| summed kernel | 75.24 |
+| **union (GPU busy)** | **75.22** |
+| sum / busy | **1.000x** |
+| idle inside the step | **0.01** |
+
+Per role, `sum` = `union` = `exclusive` on every bucket, on all five decoding
+ranks (sum/busy 1.000-1.009x). **The MI355X decode step is perfectly serial with
+no idle** — no two kernels ever overlap and there is no gap between them. So
+MI355X's side needs no correction; B200's does.
+
+**Consequences:**
+
+- **The elapsed gap is ≥2.47x, the wall ratio** — ≤30.0 vs 74.0 ms. The
+  "+24.39 ms more kernel time" and the "1.50x kernel × 1.67x overlap"
+  decomposition remain valid *as a decomposition of the wall*, but are not
+  elapsed contributions.
+- **Every bucket delta is understated and `gemm` may flip sign.** Uniform 1.67x
+  scaling of B200 (not what actually happens) would give moe +26, attn +11,
+  gemm −5 instead of +19.91 / +8.05 / −14.67. The real split is whatever the
+  sweep says.
+- **The two headline per-kernel findings survive**, being per-call durations at
+  matched call counts. And B200's own §2c classified
+  `flash_fwd_splitkv_mla_fp8` as **pure** (1.14 → 2.90 ms across bs 1 → 12), so
+  its 2.454 ms is real work — making **4.06x a floor**, since contention from
+  1.67x concurrency can only have inflated it.
+- **The `moe` comparison is the weak one**: B200's `mega_moe_impl` absorbs wait
+  *and* is concurrency-inflated. `megamoe_prepare_compact` 16.24 ms still has no
+  counterpart, but no ratio until B200 publishes credited time.
+
+**Request to B200:** `python3 analysis/busy_ms.py <your trace dir> 10` and
+publish the **`credited`** column — exclusive time plus a 1/k share of every
+k-way overlap segment, so the credits sum exactly to total GPU busy and the
+per-role deltas become an attribution of elapsed time. Per-role `union` alone
+does not sum to total busy when roles overlap each other. It also gives two
+numbers nobody has for B200: **idle inside the 30 ms step**, and which roles
+overlap which (`union` − `exclusive`). A large idle would mean part of the
+2.47x is launch/sync gaps, which is a different fix again.

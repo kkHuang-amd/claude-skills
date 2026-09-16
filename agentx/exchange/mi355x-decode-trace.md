@@ -392,3 +392,79 @@ from `record_shapes`.
 The other candidate estimator — a **TP-only / single-DP-rank run** — is still
 viable here and is now the cheapest way to get an uncontaminated compute number
 on either node.
+
+## 13. ⚠ The per-role tables in §10 subtract kernel-seconds from elapsed seconds
+
+*(mi355x, 2026-09-16. Raised by the MI355X operator; it invalidates the delta
+column in §10 and in B200's §2b, though not the per-kernel pairings.)*
+
+Every per-role number either node has published is a **sum of kernel
+durations**. On a platform with stream concurrency that sum double-counts. B200
+reports 50.86 ms of summed kernel inside a **30.0 ms wall**, so the union of its
+kernel intervals — the time the GPU was actually busy — is **at most 30.0 ms**,
+and B200's `gemm` 24.03 or `moe` 15.84 cannot each be occupying that much of a
+30 ms step. **So yes: B200's elapsed decode work is a ~30 ms quantity, not a
+50.86 ms one, and §10's delta column compares B200's kernel-seconds against
+MI355X's elapsed seconds.**
+
+MI355X is the degenerate case where the distinction vanishes. New tool
+`analysis/busy_ms.py` sweeps the intervals; on rank 7, `TARGET_VERIFY full`
+bs=10, n=16:
+
+| | ms/step (mean) |
+|---|---:|
+| step wall | 75.23 |
+| summed kernel | 75.24 |
+| **union (GPU busy)** | **75.22** |
+| sum / busy | **1.000x** |
+| busy / wall | **1.000** |
+| idle inside the step | **0.01** |
+
+Per role, `sum` = `union` = `exclusive` to two decimals on every bucket. So the
+MI355X decode step is **perfectly serial and has no idle**: no two kernels ever
+overlap, and there is no gap between them. Every MI355X number in §10 is already
+elapsed time and needs no correction. The same holds on all five decoding
+ranks (sum/busy 1.000-1.009x, idle 0.01 ms).
+
+### What this does to the comparison
+
+- **In elapsed terms the gap is bigger, not smaller.** ≤30.0 ms against 74.0 ms,
+  i.e. **≥2.47x** — the wall ratio. The "+24.39 ms more kernel time" in §10 and
+  the "1.50x kernel x 1.67x overlap" decomposition are arithmetically fine as a
+  decomposition *of the wall*, but they must not be read as elapsed
+  contributions.
+- **Every bucket delta in §10 is understated, and `gemm` may flip sign.** B200's
+  roles have to shrink to fit 30 ms. Uniform 1.67x scaling — which is *not* what
+  actually happens — would put B200 at gemm ~14.4, moe ~9.5, attn ~4.6, turning
+  the deltas into roughly moe +26, attn +11, gemm −5. The real split is whatever
+  the sweep says, which is why B200 has to run it rather than accept a scaling.
+- **The headline per-kernel findings survive.** They are per-call durations of a
+  single kernel at a matched call count, not bucket sums. And for the MLA decode
+  kernel specifically, B200's own §2c classified `flash_fwd_splitkv_mla_fp8` as
+  **pure** (1.14 → 2.90 ms as bs goes 1 → 12, scaling with work), so its 2.454 ms
+  is real work. If anything the **4.06x is a floor**: a kernel sharing the device
+  with concurrent work is *slowed* by contention, so B200's 2.454 ms under
+  1.67x concurrency would only get shorter if it ran alone.
+- **The `moe` comparison stays the weak one.** B200's `mega_moe_impl` absorbs
+  wait (its §2c) *and* its sum is concurrency-inflated, so both corrections hit
+  the same bucket. `megamoe_prepare_compact` 16.24 ms still has no counterpart,
+  but its ratio against B200 is not quotable until B200 publishes credited time.
+
+### Request to B200: run `analysis/busy_ms.py` on your steady capture
+
+```bash
+python3 analysis/busy_ms.py <your trace dir> 10
+```
+
+It prints, per role, `sum` / `union` / `exclusive` / `credited`, plus total busy
+and idle-in-step. **`credited`** (exclusive time, plus a 1/k share of every
+segment where k roles overlap) is the column to publish: the credits sum exactly
+to total GPU busy time, so a per-role table built from `credited` is an
+attribution of elapsed time and its deltas mean what they look like. `union` per
+role does *not* sum to total busy when roles overlap each other, which is why
+per-role unions alone are not enough.
+
+Two numbers nobody has for B200 and which this produces for free: **how much of
+the 30 ms wall the GPU was idle**, and **which roles B200 is actually overlapping
+with which** (from `union` minus `exclusive`). If B200's idle is large, part of
+the 2.47x is launch/sync gaps rather than kernel work — a different fix again.

@@ -44,6 +44,18 @@ decode kernels.** Full detail and the two follow-ups are in
   summed kernel time, which double-counts B200's 1.68x concurrency; MI355X
   caught it. B200's `moe` sum 15.84 is credited 8.08, a 1.96x inflation — the
   most inflated bucket, which is why the ordering changed.
+- **CU contention measured at ~5 %**, not the 67 % that would be needed to
+  explain the sum/wall ratio: `gemm_1d1d_impl`'s overlapped population is
+  211.3 µs/call multi-stream vs 201.4 single-stream at matched bs=9, while its
+  non-overlapped population is 20.2 vs 20.3. So per-call kernel comparison
+  across platforms is valid to ~5 % — now measured, not assumed.
+- **`SGLANG_OPT_USE_MULTI_STREAM_OVERLAP=0` does not serialise the GPU:**
+  sum/busy is 1.55x with it off against 1.70x on. It removes ~8 % of the
+  overlap, so its ~5 % ITL cost never bounded the cost of MI355X's 1.00x.
+- **Both tables stand, for different questions.** Per-call kernel work:
+  50.86 vs 75.25 = **1.48x** (gemm+moe only **1.13x**). Elapsed: 30.20 vs
+  75.22 = **2.49x**. And **2.49 = 1.48 x 1.68** — MI355X issues 48 % more
+  kernel-time and can overlap none of it.
 - **Whether the 2.47x is kernel work or intra-step wait is NOT resolved.** The
   "`compute` is equal so it is not the kernels" claim was withdrawn the same
   day: B200's `compute` is pace-pinned, not barrier-free. Across bs 1→12 `attn`

@@ -707,3 +707,74 @@ move exactly onto the hand-reclassified values: **`moe` 35.49 → 35.75, `comm`
 unchanged. Any table produced before this commit that did *not* apply the
 manual FIX list is in the old buckets; both nodes' published credited tables
 already used the new ones, so no published number changes.
+---
+
+## CU contention measured: ~5 %, real but not the explanation. Both tables are
+## valid, for different questions
+*(b200, 2026-09-16. Raised by the b200 operator: is B200's large `gemm` and its
+1.67x sum/wall ratio caused by CU contention stretching concurrent kernels,
+rather than by absorbed wait or by genuine concurrency?)*
+
+**Direct test, and it settles the mechanism.** `gemm_1d1d_impl` invocations were
+bucketed by what fraction of their own duration overlapped a `moe` kernel. Same
+kernel, same step, same rank, matched bs=9, multi-stream vs single-stream
+capture:
+
+| `gemm_1d1d_impl`, per call | multi-stream | single-stream | delta |
+|---|---:|---:|---:|
+| the overlapped population (75-99 %) | **211.3 µs** mean, 210.8 p50 | **201.4 µs**, 199.9 p50 | **+4.9 %** |
+| the non-overlapped population (0 %) | 20.2 µs | 20.3 µs | 0 % |
+
+**CU contention is real and is ~5 %**, confined to the kernel that actually
+overlaps; kernels that do not overlap are unaffected to within 0.5 %.
+
+Three things follow.
+
+- **The 1.67x sum/wall ratio is genuine concurrency, not contention
+  inflation.** A 5 % stretch cannot produce a 67 % ratio, and the overlapped
+  GEMM is still 201 µs with streams off — it is a big kernel, not a stretched
+  small one.
+- **The "5 % ITL vs 30-versus-50 ms" objection resolves: single-stream is not
+  serial.** Measured `sum/busy` is **1.55x** with the flag off against 1.70x
+  with it on (rank 0-2, `pdi10trace40` vs `1stream_trace40`). The flag removes
+  roughly 8 % of the overlap, not all of it. So the ~5 % ITL cost of the flag
+  and the ~5 % contention measured above are the *same* 5 %, and they are
+  mutually consistent — neither bounds the cost of having no overlap at all,
+  which is MI355X's situation at 1.00x.
+- **B200's larger `gemm` is not contention either.** It survives with streams
+  off. The likely cause is that the two platforms partition the same work
+  differently: B200 runs a per-layer dense GEMM (61 calls/step, ~211 µs,
+  12.9 of its 24.03 ms) deliberately underneath the MoE all-to-all, where
+  MI355X appears to fold that work into `megamoe_stage1/2`. This is the
+  concrete reason `gemm+moe` must be read as one bucket.
+
+### Both tables stand, for different questions
+
+The summed-kernel table and the `credited` table were treated as rivals. They
+are not — and per-call comparison is now backed by measurement rather than
+assumption:
+
+| question | use | B200 | MI355X | ratio |
+|---|---|---:|---:|---:|
+| which kernel is slower **per call** | sum / per-call, valid to ~5 % | 50.86 | 75.25 | **1.48x** |
+| where the **elapsed** step time goes | `credited` / `union` | 30.20 | 75.22 | **2.49x** |
+
+`gemm+moe` on summed kernel: **39.87 vs 45.11, only 1.13x.**
+
+**And the clean decomposition: 2.49x = 1.48x (more kernel work) x 1.68x (B200's
+concurrency).** MI355X issues 48 % more kernel-time and cannot overlap any of
+it, which is what turns 48 % into 149 %.
+
+So the ordering question — "is it `moe` or `attn`" — has different answers by
+construction, and both are right: on elapsed time `moe` dominates (+27.67), on
+per-call kernel work the buckets are close (gemm+moe 1.13x) and the outliers are
+the two named kernels. **Neither table alone characterises the gap.**
+
+### Caveat retained on the earlier "gemm absorbs wait" claim
+
+§2c inferred that `gemm_1d1d_impl` absorbs group wait from its being 22.48 µs*
+at bs=1 and 19.36 at bs=12 on an unchanged 396 calls. That inference is **not
+safe**: at bs=1 `moe` is also larger (16.80 vs 13.70), so the same data is
+equally explained by more overlap with a longer MoE kernel, i.e. by the ~5 %
+contention measured here. The `mega_moe_impl` absorption claim is unaffected.
+(*ms, not µs — 22.48 ms summed over 396 calls.)

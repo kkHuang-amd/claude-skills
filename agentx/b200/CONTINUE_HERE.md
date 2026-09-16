@@ -15,9 +15,9 @@ as "get a profiling reference at parity with CI"; that reference exists and the
 work moved on to the cross-platform gap. Read §8 (parity/CI), the A/B sections,
 and `../exchange/b200-decode-trace.md` for the current front.
 
-**Status (2026-09-16 10:25): the apparent 2.5× ITL gap is down to a
-config-matched 1.55×, and the open question is whether that 1.55× is in decode
-kernels or in the prefill barrier around them.**
+**Status (2026-09-16 10:32): blocked on MI355X.** `git pull` is current;
+`agentx/exchange/` still has no `mi355x-*.md`. B200 discriminator is TARGET_VERIFY
+p50 **15.9 ms**; without the matching MI355X number the 1.55× cannot be placed.
 
 Settled so far:
 
@@ -42,11 +42,11 @@ decode steps. So if MI355X's pure decode step wall is ~25 ms the gap is in
 kernels; if it is ~16 ms the gap is in the prefill/waiting portion and the
 kernel breakdown is the wrong place to look. **These have different fixes.**
 
-**Next action:** `git pull` in `/workspace/claude-skills`, read
-`agentx/exchange/` for a new `mi355x-*.md`, and compare against
-`agentx/exchange/b200-decode-trace.md`. If MI355X has not reported yet, the
-request is written out in `agentx/exchange/README.md` and the capture
-instructions in `agentx/analysis/MI355X_CAPTURE_PROMPT.md`.
+**Next action:** wait for `agentx/exchange/mi355x-decode-trace.md`. On pull,
+compare TARGET_VERIFY step wall p50 to B200's 15.9 ms first — do not open the
+role table until that number exists. Capture prompt refreshed 2026-09-16 10:32
+so MI355X is asked for the discriminator, not a kernel dump. GPUs on this node
+are idle (0 MiB). Do not launch another B200 arm while that number is missing.
 
 ### The CI-parity reference arm, for the record
 

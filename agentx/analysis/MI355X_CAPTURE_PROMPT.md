@@ -5,9 +5,13 @@ self-contained: paths, capture settings, the B200 reference numbers to compare
 against, and every misreading that has already cost time on the B200 side.
 
 Context for whoever is reading this file rather than the prompt: after matching
-`prefill_decode_interval` on both platforms, the ITL gap is a stable ~1.6×
-(MI355X 33.9 ms vs B200 20.7 ms at pdi=24; 50.6 vs 32.1 at pdi=10). The purpose
-of this capture is to locate that 1.6× in the per-role kernel breakdown.
+pdi, accept len, per-request KV working set and cuda-graph replay, the residual
+is a stable 1.54-1.57× on *log-implied* step time. Log-implied includes
+amortised prefill. On B200 only ~22 % of wall is inside decode steps
+(TARGET_VERIFY p50 15.9 ms vs log-implied ~72 ms at batch 9). **The purpose of
+this capture is first to report TARGET_VERIFY step wall p50** — that single
+number decides whether the 1.55× is in decode kernels (~25 ms) or in the
+prefill/waiting portion (~16 ms). Kernel roles are useful only after that.
 
 ---
 
@@ -46,23 +50,38 @@ python3 analysis/trace_ranks.py   <trace 目錄>          # 先看跨 rank 的 c
 python3 analysis/trace_summary.py <trace 目錄>/*TP-0-*.gz
 python3 analysis/decode_stats.py  <server.log>
 
-## 要回報的數字
-1. trace_summary 的 TARGET_VERIFY 區塊：n、step wall p50/mean、以及逐角色的
-   ms/step 與 min/p50/max（gemm / moe / attn / other / quant / comm / norm_rope）。
-   要 p50，不要只給平均 -- 分布是雙峰的，平均會被近乎空的 step 拉低。
-2. trace_ranks 的 TARGET_VERIFY 跨 rank 表（compute / barrier / attn / gemm）。
-3. step 標註的清單（TARGET_VERIFY / EXTEND / IDLE 各幾個）以及 bs 值。
-   B200 那份全部是 bs=7、61 層、每 step 61-64 次 MoE 呼叫。
-4. decode_stats 的 running-req/rank、kv pool usage、accept len、cuda graph 比例、
-   以及 step_ms 依 batch 分桶的曲線。
-5. 該輪的 ISL mean（B200 在 pdi=24 下是 114,401，pdi=10 是 109,796；吞吐比較對 ISL 敏感）。
-6. verify step 內活躍的 GPU stream 數量（B200 multi-stream 是 132 條、single-stream 是 4 條）。
+## 要回報的數字（優先序就是這個，1 就能決定下一步）
+1. **THE discriminator:** `TARGET_VERIFY` step wall **p50** and its `bs`.
+   B200 is **15.9 ms** (bs=10, n=38, mean 15.2 ms) at pdi=24.
+   ~25 ms ⇒ gap is in decode kernels. ~16 ms ⇒ gap is in prefill/waiting;
+   then skip the kernel table and look at EXTEND / scheduler instead.
+2. The **unclassified kernel list** that `trace_summary.py` prints
+   (`unclassified (add a ROLES pattern ...)`). ROCm names differ completely;
+   without this, a large share of time may sit in `other`.
+3. MoE kernel calls per step (B200: 61-64, one per layer).
+4. Stream count active inside verify steps (B200 multi-stream 132, single-stream 4).
+5. trace_summary TARGET_VERIFY roles, **p50** not mean (gemm / moe / attn /
+   other / quant / comm / norm_rope), plus n / wall p50/mean.
+6. trace_ranks TARGET_VERIFY cross-rank table (compute / barrier / attn / gemm).
+7. decode_stats: running-req/rank, KV *absolute* working set
+   (`#full token` / batch, not pool fraction), accept len, cuda-graph fraction,
+   step_ms(batch) curve.
+8. ISL mean of that arm (B200 pdi=24 is 114,401).
 
-## B200 的對照基準（pdi=10 抓的，bs=7，TARGET_VERIFY 的 p50 ms/step）
-gemm 21.1 / moe 13.7 / attn 5.2 / other 3.4 / quant 1.3 / comm 0.6
-step wall p50 17.2 ms、每 step kernel 加總 45 ms（重疊 1.49x）、132 條 stream。
+Write them into `claude-skills/agentx/exchange/mi355x-decode-trace.md` and
+**commit + push** — the nodes have no shared filesystem.
+
+## B200 的對照基準（pdi=24，TARGET_VERIFY bs=10，p50 ms/step）
+step wall **15.9 ms**. Roles: gemm 19.39 / moe 12.22 / attn 6.58 / other 4.16 /
+quant 1.82 / comm 0.77 / norm_rope 0.65. Summed kernel 24.55 ms inside a 15.9 ms
+wall — that ratio is stream overlap, not utilisation. 132 streams.
+`compute` is flat 15.05-15.06 ms across bs 2/5/10, so unequal-bs compute
+comparisons are valid in this range.
+
+Full table: `agentx/exchange/b200-decode-trace.md`.
+
 已驗證：多 stream 重疊不會因搶 SM 而拉長個別 kernel（關掉後 kernel 加總不變、
-只有 wall 變長），所以 per-kernel 時間可以直接跨平台比，不需要為 stream 做正規化。
+只有 wall 變長 ~4-5 %），所以 per-kernel 時間可以直接跨平台比。
 
 ## 判讀上必須避免的錯誤（這些都是在 B200 上實際踩過的）
 - 檔名不是證據。profile_by_stage 會把檔案命名成 -DECODE，內容卻可能只有一個 EXTEND step。

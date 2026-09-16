@@ -44,9 +44,53 @@ python3 /workspace/claude-skills/agentx/analysis/mla_counterfactual.py \
         /shared_nfs/kk/pr35619/trace_c128_pdi24_steady
 ```
 
-Still open and unchanged: **B** achieved bandwidth on the MLA kernel (now the
-gating question — the counterfactual prices the *payoff*, the roofline says
-whether it is *reachable*) and **C** the 3.85 ms of unfused copies.
+Still open: **C**, the 3.85 ms of unfused copies. **B is started and is blocked
+on one measurement — see below.**
+
+### B — the desk roofline is UNDER-DETERMINED. Do not publish a number from it.
+
+The prompt's recipe (derive KV bytes from the DSv4 config plus per-rank
+`#full token`) **does not work on this model**, for a reason worth recording:
+
+- **DSv4 decode attention is sparse.** `index_topk = 1024`, `sliding_window =
+  128`, `head_dim = 512`, and the decode path runs three ragged index streams
+  (SWA / CSA / HCA, `unified_kv_kernels/runtime.py:403 build_decode_streams`)
+  whose per-token length is a *prefix sum of real valid entries*, not the
+  context length. So `#full token` is an upper bound on what the kernel reads,
+  and on this workload it is ~100x too large.
+- KV is **fp8_e4m3** with `page-size 256`, plus 1x64 block scales
+  (`NUM_GROUPS = D/64 = 8` per token), so a KV token costs 512 + 32 = 544 B.
+- Grid is `(N_tokens, ceil(H/BLOCK_H))`, one CTA per (token, head-tile), and
+  each CTA re-reads that token's whole KV. With `H=128`, `BLOCK_H=16` that is
+  **8 re-reads**, absorbed by L2 or not — which the desk calculation cannot
+  decide either.
+
+Bracketing it gives **2.3 % (topk-capped) to 32 % (whole working set) of the
+8 TB/s peak**. That spread spans "nowhere near the wall" and "half way to it",
+so it answers nothing.
+
+**And the per-call times falsify every simple work model.** Capture-window KV
+(server.log 02:55-03:01, matching the 03:00 trace):
+
+| rank | trace bs | `#full token` | tok/req | kernel | us/call |
+|---:|---:|---:|---:|---|---:|
+| 0 | 17-18 | 892,928 | 52,525 | fused | 165-166 |
+| 0 | 19-20 | 892,928 | 52,525 | fused | 223-232 |
+| 1 | 14 | 1,978,240 | 152,172 | fused | **330.7** |
+| 6 | 16 | 2,398,848 | 171,346 | fused | 266.1 |
+| 3 | 9 | 1,834,368 | 141,105 | split | 117.5 |
+| 7 | 10 | 2,395,776 | 171,127 | split | 163.5 |
+
+Rank 6 has **more** context *and* **more** bs than rank 1 and is **20 %
+faster**. So the cost is not `bs`, not `#full token`, and not tok/req. Within
+rank 0 it *is* superlinear in bs (bs 17→20 costs +40 %), which smells like a
+tiling or occupancy step rather than a data volume.
+
+**Next, and it is the cheapest decisive test:** a standalone microbenchmark of
+`_paged_decode_fused_kernel` with swept `(N, kv_len)`. It gives achieved
+bandwidth directly instead of by derivation, and by *inversion* recovers the
+`kv_len` that reproduces 330.7 µs — which is the quantity the desk route could
+not pin. GPUs are idle (297 MB/GPU baseline, no KFD PIDs). Minutes, not an arm.
 
 ---
 

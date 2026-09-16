@@ -35,7 +35,9 @@ def rows_for(path):
         roles = collections.defaultdict(float)
         for dur, name in owned.get(i, []):
             roles[classify(name)] += dur
-        rec = per_type[s["type"]]
+        # Keyed by (type, bs): different bs = different work, not comparable.
+        key = f"{s['type']} bs={s['bs']}" if s["bs"] is not None else s["type"]
+        rec = per_type[key]
         rec["step_ms"].append(s["ms"])
         rec["toks"].append(s["toks"] or 0)
         rec["compute"].append(sum(roles[r] for r in COMPUTE) / 1000.0)

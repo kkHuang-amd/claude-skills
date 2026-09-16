@@ -760,6 +760,59 @@ was flagged as an unresolved confound at the time and disappeared on the
 complete data. **Do not compare a partial run against a complete one**, even at
 matched batch; match KV pool usage too, which `decode_stats.py` reports.
 
+### CROSS-PLATFORM, both sides now measured at both pdi settings (2026-09-16)
+
+MI355X was re-run at `prefill_decode_interval=24` to match B200.
+
+| arm | pdi | tok/s/chip | intvty p90 | ITL p90 | TTFT avg | TTFT p50 | cache hit | ISL |
+|---|---|---|---|---|---|---|---|---|
+| MI355X | 10 | 34,713 | 19.8 | 50.6 ms | 5.64 s | 2.52 s | 95.1 % | 105,652 |
+| MI355X | **24** | 36,995 | 29.5 | **33.9 ms** | 11.07 s | 4.01 s | 95.6 % | ? |
+| B200 multi-stream | 10 | 40,401 | 31.1 | 32.1 ms | 9.87 s | 2.66 s | 96.2 % | 109,796 |
+| B200 single-stream | 10 | 39,207 | 29.4 | 34.0 ms | 11.66 s | 3.02 s | 96.1 % | 108,273 |
+| B200 multi-stream | **24** | 46,173 | 48.3 | **20.7 ms** | 12.33 s | 4.59 s | 96.4 % | 114,401 |
+
+**The platform ITL gap is ~1.6× at both settings:** 33.9/20.7 = **1.64×** at
+pdi=24, 50.6/32.1 = **1.58×** at pdi=10. So the `prefill_decode_interval`
+asymmetry never was the *cause* of the gap — it inflated a real 1.6× into an
+apparent 2.5× (50.6 vs 20.7). The residual 1.6× is what a trace has to explain.
+
+**The pdi knob behaves the same on both platforms**, which validates the
+amortised-prefill model as platform-independent rather than a CUDA artefact:
+10→24 improves ITL by 33 % on MI355X and 35.5 % on B200, and costs TTFT p50
++59 % and +72.6 % respectively.
+
+**Throughput gap widens at pdi=24**: B200 leads by 16.4 % at pdi=10 and 24.8 %
+at pdi=24, because B200 gains more from the wider interval (+14.3 % vs +6.6 %).
+That asymmetry is itself a lead — plausibly related to B200 having an active
+HiCache host tier, so the cost structure of being interrupted differs.
+
+ISL/OSL now recorded on both sides, so the throughput comparison is firm:
+
+| arm | pdi | ISL | OSL | tok/s/chip | input | **output** |
+|---|---|---|---|---|---|---|
+| MI355X | 10 | 105,652 | 929 | 34,713 | 34,410 | **302** |
+| MI355X | 24 | 108,371 | 967 | 36,995 | 36,667 | **327** |
+| B200 | 10 | 109,796 | 977 | 40,401 | 40,045 | **356** |
+| B200 | 24 | 114,401 | 1,009 | 46,173 | 45,769 | **404** |
+
+The workload shape matches (ISL/OSL ≈ 112-113 on both) and **the ISL difference
+runs against B200** — it carries 5.6 % more input and 4.3 % more output at
+pdi=24 and still wins, so its advantage is understated, not inflated.
+
+On output tok/s/chip, the metric least sensitive to cache-hit differences:
+B200 leads **+23.4 %** at pdi=24 and **+17.9 %** at pdi=10.
+
+**The tension worth chasing: ITL gap 1.64× but output-throughput gap only
+1.23×**, both at pdi=24. Throughput is batch × per-step rate while ITL is
+per-request latency, so the only way both hold is that MI355X runs a larger
+in-flight batch to compensate. That predicts
+`running-req/rank ≈ 9 × 1.64/1.23 ≈ 12` on MI355X against B200's measured 9 at
+pdi=24 — falsifiable from the MI355X `server.log` alone with
+`decode_stats.py`, no trace needed. If MI355X also reports ~9, the reasoning is
+missing something and `accept len` or the step-granularity definition is the
+next place to look.
+
 ### Consequence for the MI355X comparison
 
 MI355X runs `prefill_decode_interval` = **10**; the B200 baseline ran **24**. The

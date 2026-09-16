@@ -41,9 +41,15 @@ def summarise(path, top=10):
           + f"   (unattributed kernel time: "
             f"{sum(d for d, _ in owned.get(None, [])) / 1000:.1f} ms)")
 
+    # Group by (type, bs), never by type alone. `bs` is forward_batch.batch_size
+    # (profile_utils.py:477), so steps with different bs did different amounts
+    # of work and must not be averaged together -- and two traces can only be
+    # compared within matching bs buckets. Two B200 captures of the same arm
+    # landed on bs=7 and bs=3 respectively, so this is not a corner case.
     by_type = collections.defaultdict(list)
     for i, s in enumerate(steps):
-        by_type[s["type"]].append((s, owned.get(i, [])))
+        key = f"{s['type']} bs={s['bs']}" if s["bs"] is not None else s["type"]
+        by_type[key].append((s, owned.get(i, [])))
 
     for stype, entries in sorted(by_type.items(), key=lambda kv: -len(kv[1])):
         step_ms = [s["ms"] for s, _ in entries]

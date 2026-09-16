@@ -21,11 +21,16 @@ ROLES = [
     ("moe", r"mega_moe|fused_moe|asm_moe|ck_moe|moe_|_moe|expert|grouped_gemm|group_gemm"),
     ("attn", r"attn|attention|fmha|mha|flash|paged|mla|mqa_logits|indexer|"
              r"mhc_"),                     # mhc_* is DSv4's MLA pre/post fusion
-    ("gemm", r"gemm|matmul|hipblas|cublas|_mm_|linear"),
+    # `Cijk_` is rocBLAS/Tensile's generated GEMM naming (Cijk_Alik_Bljk_...);
+    # on ROCm it is a real GEMM that otherwise lands in `other`.
+    ("gemm", r"gemm|matmul|hipblas|cublas|_mm_|linear|Cijk_"),
     ("quant", r"quant|dequant|scale|fp8|fp4|ue8m0|cast"),
-    ("norm_rope", r"norm|rope|rms|embed"),
+    ("norm_rope", r"norm|rope|rotary|rms|embed"),
     ("sample", r"sample|topk|argmax|logit"),
-    ("copy", r"memcpy|memset|copy|cat_|index_|gather|scatter"),
+    # ROCm fills: __amd_rocclr_fillBufferAligned is hipMemset's backing kernel,
+    # and the MoE row-padding / compress-tail fills are buffer prep, not compute.
+    ("copy", r"memcpy|memset|copy|cat_|index_|gather|scatter|"
+             r"fillbuffer|fill_padded_rows|fill_compress_tail"),
 ]
 ROLES = [(name, re.compile(pat, re.I)) for name, pat in ROLES]
 

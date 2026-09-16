@@ -1,0 +1,113 @@
+# FINDINGS — joint source of truth (B200 + MI355X)
+
+Append only. Sign every block with node + date so a superseded number stays
+identifiable. Detail and provenance live in the per-node `<node>-<topic>.md`
+files; this file carries conclusions.
+
+---
+
+## MI355X steady-state decode step: 39.3 ms — and `compute` nearly matches B200
+*(mi355x, 2026-09-16 — detail in `mi355x-decode-trace.md`)*
+
+At matched pdi=24, accept len (3.78 vs 3.770), per-request KV working set
+(~151k vs ~152k) and 100 % cuda-graph replay, MI355X's steady-state
+`TARGET_VERIFY` step wall is **39.3 ms p50 at bs=10**, captured at 167,538
+tokens/request with pool usage plateaued. Flat across bs 9-20 (38.7-41.7 ms).
+
+**No ratio is quoted against B200's 15.9 ms** — that number is retracted as
+mid-ramp and B200 is re-capturing. 39.3 ms is simply the MI355X side.
+
+**The most important number is not the wall, it is `compute`:** MI355X 14.85 ms
+vs B200 15.06 ms at bs=10 — **within 1.4 %**. `compute` is barrier-free by
+construction, so on present evidence the two platforms do comparable decode
+compute per step, and the wall-clock gap lives in `barrier` (MI355X 21.8 ms,
+~55 % of its step). That is the opposite of a kernel-efficiency story and should
+be the next thing both nodes confirm, since the two captures are still not
+like-for-like.
+
+**Stream count differs sharply but is probably not the cause.** MI355X runs 2-3
+streams against B200's 132, and its kernel sum equals its wall (1.00x overlap vs
+B200's 1.54x). But B200's own 132->4 A/B cost only 4-5 % of step time, and
+MI355X sits at essentially B200's single-stream setting — so stream count cannot
+carry a gap of this size. Recorded as a measured difference, not a cause.
+
+Open, and blocking a clean answer:
+
+1. **Both captures are contaminated by the group-wide prefill barrier.** In the
+   MI355X steady capture, ranks 0/1/3/6/7 have `TARGET_VERIFY` while **all eight**
+   have `EXTEND`. Rank 6 is the extreme: barrier 174.69 ms of a 195.97 ms step.
+   The two nodes need to report the same thing — either both filtered to steps
+   with no concurrent `EXTEND` in the group, or both quoting `compute`.
+2. **`gemm` is not comparable as bucketed.** B200 19.39 vs MI355X 9.34 ms/step
+   p50 is probably naming: `deep_gemm::..._mega_moe_impl` matches `gemm` while
+   `megamoe_stage1/2_compact` matches `moe` first. Use `gemm + moe` as one
+   bucket until settled — B200 31.61 vs MI355X 43.21.
+
+---
+
+## The fixed 120 s settle is unsafe on both nodes — use a steady-state predicate
+*(mi355x, 2026-09-16, confirming B200's retraction from its own data)*
+
+MI355X's first capture used the prompted rule (first `done=` + 120 s) and landed
+at 67,759 tokens/request, less than half steady state. Measured cost on one run:
+
+| | mid-ramp | steady | delta |
+|---|---:|---:|---:|
+| per-request KV | 67,759 | 167,538 | 2.47x |
+| step wall p50 | 28.3 ms | 39.3 ms | **+39 %** |
+| `attn` p50 | 7.95 ms | 15.62 ms | +96 % |
+| `moe` p50 | 24.23 ms | 33.87 ms | +40 % |
+
+`attn` scaling with context is expected. **`moe` growing 40 % is not** — MoE work
+is context-independent, so that is barrier absorbed into the fused all-to-all,
+i.e. more waiting at steady state.
+
+Replace the constant with a predicate on `server.log`: wait for per-request
+`#full token` / `#running-req` to plateau (>= ~130k on these arms). A fixed sleep
+is racing a ramp whose length depends on trace content and page-cache warmth.
+
+---
+
+## prefill_decode_interval was a launcher difference, and it is now matched
+*(mi355x, 2026-09-16)*
+
+`dsv4_fp4_mi355x_sglang_mtp.sh` now emits B200's values: pdi 24 (20 plus
+`--balance-abs-threshold 32` at `CONC>=160`), `--load-balance-method
+total_requests`, router `--policy cache_aware`. Every cross-platform ITL number
+taken on MI355X before 2026-09-15 used pdi=10 and is not comparable.
+
+Measured on MI355X at c128, the knob alone is a clean ITL<->TTFT trade, same
+direction as B200's A/B: ITL p90 50.6 -> 33.9 ms (-33 %), TTFT p50 2.52 -> 4.01 s
+(+59 %), and the same trade reproduces at c256 (ITL -30 %, TTFT p50 +187 %).
+
+**The throughput half of that is not established.** tok/s/chip rose 6.6 % at
+c128 and 4.7 % at c256, both inside the ~5 % replicate spread, and both are
+partly explained by ISL mean drifting up (+2.6 % / +1.6 %) — the metric is ~99 %
+input tokens, so longer prompts inflate it without the engine doing better.
+Normalising to requests/s leaves +3.9 % / +3.0 %. What *is* solid is output
+throughput, +8.3 % / +9.1 %, consistent with the ITL win.
+
+---
+
+## KV pool usage must not be matched across platforms
+*(mi355x, 2026-09-16 — corrects a misreadable line in `analysis/METHOD.md`)*
+
+`full token usage` is a fraction of each node's own pool capacity, and the pools
+differ 5.4x (B200 2,217,472 tokens, MI355X ~12,074,667). Matching the fractions
+would force genuinely different working sets. Match the **absolute** figure,
+`#full token` / batch: B200 151,908 vs MI355X ~151,000 per request, i.e. aligned
+within 3 %, while the fractions read 0.62 vs 0.15. METHOD.md's
+"align kv pool usage" applies to partial-vs-complete runs on one node.
+
+---
+
+## Intermittent EPLB rebalance deadlock on MI355X
+*(mi355x, 2026-09-16)*
+
+Roughly 1 run in 3 on an EPLB arm hangs with a signature that defeats every
+liveness check: `returned=` frozen, `errors=0`, `/metrics` answering 200,
+schedulers alive, VRAM still allocated. Last server activity is
+`Resetting ExpertDistributionRecorder...` from all 8 ranks; all 8 then hang in a
+collective and the NCCL watchdog kills the process 600 s later with
+`c10::DistBackendError`. Nothing reaches launcher stdout. Judge liveness only by
+`returned=`/`done=` moving. A straight retry cleared it.

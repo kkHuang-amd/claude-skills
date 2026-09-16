@@ -852,3 +852,62 @@ or compare against the breakable-cuda-graph path, where
 **Standing lesson for both nodes:** kernel identity cannot be established inside
 a graph-replayed window. Attribute in EXTEND, then carry the *symbol family*
 (dense vs grouped) rather than the tile instantiation across to decode.
+
+---
+
+## ⚠ The 217 us GEMM is SM-STARVED, not waiting — and this invalidates the
+## 4.9 % contention figure and part of the summed-kernel comparison
+*(b200, 2026-09-16. Raised by the b200 operator asking why a shared-expert GEMM
+would ever wait on the routed a2a. It does not.)*
+
+Measured, TP-4, `TARGET_VERIFY full` bs=10, n=15:
+
+| | grid | streams | calls/step | duration |
+|---|---|---|---:|---:|
+| `deep_gemm::..._mega_moe_impl` | **[146,1,1]** | 1 (default) | 61 | 243.4 us |
+| the big `gemm_1d1d_impl` | **[148,1,1]** | 61 distinct | 61 | 217.4 us |
+
+**B200 has 148 SMs and the MoE kernel asks for 146 blocks** — it is a persistent
+kernel that owns essentially the whole GPU. The GEMM asks for 148 and gets ~2.
+
+Timing relative to its overlapping MoE call: **starts +25.0 us after it, ends
++1.9 us after it, 99.1 % covered, never on the same stream.** A semaphore wait
+would start early and block; this starts late, crawls, and finishes only when
+the MoE releases the machine. **That is SM starvation.** The same instantiation
+costs **24.8 us** on its 91 non-overlapped calls/step — that is its real cost.
+
+### Three earlier conclusions are affected
+
+1. **The 4.9 % contention measurement is invalid as a bound.** It compared the
+   multi- and single-stream captures, but `SGLANG_OPT_USE_MULTI_STREAM_OVERLAP`
+   **does not disable this overlap**: `moe_alt_stream` at
+   `deepseek_v4.py:1798` is gated on `_is_cuda`, not on that flag. So the
+   overlapped population is still ~201 us with the flag off, and the A/B never
+   varied the thing being tested (`perf-bottleneck-attribution` #3 — enabling
+   condition vs outcome). **The real starvation effect is ~10x on this kernel,
+   not 5 %.**
+2. **It explains the "5 % ITL vs 1.67x sum/wall" puzzle completely.** The 1.67x
+   is genuine concurrency but buys almost no throughput, because most of the
+   co-resident time is one kernel crawling on ~2 SMs. That is why removing part
+   of the overlap costs only ~5 %.
+3. **B200's summed `gemm` overstates GEMM work by ~11.7 ms/step.** Of its
+   24.03 ms, the starved population is 13.26 ms whose unimpeded cost is
+   61 x 24.8 us = 1.5 ms. So on *work*, B200's step is ~39 ms rather than
+   50.86, against MI355X's 75.25 — **~1.9x, not 1.48x**. `credited` does not fix
+   this either: splitting shared time 1/k over-credits a starved kernel.
+
+### What this does not change
+
+The elapsed comparison stands: GPU busy **30.20 vs 75.22 ms**, and the wall
+**30.0 vs 74.0**. Starvation is already inside those numbers. The per-kernel
+findings that rest on matched call counts also stand — the MLA decode kernel at
+4.06x, and `megamoe_prepare_compact` 16.24 ms with no B200 counterpart.
+
+### For MI355X
+
+Worth checking the equivalent on ROCm: **what grid does the MegaMoE kernel
+request against the CU count**, and does any dense kernel co-reside with it? If
+the ROCm MoE kernel likewise claims nearly all CUs, then MI355X's perfectly
+serial step (sum/busy 1.000x) is not a missing optimisation — there would be
+nothing to gain from overlap, because B200's overlap is itself mostly starvation
+rather than useful concurrency.

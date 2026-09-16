@@ -86,6 +86,42 @@ faster**. So the cost is not `bs`, not `#full token`, and not tok/req. Within
 rank 0 it *is* superlinear in bs (bs 17→20 costs +40 %), which smells like a
 tiling or occupancy step rather than a data volume.
 
+#### B, part 2: at a FIXED kv_len the kernel is nowhere near any wall — and that makes the rank spread unexplainable by work
+
+Taking `kv_len = topk = 1024` (the sparse cap, so this is the honest upper
+bound on a decode query's KV), per call, against MI355X peaks of 8 TB/s and
+~2.5 PFLOP/s bf16, with `Nq = bs x 7` draft tokens:
+
+| rank | bs | us/call | KV MB | achieved BW | of peak | x8 re-read | achieved | of peak |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 18 | 166.3 | 70.2 | 534 GB/s | 6.7 % | 43.6 % | 216 TF/s | **8.6 %** |
+| 6 | 16 | 266.1 | 62.4 | 297 GB/s | 3.7 % | 24.2 % | 120 TF/s | 4.8 % |
+| 1 | 14 | 330.7 | 54.6 | 209 GB/s | 2.6 % | 17.1 % | 85 TF/s | **3.4 %** |
+
+**Two independent measurements confirm it is not bandwidth.** From the run's own
+`gpu_metrics.csv` in the capture window (epoch 1789527600 ±60 s): `umc_activity`
+**19.5 %** median across all 8 GPUs, and `gfx_0_clk` flat at **2372-2393 MHz**
+(0.9 % spread) with `throttle_status = 0` everywhere. So the memory controller
+is ~80 % idle during decode, and clock/power skew is **ruled out** as the
+explanation for the rank spread.
+
+**What is left is a 2.5x efficiency difference between two ranks running the
+identical kernel on identical hardware at the same clock** (rank 0 at 216 TF/s,
+rank 1 at 85). No work model produces that. Either `kv_len` is *not* constant
+across ranks, or the kernel's measured duration is absorbing something that is
+not its own work.
+
+**⚠ A flaw in the evidence we have been leaning on.** `prepare_wait.py` reports
+`mla_fused r=+0.961 -> real work`, but its `compute` proxy is
+`attn+gemm+quant+norm_rope+sample` and **MLA is inside `attn`** — the kernel is
+correlated against a bucket containing itself. B200's `flash_fwd_splitkv_mla
+r=+0.917` row has the same defect. So **neither node has clean evidence that
+the MLA per-call spread is work rather than absorbed stall**, and if it is
+partly stall, the counterfactual above is circular: it would "remove the
+imbalance" by removing the kernel that happens to be holding it. Fixing the
+proxy to exclude the kernel under test is a small change to `prepare_wait.py`
+and should be done before the next publication from either node.
+
 **Next, and it is the cheapest decisive test:** a standalone microbenchmark of
 `_paged_decode_fused_kernel` with swept `(N, kv_len)`. It gives achieved
 bandwidth directly instead of by derivation, and by *inversion* recovers the

@@ -29,6 +29,16 @@ step accounts for the entire log-implied gap. The 41.07 ms splits:
 | quant + misc | +1.7 | |
 | `gemm` | −0.45 | **equal** |
 
+**UPDATE, MI355X 2026-09-17 (last block in this file):** the component table
+below double-counts. MLA and the cross-rank idle are **the same slack** — MLA is
+the whole imbalance (remove it and the cross-rank spread falls 13.50 → 1.96 ms),
+so the two rows do not add. Multiplier on an MLA speed-up is **1.5x**
+(`MLA_of_critical_rank / mean` = 20.18 / 13.29). MLA at B200 speed is −11.26 ms,
+perfect balancing alone −7.35, both −14.69, not −17.4. Derived offline from the
+existing trace with `analysis/mla_counterfactual.py`; the barrier model is
+self-validating (predicted slack matches observed `prepare` to a constant
+5.19 ms floor on all 5 ranks).
+
 **Agreed target order:** (1) MLA decode kernel — 18 % directly and the
 multiplier on imbalance cost on both nodes, so it pays twice; (2) `total_tokens`
 balancing — both nodes' logs now justify it, but it fights `cache_aware` prefix
@@ -74,7 +84,9 @@ cost real time; the "because" column is the general lesson.
 `analysis/` — `show_result.py` (agg json), `decode_stats.py` (server.log),
 `trace_summary.py` / `trace_ranks.py` (per-role), `busy_ms.py` (**elapsed**,
 run this before comparing roles), `kernel_dump.py`, `prepare_wait.py`
-(wait-vs-work by anti-correlation), `kv_skew.py` (needs only a server.log).
+(wait-vs-work by anti-correlation), `kv_skew.py` (needs only a server.log),
+`mla_counterfactual.py` (critical-path model: what the step wall becomes if a
+kernel gets faster, and whether two fixes compete for the same slack).
 Method and every known trap: `analysis/METHOD.md`.
 
 ---
@@ -1579,3 +1591,74 @@ cost" argument, now with B200's own number in it.
 **`prepare`'s CU count is off the list** on MI355X's evidence, and B200's
 "raise its parallelism" recommendation is withdrawn — a `wait_i32_until_equals`
 spin does not parallelise.
+
+---
+
+## MI355X 2026-09-17 — MLA is the whole cross-rank imbalance. Multiplier 1.5x, and A is not additive with it
+
+Offline critical-path counterfactual on the existing steady-state trace, no GPU:
+`analysis/mla_counterfactual.py` (c128 pdi=24, 5 ranks with a full verify,
+16 cross-rank step groups, bs 9-18, step wall 74.02 ms, `sum/union` 1.003).
+
+Model: a decode step is barrier-synchronised (per-rank walls agree to 1.001x),
+so `W = max_r(own_r) + floor`, with `own` the union of a rank's non-`prepare`
+kernel intervals and `floor` **measured** per group as `W - max_r(own_r)`.
+
+**The model is self-validating, and that is the main reason to trust the rest.**
+Predicted slack `max_r(own) - own_r` sits below each rank's *observed* `prepare`
+time by a constant **5.08-5.25 ms** across all five ranks — equal to the
+independently measured `floor` of 5.19 ms. So `prepare = (cross-rank slack) +
+(5.19 ms irreducible protocol)`, which is the first direct decomposition of that
+kernel, and it confirms the `r = -0.942` anti-correlation result quantitatively.
+
+| rank | bs | own | MLA | `prepare` observed | model slack + 5.19 |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 14 | 68.91 | 20.12 | 5.18 | 5.19 |
+| 6 | 16 | 65.52 | 16.29 | 8.51 | 8.62 |
+| 7 | 10 | 58.97 | 10.80 | 15.14 | 15.08 |
+| 0 | 18 | 58.69 | 10.21 | 15.19 | 15.13 |
+| 3 | 9 | 55.39 | 8.00 | 18.69 | 18.69 |
+
+**MLA is essentially the entire imbalance.** Rank order by `own` is exactly rank
+order by MLA. Remove MLA and the cross-rank spread of own work collapses from
+**13.50 ms to 1.96 ms**; the critical rank stops being rank 1 in 16/16 groups.
+
+**Multiplier 1.47-1.52**, stable in k, because it is just
+`MLA_of_critical_rank / mean_r(MLA)` = 20.18 / 13.29. A kernel table credits MLA
+with the mean; the step wall responds to the critical rank's.
+
+| MLA cost scale k | step wall | vs measured | naive (mean MLA) | multiplier |
+|---:|---:|---:|---:|---:|
+| 0 (fake kernel) | 54.48 | −19.54 | −13.29 | 1.47 |
+| 0.5 | 64.00 | −10.02 | −6.65 | 1.51 |
+| 1 (measured) | 74.02 | — | — | — |
+| 2 (duplication arm) | 94.16 | +20.14 | +13.29 | 1.52 |
+| 3 | 114.53 | +40.51 | +26.59 | 1.52 |
+
+**Consequence for planning, and it changes the component table's arithmetic:
+MLA and `total_tokens` balancing are NOT additive — they are paid out of the
+same slack.** The +7.47 and +9.96 rows are one number, not two.
+
+| scenario | step wall | saving |
+|---|---:|---:|
+| as measured | 74.02 | — |
+| balanced ranks (direction A, *upper* bound) | 66.66 | −7.35 |
+| MLA at B200 speed (the published 7.47 gap) | 62.76 | −11.26 |
+| both | 59.33 | −14.69 |
+| MLA free | 54.48 | −19.54 |
+| MLA free + balanced | 53.60 | −20.41 |
+
+So MLA at B200 speed alone beats perfect balancing alone (−11.26 vs −7.35), and
+doing A on top of it adds only −3.4 more. A is still worth running — it is one
+flag against a kernel rewrite — but it should be priced at ~7 ms, not ~10, and
+its value *falls* as MLA improves.
+
+**Upper bound, not a forecast.** Three optimistic assumptions, all in the
+tool's docstring: slack is assumed fungible, `floor` is held constant, and MLA
+is removed in place with no cache/occupancy interaction. Two GPU arms validate
+it: k=2 by running the real kernel twice (bit-identical outputs, so accept len,
+OSL and KV are untouched — a true single-variable test), then k=0 with a fake
+kernel, from which **only trace-derived per-step numbers are quotable**: DSPARK
+is on (accept len 3.65, accept rate 0.44 of 7 draft tokens) and OSL is
+EOS-driven, so garbage logits move both and no ITL/TTFT/throughput figure from
+that arm means anything.

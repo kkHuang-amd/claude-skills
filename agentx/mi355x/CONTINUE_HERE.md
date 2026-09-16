@@ -3,7 +3,54 @@
 Counterpart to `agentx/b200/CONTINUE_HERE.md`. The two nodes share nothing but
 this git repo; see `agentx/exchange/README.md`.
 
-## CONTINUE HERE (2026-09-17 07:0x UTC+8) — diagnosis closed, optimisation open
+## CONTINUE HERE (2026-09-17 07:4x UTC+8) — MLA is the whole imbalance; step 0 done
+
+**Status:** offline critical-path counterfactual finished, no GPU used. The
+component table below **double-counts**: the MLA row (+7.47) and the cross-rank
+idle row (+9.96) are *the same slack*. Rank order by own work is exactly rank
+order by MLA time; remove MLA and the cross-rank spread collapses from 13.50 ms
+to 1.96 ms. Multiplier on an MLA speed-up is **1.5x** (the step wall responds to
+the critical rank's 20.18 ms, a kernel table credits the 13.29 ms mean).
+Full block and the joint pricing table: `exchange/FINDINGS.md`, last section.
+
+Re-priced, from `analysis/mla_counterfactual.py`: MLA at B200 speed **−11.26 ms**,
+perfect rank balancing alone (direction A, upper bound) **−7.35**, both
+**−14.69**, MLA free **−19.54**. A is sub-additive with MLA and its value falls
+as MLA improves, so price A at ~7 ms, not ~10.
+
+The barrier model is self-validating: predicted slack sits below each rank's
+observed `prepare` by a constant 5.08-5.25 ms on all five ranks, equal to the
+independently measured 5.19 ms floor. So
+`prepare = cross-rank slack + 5.19 ms irreducible protocol`.
+
+**Next:** two GPU arms to validate, in this order, neither started — ask first.
+1. **k=2 duplication arm.** Run the real MLA kernel twice per call, discard the
+   extra. Outputs bit-identical, so accept len / OSL / ISL / KV are untouched:
+   a true single-variable test with every metric quotable. Predicted step wall
+   **94.16 ms** (+20.14 against a naive +13.29).
+2. **k=0 fake arm.** Zeros, never uninitialised memory (NaN → the sampling
+   `ASSERT_TRAP`). Predicted **54.48 ms** and per-rank `prepare` collapsing to
+   the 5.19 ms floor. **Only trace-derived per-step numbers are quotable from
+   this arm:** DSPARK is on (accept len 3.65, rate 0.44 of 7 draft tokens) and
+   OSL is EOS-driven, so garbage logits move both.
+
+Injection point for both: `sparse_attn_v4_paged_decode`,
+`sglang-MegaMoE/python/sglang/kernels/ops/attention/dsv4/unified_kv_kernels/paged_decode.py:895`
+— single Triton file, env-gated, no aiter JIT rebuild.
+
+**Repro (no GPU, ~7 s):**
+```bash
+python3 /workspace/claude-skills/agentx/analysis/mla_counterfactual.py \
+        /shared_nfs/kk/pr35619/trace_c128_pdi24_steady
+```
+
+Still open and unchanged: **B** achieved bandwidth on the MLA kernel (now the
+gating question — the counterfactual prices the *payoff*, the roofline says
+whether it is *reachable*) and **C** the 3.85 ms of unfused copies.
+
+---
+
+## Earlier (2026-09-17 07:0x UTC+8) — diagnosis closed, optimisation open
 
 **The cross-platform investigation is finished.** Both nodes are serial, both
 per-role tables are elapsed and subtract cleanly, and the 41.07 ms decode-step

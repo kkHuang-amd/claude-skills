@@ -1071,3 +1071,47 @@ The decomposition "2.49x = 1.48x work x 1.68x overlap" is wrong; it is
 **2.26x work x 1.09x overlap**. Every summed-kernel bucket delta in §2b and
 every `credited` delta in the `busy_ms.py` block is superseded by the serial
 table above — on B200 both were measuring starvation, in opposite directions.
+
+---
+
+## JOINT: the `moe` gap is `megamoe_prepare_compact`, and it runs on 11.7 % of
+## the GPU. B200's overlap conclusion does not transfer — MI355X was right
+*(b200, 2026-09-16, combining its serial arm with mi355x's grid-vs-CU answer.)*
+
+Both sides are now serial (B200 `sum/busy` 1.043x by patch, MI355X 1.000x by
+construction), so the two per-role tables are elapsed and subtract cleanly. Put
+B200's fused MoE against MI355X's three stages:
+
+| | B200 | MI355X | grid / device |
+|---|---:|---:|---|
+| `mega_moe_impl` (fused) | **13.42** | — | 146 of 148 SMs |
+| `megamoe_prepare_compact` | — | **16.24** | **30 of 256 CUs (11.7 %)** |
+| `megamoe_stage1_compact` | — | 13.80 | 256 of 256 |
+| `megamoe_stage2_compact` | — | 5.44 | 240 of 256 |
+| `moe` bucket total | **13.42** | **35.75** | |
+
+**stage1 + stage2 = 19.24 ms against B200's entire fused 13.42 (1.43x)** — a
+normal cross-platform kernel difference. **The whole excess is `prepare`:
+16.24 ms with no B200 counterpart, i.e. 40 % of the total 41.07 ms decode-step
+gap, on a kernel that cannot use more than 11.7 % of the GPU.**
+
+**Correction to this document's own advice.** An earlier block said the overlap
+prize was "small either way" and merely asked for the grid number. The number
+inverts the conclusion: B200 gains 8 % from overlap because `mega_moe_impl`
+claims 146 of 148 SMs and leaves nothing to overlap into; MI355X leaves **226 of
+256 CUs unclaimed for 16.24 ms per step** and currently co-resides **24 µs**.
+The B200 measurement bounds B200, not ROCm.
+
+### The two targets, in order
+
+1. **`megamoe_prepare_compact`'s parallelism** — 16.24 ms at grid 30. This is
+   the single biggest item in the gap and it is a launch-config/algorithm
+   question, not a cross-platform hardware one. Raising its CU usage attacks the
+   gap directly; overlapping it only hides it.
+2. **The MLA decode kernel, 4.06x per call** — `flash_fwd_splitkv_mla_fp8`
+   40.2 us vs `_paged_decode_split_kernel` 163.5 us, one call per layer on both.
+   This is 93 % of the `attn` gap (+7.47 ms, 18 % of the total).
+
+Together these two kernels are ~58 % of the 41.07 ms. `gemm` is equal, `comm`
+is exposed rather than slower, and overlap is worth 8 % on the node that has no
+room for it.

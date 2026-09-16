@@ -34,23 +34,60 @@ so the earlier "only ~22 % of B200's wall is inside decode steps" was too low.
 The wall is flat to ±0.4 % across every rank and every `bs` from 1 to 12, which
 is what group-synchronous steps must look like:
 
-| rank | bs | n | wall p50 | compute p50 | barrier p50 | attn | gemm | moe | comm |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| TP-0 | 11 | 27 | 29.8 | 31.38 | 14.58 | 7.92 | 21.11 | 13.86 | 0.72 |
-| TP-0 | 12 | 11 | 30.0 | 31.47 | 14.77 | 7.95 | 21.17 | 14.05 | 0.72 |
-| TP-2 | 1 | 38 | 29.9 | 31.03 | 17.86 | 4.54 | 24.26 | 17.23 | 0.63 |
-| TP-3 | 8 | 40 | 29.9 | 31.57 | 14.79 | 8.03 | 21.16 | 14.23 | 0.56 |
-| TP-4 | 10 | 15 | 29.9 | 31.45 | 15.53 | 7.19 | 21.99 | 14.86 | 0.67 |
-| TP-5 | 4 | 24 | 29.9 | 31.09 | 16.46 | 5.86 | 23.00 | 15.79 | 0.67 |
-| TP-6 | 9 | 38 | 29.9 | 31.16 | 14.96 | 7.13 | 21.76 | 14.40 | 0.56 |
-| TP-7 | 9 | 28 | 29.8 | 31.36 | 14.85 | 7.41 | 21.68 | 14.29 | 0.56 |
+All values **p50** (an earlier revision of this table published the `ms/step`
+mean under a `p50` header; the two differ by <0.2 % here because each
+(rank, bs) group is tight — at bs=12, `attn` min/p50/max is 7.85/7.95/8.06 and
+`gemm` 20.89/21.22/21.32. `moe` is the exception at 16.8 %):
 
-`compute` is **31.0-31.6 ms across bs 1 to 12** — flat, confirming the earlier
-finding at a valid window. Within it `attn` rises with bs (4.54 → 7.95) and
-`gemm` falls (24.26 → 21.17), so quote the split with its bs.
+| rank | bs | n | wall | compute | barrier | attn | gemm | moe |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| TP-2 | 1 | 38 | 29.9 | 31.02 | 17.43 | 4.53 | 24.26 | 16.80 |
+| TP-5 | 4 | 24 | 29.9 | 31.12 | 16.12 | 5.86 | 23.03 | 15.45 |
+| TP-5 | 6 | 14 | 30.0 | 31.39 | 15.26 | 6.98 | 22.17 | 14.59 |
+| TP-3 | 8 | 40 | 29.9 | 31.55 | 14.31 | 8.03 | 21.13 | 13.75 |
+| TP-4 | 9 | 6 | 29.9 | 31.45 | 15.35 | 6.92 | 22.29 | 14.81 |
+| TP-6 | 9 | 38 | 29.9 | 31.14 | 14.86 | 7.12 | 21.75 | 14.29 |
+| TP-7 | 9 | 28 | 29.8 | 31.38 | 14.79 | 7.41 | 21.70 | 14.23 |
+| TP-4 | 10 | 15 | 29.9 | 31.47 | 15.16 | 7.19 | 22.01 | 14.49 |
+| TP-7 | 10 | 10 | 30.2 | 31.67 | 15.06 | 7.51 | 21.85 | 14.45 |
+| TP-0 | 11 | 27 | 29.8 | 31.36 | 14.25 | 7.92 | 21.09 | 13.53 |
+| TP-4 | 11 | 6 | 29.8 | 31.35 | 14.86 | 7.39 | 21.64 | 14.14 |
+| TP-0 | 12 | 11 | 30.0 | 31.52 | 14.42 | 7.95 | 21.22 | 13.70 |
+| TP-4 | 12 | 11 | 30.0 | 31.48 | 14.98 | 7.42 | 21.77 | 14.26 |
 
-`compute + barrier` is ~46-49 ms and near-constant per rank while `compute`
-alone varies — the group-sync signature MI355X describes, on this node too.
+### `compute` on this node is pace-pinned, NOT barrier-free
+
+`compute` sits at 31.0-31.7 ms across bs 1 to 12 and the wall never leaves
+30.0 ms. That flatness is not a clean result — it is the tell that `compute`
+contains absorbed wait:
+
+| bs 1 → 12 | delta |
+|---|---:|
+| `attn` | **+3.42** (4.53 → 7.95) |
+| `gemm` | **−3.04** (24.26 → 21.22) |
+| `moe` | −3.10 (16.80 → 13.70) |
+| `compute` total | +0.50 |
+| wall | +0.1 |
+
+**Real GEMM work cannot fall as batch rises.** Under DP attention the MLP/GEMM
+segment runs on a token count padded across ranks, so `gemm` should be constant;
+it drops 12.5 % instead, by almost exactly what `attn` gains. The rank with less
+of its own work spends the slack *inside* the GEMM kernels.
+
+Mechanism, not just correlation: deep_gemm kernels carry a **device-side grid
+sync** across ranks — the same `barrier.cuh:45 "Grid sync timeout"` this project
+hit when profiling — and `smN_fp8_fp4_gemm_1d1d_impl` is a deep_gemm kernel.
+
+Two alternatives are excluded. **cuda-graph padding** would make the roles
+constant, not falling, and `attn` clearly tracks real sequence lengths.
+**SM contention** predicts the opposite sign: `gemm` should slow down when
+`attn` is busier, and it speeds up.
+
+**Consequence: `METHOD.md`'s assumption that
+`compute = attn+gemm+quant+norm_rope+sample` is barrier-free does not hold on
+B200.** 31.5 ms is an upper bound on this node's real decode compute, not a
+measurement of it, and it must not be compared against a platform whose
+`compute` does track its own work.
 
 ## Per-role, full verify, bs=12, TP-0, n=11
 

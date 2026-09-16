@@ -166,8 +166,8 @@ ramp position, the step class, or both.
 | **step wall p50** | **30.0 ms** | **74.0 ms** | **2.47x** |
 | draft step wall | 2.0 | 4.0 | 2.0x |
 | summed kernel | 50.18 | 75.24 | 1.50x |
-| `compute` (attn+gemm+quant+norm_rope+sample) | 31.47 | 28.37 | **0.90x** |
-| `barrier` (moe+comm) | 14.77 | 40.85 | 2.77x |
+| `compute` (attn+gemm+quant+norm_rope+sample) | 31.52 | 28.37 | ~~0.90x~~ **not comparable, see §2** |
+| `barrier` (moe+comm) | 14.42 | 40.85 | ~~2.77x~~ **not comparable, see §2** |
 | summed kernel / wall (overlap) | **1.67x** | **1.00x** | |
 
 ### 1. The discriminator is answered — and it inverts the earlier reading
@@ -184,16 +184,37 @@ it — while the portion outside the decode step is slightly *better* on MI355X.
 wall is inside decode steps" pointed the other way and was an artefact of the
 retracted 15.9 ms.
 
-### 2. But it is not "decode kernels are slower" either
+### 2. WITHDRAWN — "compute is equal, so it is not the kernels"
 
-`compute` is **28.37 ms on MI355X against 31.47 ms on B200** — MI355X is 10 %
-*faster* on the barrier-free kernels, at a smaller bs. The entire decode-step
-gap sits in `barrier`, which on both nodes absorbs the DP group wait inside the
-fused MoE all-to-all (`compute + barrier` is near-constant per rank while
-`compute` alone varies: ~46-49 ms on B200, ~69-75 ms on MI355X).
+*(withdrawn by b200, 2026-09-16, one revision after it was published)*
 
-So the question has moved from "kernels or prefill" to **"why does MI355X's
-group wait cost 2.8x B200's"**, with two measured candidates below.
+This block said `compute` was 28.37 ms on MI355X against 31.47 on B200, so the
+kernels were not the problem and the whole gap was `barrier`. **That comparison
+is invalid: B200's `compute` is pace-pinned and contains absorbed wait, so it is
+an upper bound on B200's real compute rather than a measurement of it.**
+
+The evidence is in `b200-decode-trace.md` §"`compute` is pace-pinned": across
+bs 1 → 12 on B200, `attn` gains 3.42 ms while `gemm` *loses* 3.04 ms and `moe`
+3.10 ms, leaving `compute` flat at 31.0-31.7 and the wall at 30.0. Real GEMM
+work cannot shrink as batch grows — under DP attention the GEMM segment runs on
+a padded token count and should be constant. The slack is being spent inside
+deep_gemm kernels, which carry a device-side cross-rank grid sync.
+
+MI355X's `compute` does *not* look pinned — it spans 24.9-38.9 across ranks —
+so the two nodes' `compute` figures are not measuring the same thing and must
+not be divided.
+
+**What survives:** §1 is untouched. The decode step is **2.47x** slower on
+MI355X (wall 30.0 vs 74.0 ms) and accounts for the entire log-implied gap, while
+the portion outside it is 0.93x. Wall time is elapsed time and needs no
+barrier-free assumption.
+
+**What reopens:** whether that 2.47x is kernel work or intra-step wait. Both
+nodes attribute wait into kernel durations, so no role-level split currently
+answers it. Needed: an estimator of real compute that is immune to absorbed
+wait — e.g. a single-rank / TP-only run with no DP group to sync with, or
+per-kernel achieved FLOPs/bandwidth against peak, which `record_shapes` already
+makes possible and which nobody has computed on either node.
 
 ### 3. Candidate A — DP load imbalance: NOT ESTABLISHED, and the earlier
 ### framing of it was invalid
@@ -222,27 +243,24 @@ To settle it, MI355X should report `compute` for two or more ranks *at the same
 `bs`* within one capture, or bucket `compute` by bs the way `decode_stats.py`
 buckets `step_ms`.
 
-### 3b. What the overlapping batch sizes do establish
+### 3b. The overlapping batch sizes — controlled on bs, but still not comparable
 
-`bs` 9 and 10 appear on both nodes, which makes these two rows controlled:
+`bs` 9 and 10 appear on both nodes, so these rows are matched on batch:
 
-| bs | B200 `compute` | MI355X `compute` | MI355X vs B200 |
+| bs | B200 `compute` p50 | MI355X `compute` | ratio |
 |---:|---|---:|---:|
-| 9 | 31.16-31.48 | 24.94 | **0.79-0.80x** |
-| 10 | 31.45-31.60 | 28.36 | **0.90x** |
+| 9 | 31.14-31.45 | 24.94 | 0.79-0.80x |
+| 10 | 31.47-31.67 | 28.36 | 0.90x |
 
-So "MI355X's barrier-free compute is lower than B200's" **survives matching on
-bs, and is slightly stronger than the 0.90x quoted from the unmatched bs=12 vs
-bs=10 pair.** The headline conclusion — the gap is `barrier`, not `compute` —
-does not depend on the imbalance claim withdrawn above.
+**Matching on bs does not rescue this comparison.** Per §2, B200's `compute` is
+pace-pinned, so these ratios measure B200's *slack* as much as either node's
+work. Recorded only so the next person does not re-derive them and draw the
+conclusion we just withdrew.
 
-**Hypothesis, two points only, do not act on it yet:** B200's `compute` is flat
-in batch (31.03 at bs=1 to 31.47 at bs=12, i.e. fixed-cost dominated) while
-MI355X's rises 24.94 -> 28.36 from bs 9 to 10 (+13.7 %). If that slope held, the
-curves would cross near bs 11-12 — and MI355X's `running-req/rank` p50 is 12.
-But MI355X's own table is non-monotonic beyond bs=14 (16 -> 35.25,
-17-20 -> 28.87, the latter a p50 over mixed bs), so the slope is not real yet.
-The test is a `compute`-vs-bs curve per node, not two points.
+The one asymmetry worth keeping from these rows: B200's `compute` barely moves
+between bs 9 and 10 (31.14-31.67) while MI355X's moves 24.94 → 28.36 (+13.7 %).
+Consistent with B200 being pinned and MI355X tracking real work — which is the
+§2 argument again, not independent evidence for it.
 
 ### 4. Candidate B — the "stream overlap is worth 4-5 %" bound does NOT apply here
 
@@ -267,6 +285,15 @@ measured.**
 - **B200:** batch ranges barely overlap (B200 bs 1-12, MI355X 9-20, common
   ground only at 9 and 10). Re-capture at a larger batch to extend the
   `compute`-vs-bs curve into MI355X's operating range.
+- **Both:** the open question is now an estimator of real decode compute that
+  absorbed wait cannot contaminate. Two candidates, neither attempted:
+  a **TP-only / single-DP-rank run** of the same shapes (no group to sync with,
+  so nothing to absorb), or **achieved FLOPs/bandwidth against peak** per
+  kernel, which `record_shapes` already supports. Until one exists, quote step
+  wall — it is elapsed time and needs no barrier-free assumption.
 - **Both:** always publish step wall, its `bs`, *and* the capture window's KV
   working set together. Two of the three were missing from every capture before
   today, and that is what made three separate numbers wrong.
+- **Both:** `trace_summary.py` prints `ms/step` (a mean) and `p50` as separate
+  columns. B200 published the mean under a `p50` header for one revision. State
+  which you are quoting.

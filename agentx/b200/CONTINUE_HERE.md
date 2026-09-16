@@ -24,11 +24,17 @@ decode kernels.** Full detail and the two follow-ups are in
 
 - full-verify wall **30.0 ms B200 vs 74.0 ms MI355X** (2.47x), which accounts
   for the whole log-implied gap; the portion *outside* the decode step is
-  0.93x, i.e. slightly better on MI355X.
-- `compute` **31.47 vs 28.37 ms** — MI355X is 10 % faster on barrier-free
-  kernels. The gap is entirely `barrier` (moe+comm) 14.77 vs 40.85.
+  0.93x, i.e. slightly better on MI355X. **This is the durable result** — wall
+  is elapsed time and needs no barrier-free assumption.
 - decomposes as 1.50x more kernel time x 1.67x less overlap = 2.50x vs 2.47x
   measured.
+- **Whether the 2.47x is kernel work or intra-step wait is NOT resolved.** The
+  "`compute` is equal so it is not the kernels" claim was withdrawn the same
+  day: B200's `compute` is pace-pinned, not barrier-free. Across bs 1→12 `attn`
+  gains 3.42 ms while `gemm` *loses* 3.04 — real GEMM work cannot shrink as
+  batch grows, so the slack is being absorbed inside deep_gemm kernels (they
+  carry a device-side cross-rank grid sync). 31.5 ms is an upper bound on this
+  node's real compute, not a measurement.
 
 Three B200 numbers were retracted getting here: 15.9 ms (mid-ramp *and*
 class-mixed), the 151,908 tok/req "matched control" (came from a different run's
@@ -64,10 +70,16 @@ decode steps. So if MI355X's pure decode step wall is ~25 ms the gap is in
 kernels; if it is ~16 ms the gap is in the prefill/waiting portion and the
 kernel breakdown is the wrong place to look. **These have different fixes.**
 
-**Next action (B200 side):** the batches are not matched — B200 captured bs 1-12
-against MI355X's 9-20 (`running-req/rank` p50=12 there). Re-capture at a matched
-batch before treating the 0.90x `compute` ratio as final, since that ratio is
-the reason we stopped looking at kernels. GPUs idle (0 MiB); ~40 min per run.
+**Next action (B200 side):** find an estimator of real decode compute that
+absorbed wait cannot contaminate — a **TP-only / single-DP-rank run** at the
+same shapes (no group to sync with, so no slack to absorb), or **achieved
+FLOPs/bandwidth vs peak** per kernel from `record_shapes`. Everything else is
+blocked behind this: with `compute` pace-pinned, no role-level number on this
+node separates work from wait.
+
+Secondary: batches are not matched (B200 bs 1-12 vs MI355X 9-20, common ground
+only at 9 and 10), so a larger-batch capture would extend the curve into their
+operating range. GPUs idle (0 MiB); ~40 min per run.
 
 ```bash
 cd /workspace/agentx && ./free_gpus.sh && \

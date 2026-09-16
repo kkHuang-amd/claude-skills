@@ -778,3 +778,77 @@ safe**: at bs=1 `moe` is also larger (16.80 vs 13.70), so the same data is
 equally explained by more overlap with a longer MoE kernel, i.e. by the ~5 %
 contention measured here. The `mega_moe_impl` absorption claim is unaffected.
 (*ms, not µs — 22.48 ms summed over 396 calls.)
+
+---
+
+## Identifying B200's 217 us per-layer GEMM: not routed MoE, most likely the
+## alt-stream shared expert waiting on the a2a
+*(b200, 2026-09-16. Withdraws an unverified claim of its own.)*
+
+An earlier note called this kernel "a per-layer dense GEMM deliberately
+overlapped with the MoE all-to-all, probably the shared expert". **That was
+speculation.** Here is what is now measured.
+
+### Method: attribute in EXTEND, because decode cannot be attributed at all
+
+Decode steps are cuda-graph replays — `graph id` 32/92 on every kernel, and
+**0 of 15,732** `gemm_1d1d_impl` calls resolve to a CPU op, because the launches
+happened at capture time outside the window. **EXTEND steps are eager**
+(`graph id` 0) and **670 of 792** resolve. Use the GPU kernel event's own
+`External id` against `cpu_op` — the `cuda_runtime` correlation path only
+intersects 76 of 948 ids and is the wrong route.
+
+This works on the existing captures; no re-profiling was needed.
+
+### What the dense GEMM family actually is
+
+All of it is `sglang::deep_gemm_fp8_fp8_bf16_nt`. Five dim sets, from the two
+EXTEND steps at 6144 tokens (`[A, A_scale, B, B_scale, out]`, so N and K are
+readable):
+
+| dims | projection | calls |
+|---|---|---:|
+| `[6144,7168] … [2048,7168] → [6144,2048]` | fused qkv_a (q_lora 1536 + kv_lora 512) | 122 |
+| `[6144,1536] … [65536,1536] → [6144,65536]` | q_b_proj | 122 |
+| `[6144,16384] … [7168,16384] → [6144,7168]` | o_proj | 122 |
+| `[6144,7168] … [6144,7168] → [6144,6144]` | **shared-expert gate_up** (7168→2×3072) | 122 |
+| `[6144,3072] … [7168,3072] → [6144,7168]` | **shared-expert down** (3072→7168) | 122 |
+
+So **`num_fused_shared_experts == 0` on this arm** and the alt-stream
+shared-expert path at `deepseek_v2.py:1282-1287` is live — the shared expert is
+its own pair of dense GEMMs, not folded into the routed experts.
+
+### The answer, and the residual uncertainty
+
+- **It is NOT the routed-MoE GEMM.** Routed MoE is the `GemmType=4` grouped
+  instantiation (template carries `1024u, 4096u`, 16 groups). In decode that is
+  61 calls/step at **18.5 us** with **0 % overlap** with the `moe` bucket. It is
+  also the one thing EXTEND cannot resolve, because the MoE custom ops register
+  no shapes — the same gap MI355X reported for `record_shapes`.
+- **The 217 us kernel is `GemmType=0`, i.e. dense**, and the shared expert is
+  one of the five dense candidates above.
+- **The exact projection cannot be pinned**, because the tile instantiation is
+  chosen from M, and M is 6144 in EXTEND against ~40 in decode. Instantiations
+  do not carry across the two windows.
+
+**Quantitative argument that it is not doing its own work:** at fp4 (0.5 B per
+param) and TP8, the largest per-layer projection is o_proj at 117 M params, i.e.
+58.7 MB dense and ~7 MB per rank — single-digit microseconds at B200's HBM rate.
+The smallest observed decode group is 15 us, already several times that bound,
+which is normal small-M GEMM inefficiency. **217 us is ~30x the bound for any of
+these projections.** No projection's own work explains it.
+
+Combined with the 99 % overlap against the `moe` bucket, and with the fact that
+the shared expert is exactly what the code places on `alt_stream` to overlap the
+MoE call, the consistent reading is: **the 217 us is the alt-stream
+shared-expert GEMM, mostly waiting on the MoE all-to-all rather than computing.**
+That also explains why the *same* instantiation runs 91 calls/step at 24.8 us
+with 0 % overlap.
+
+**To close it, one clean experiment:** re-capture decode with `with_stack=true`,
+or compare against the breakable-cuda-graph path, where
+`deepseek_v2.py:1289`'s own comment says the shared experts "overlap nothing".
+
+**Standing lesson for both nodes:** kernel identity cannot be established inside
+a graph-replayed window. Attribute in EXTEND, then carry the *symbol family*
+(dense vs grouped) rather than the tile instantiation across to decode.

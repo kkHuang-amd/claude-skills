@@ -468,3 +468,119 @@ Two numbers nobody has for B200 and which this produces for free: **how much of
 the 30 ms wall the GPU was idle**, and **which roles B200 is actually overlapping
 with which** (from `union` minus `exclusive`). If B200's idle is large, part of
 the 2.47x is launch/sync gaps rather than kernel work — a different fix again.
+
+## Appendix — full MI355X role composition, rank 7, `TARGET_VERIFY full` bs=10
+
+n=16 steps, summed kernel 75.24 ms/step. Since the step is perfectly serial
+(§13), **`ms/step` here is elapsed time and the roles sum to the step wall.**
+Names are demangled; `[mangled]` marks ones `c++filt` could not decode (aiter
+writes bf16 as the non-standard `DF16b`), where the identifier was recovered
+from the Itanium length prefixes. Reproduce with
+`python3 analysis/kernel_dump.py <trace dir>`.
+
+Cut at 0.02 ms/step. Note two naming corrections to §10: what earlier tables
+printed as `flash_cN_prefill` is **`flash_c128_prefill`**, and `flash_c4_prefill`
+appears as **two** template instantiations (0.163 + 0.143 = 0.306 ms over 60
+calls) — the digit-normalising in `trace_common.norm_name` had merged and
+obscured both.
+
+### moe — 35.49 ms/step, 47.2 %, 3 kernels
+
+| ms/step | calls | µs/call | kernel |
+|---:|---:|---:|---|
+| 16.244 | 61 | 266.3 | `megamoe_prepare_compact_m32_dcu32_pcu1_pc384_qcu28qcap256_fov_runtime_dyn_tss12488_v13` |
+| 13.799 | 61 | 226.2 | `megamoe_stage1_compact_t32x512x256_w8_gm1_dcu32_pw1ma1sw1_cgc256aa1_tr1wpe2_bnt3_ws4_pc384_tss12488_rc31` |
+| 5.444 | 61 | 89.2 | `megamoe_stage2_compact_t32x256x256_sbm32_fp8_nt1_p1cu240s0_pad0_sk0_bh1apf1sp4x2_bf16lds0_fp8_blockwise` |
+
+All three are exactly 61 calls — one per layer. B200's whole MoE is one fused
+`mega_moe_impl` at 14.85 ms, i.e. less than `prepare_compact` alone.
+
+### attn — 15.67 ms/step, 20.8 %, 15 kernels
+
+| ms/step | calls | µs/call | kernel |
+|---:|---:|---:|---|
+| 9.974 | 61 | **163.5** | `_paged_decode_split_kernel` — the MLA decode core, 4.06x B200 |
+| 1.250 | 121 | 10.3 | `aiter::mhc_fused_post_pre_gemm_sqrsum_kernel` [mangled] |
+| 1.092 | 30 | 36.4 | `pa_mqa_logits_fp4_prefill_kernel_0` — DSv4 indexer logits |
+| 0.894 | 121 | 7.4 | `aiter::mhc_pre_big_fuse_rmsnorm_kernel` |
+| 0.831 | 61 | 13.6 | `_paged_decode_reduce_kernel` — split-K reduction |
+| 0.830 | 30 | 27.7 | `sglang::topk_main_kernel` — indexer top-k |
+| 0.271 | 61 | 4.4 | `sglang::fused_norm_rope_flashmla` |
+| 0.163 | 30 | 5.4 | `sglang::flash_c4_prefill` (instantiation 1) |
+| 0.151 | 31 | 4.9 | `sglang::flash_c128_prefill` |
+| 0.143 | 30 | 4.8 | `sglang::flash_c4_prefill` (instantiation 2) |
+| 0.039 | 1 | 38.9 | `_init_compressed_attn_metadata_kernel` |
+| 0.036 | | | +4 kernels below 0.02 ms |
+
+**64 % of `attn` is one kernel**, and it is the target named in §10.
+
+### gemm — 9.36 ms/step, 12.4 %, 12 kernels
+
+No single dominant kernel; this is four different GEMM backends coexisting
+(aiter asm, opus flatmm, CK, rocBLAS/Tensile).
+
+| ms/step | calls | µs/call | kernel |
+|---:|---:|---:|---|
+| 4.049 | 183 | 22.1 | `aiter::fp8gemm_bf16_blockscale_BpreShuffle_80x128` |
+| 1.378 | 61 | 22.6 | `gemm_a8w8_mxscale_flatmm_splitk_kernel` [mangled] |
+| 1.012 | 61 | 16.6 | `ck::kernel_gemm_xdl_cshuffle_v3_multi_d_blockscale_b_preshuffle` [mangled] |
+| 0.502 | 61 | 8.2 | `_gemm_a8w8_blockscale_preshuffle_kernel` (M128/N32) |
+| 0.452 | 61 | 7.4 | `hgemm_bf16_t32x32x64x6_ksd_w1x2x1` |
+| 0.386 | 30 | 12.9 | `hgemm_bf16_t64x64x64x5_ksd_w4x2x1` |
+| 0.311 | 30 | 10.4 | `_gemm_a8w8_blockscale_preshuffle_kernel` (M32/N32) |
+| 0.311 | 31 | 10.0 | `hgemm_bf16_t48x64x128x3_ksd_w1x4x1` |
+| 0.278 | 1 | 277.8 | `Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_MT256x80x128` — rocBLAS/Tensile, once per step |
+| 0.275 | 61 | 4.5 | `_gemm_a8w8_blockscale_reduce_kernel` (split-K reduce) |
+| 0.253 | 30 | 8.4 | `hgemm_bf16_t48x32x64x6_ksd_w1x2x1` |
+| 0.158 | 30 | 5.3 | `hgemm_bf16_t32x32x64x8_ksd_w2x2x1` |
+
+### comm — 6.43 ms/step, 8.5 %, 2 kernels
+
+| ms/step | calls | µs/call | kernel |
+|---:|---:|---:|---|
+| 6.166 | 61 | 101.1 | **`ep_combine_intranode_0`** — the real EP-combine all-to-all |
+| 0.262 | 61 | 4.3 | `_fused_clamp_silu_mul_kernel` — MoE activation, belongs in `moe` |
+
+### copy — 3.98 ms/step, 5.3 %, 15 kernels
+
+| ms/step | calls | µs/call | kernel |
+|---:|---:|---:|---|
+| 0.803 | 67 | 12.0 | `at::native::elementwise_kernel_manual_unroll` (direct_copy) |
+| 0.757 | 183 | 4.1 | `_fill_padded_rows_kernel` — MoE row padding, no B200 counterpart |
+| 0.625 | 66 | 9.5 | `at::native::elementwise_kernel_manual_unroll` (direct_copy, 2nd inst.) |
+| 0.533 | 122 | 4.4 | `__amd_rocclr_fillBufferAligned` — hipMemset backing kernel |
+| 0.392 | 92 | 4.3 | `at::native::vectorized_elementwise_kernel` (bf16→fp32 copy) |
+| 0.363 | 69 | 5.3 | `at::native::index_elementwise_kernel` |
+| 0.271 | 61 | 4.4 | `_swa_scatter_kernel` |
+| 0.143 | 31 | 4.6 | `_fill_compress_tail_kernel` |
+| 0.055 | 10 | | `Memcpy DtoD` + `__amd_rocclr_copyBuffer` |
+| 0.034 | | | +5 kernels below 0.02 ms |
+
+This is the bucket B200 has essentially nothing in (0.06 ms). It is
+**7 distinct aten/rocclr fill-and-copy kernels plus MoE row padding**, none of
+it fused away.
+
+### quant — 2.21 ms/step, 2.9 %, 12 kernels
+
+| ms/step | calls | µs/call | kernel |
+|---:|---:|---:|---|
+| 0.949 | 212 | 4.5 | `aiter::dynamic_per_group_scaled_quant_kernel` [mangled] |
+| 0.365 | 61 | 6.0 | `_wo_a_quant_mxfp8_kernel` |
+| 0.297 | 62 | 4.8 | `at::native::elementwise_kernel_manual_unroll` (nocast) |
+| 0.266 | 61 | 4.4 | `_fused_rms_fp8_group_quant_kernel` |
+| 0.171 | 30 | 5.7 | `aiter::norm_rope_hadamard_rotate_activation_fp4quant_kvcache_kernel` [mangled] |
+| 0.131 | 30 | 4.4 | `aiter::rope_hadamard_rotate_activation_fp4quant_kernel` [mangled] |
+| 0.030 | | | +6 kernels below 0.02 ms |
+
+### norm_rope — 0.72 ms/step, 1.0 % · sample — 0.40 ms/step, 0.5 %
+
+`_fused_qk_norm_rope_store_kernel` 0.442 (61) and `apply_rotary_emb_flat_kernel`
+0.278 (61); `aiter::topk_gating_kernel_opt` 0.387 (58) plus one below 0.02.
+
+### other — 0.99 ms/step, 1.3 %, 37 kernels
+
+`at::native::vectorized_elementwise_kernel` (CUDAFunctor_add) 0.268 (61),
+`sglang::write_c4_prefill` 0.132 + 0.127 (30 each, two instantiations),
+`sglang::write_c128_prefill` 0.131 (31), `_hc_head_kernel` 0.052 (1), then a
+long tail of 30 kernels totalling 0.233 ms. The `write_c*_prefill` family is
+the DSv4 compressed-KV write and lands in `other` on **both** nodes.

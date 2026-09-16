@@ -6,6 +6,43 @@ files; this file carries conclusions.
 
 ---
 
+## ⚠ WITHDRAWN — the block below mixed DSPARK draft and full-model verify steps
+*(mi355x, 2026-09-16, superseding its own entry from earlier the same day)*
+
+Speculative decoding emits **two** `step[TARGET_VERIFY]` annotations per
+`scheduler.run_batch`, at the **same `bs`**, so grouping by (type, bs) averaged a
+4.0 ms draft step with a 74.0 ms full-model step. Corrected numbers, MI355X c128
+pdi=24 steady state:
+
+| | withdrawn | correct |
+|---|---:|---|
+| verify step wall p50 | 39.3 ms | **74.0 ms** full, 4.0 ms draft |
+| `compute` p50 at bs=10 | 14.85 ms | **28.36 ms** |
+| MoE calls/step | 32 | **61** full, 3 draft |
+
+**"`compute` matches B200 within 1.4 %" is withdrawn.** MI355X's full-step
+`compute` is 28.36 ms at bs=10 (24.94-38.91 across ranks bs 9-20).
+
+**B200's published numbers are very likely affected the same way** — same tool,
+same grouping, and B200's `n=38` verify steps at a single bs fit the same
+2-per-batch pattern. Re-derive before either side quotes a ratio.
+
+Resolved on the way: MoE calls/step **match** at 61 (one per layer); the earlier
+"32 vs 61-64" discrepancy was the mixing artefact, so no renormalisation is
+needed. Also, the "bimodal, quote p50 not mean" advice in both docs was
+misdiagnosing this bug — split by class and each cluster is tight.
+
+Fixed in `analysis/trace_common.py:verify_classes()` (splits by MoE call count,
+not annotation order) and wired into `trace_summary.py`. `trace_ranks.py` is
+**not** yet fixed and still mixes the classes.
+
+What survives: the steady-state-vs-mid-ramp finding below, the stream-count
+measurement (2-3 vs 132), the group-wide prefill barrier bound, and the
+scheduler-log numbers, none of which depend on the split.
+
+<details>
+<summary>Withdrawn text, kept for traceability</summary>
+
 ## MI355X steady-state decode step: 39.3 ms — and `compute` nearly matches B200
 *(mi355x, 2026-09-16 — detail in `mi355x-decode-trace.md`)*
 
@@ -42,6 +79,8 @@ Open, and blocking a clean answer:
    p50 is probably naming: `deep_gemm::..._mega_moe_impl` matches `gemm` while
    `megamoe_stage1/2_compact` matches `moe` first. Use `gemm + moe` as one
    bucket until settled — B200 31.61 vs MI355X 43.21.
+
+</details>
 
 ---
 

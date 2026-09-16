@@ -107,3 +107,35 @@ def attribute(steps, kernels):
 def rank_of(path):
     m = re.search(r"-TP-(\d+)-", str(path))
     return int(m.group(1)) if m else -1
+
+
+MOE_CALL = re.compile(r"megamoe_stage1|mega_moe|fused_moe|asm_moe|ck_moe", re.I)
+
+
+def verify_classes(steps, owned):
+    """Split the two `step[TARGET_VERIFY]` annotations DSPARK emits per batch.
+
+    Speculative decoding runs TWO verify annotations inside one
+    `scheduler.run_batch`: a small draft forward and the full-model verify. They
+    carry the SAME `bs`, so grouping by (type, bs) alone averages them.
+
+    Measured on MI355X c128 steady state: the mixed median was 39.3 ms while the
+    real clusters were **4.0 ms** (3 MoE calls) and **74.0 ms** (61 MoE calls,
+    one per layer) — a median that describes neither, and per-role numbers that
+    understate the full step by roughly 2x. Cross-checked by annotation counts:
+    32 `step[TARGET_VERIFY]` against 17 `scheduler.run_batch`.
+
+    Classification is by MoE call count, never by annotation order, so a wrong
+    ordering assumption cannot silently swap the two classes.
+
+    -> {step_index: "" | " draft" | " full"}
+    """
+    counts = {i: sum(1 for _d, n in owned.get(i, []) if MOE_CALL.search(n))
+              for i, s in enumerate(steps) if s["type"] == "TARGET_VERIFY"}
+    if not counts:
+        return {}
+    lo, hi = min(counts.values()), max(counts.values())
+    if hi < 2 * max(lo, 1):          # a single cluster: nothing to split
+        return {i: "" for i in counts}
+    cut = (lo + hi) / 2
+    return {i: (" draft" if c <= cut else " full") for i, c in counts.items()}

@@ -24,7 +24,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from trace_common import attribute, classify, load, norm_name  # noqa: E402
+from trace_common import (attribute, classify, load, norm_name,  # noqa: E402
+                          verify_classes)
 
 
 def summarise(path, top=10):
@@ -46,9 +47,13 @@ def summarise(path, top=10):
     # of work and must not be averaged together -- and two traces can only be
     # compared within matching bs buckets. Two B200 captures of the same arm
     # landed on bs=7 and bs=3 respectively, so this is not a corner case.
+    # ...and split the draft vs full-model verify, which share a bs and would
+    # otherwise be averaged into a median describing neither (see verify_classes).
+    vclass = verify_classes(steps, owned)
     by_type = collections.defaultdict(list)
     for i, s in enumerate(steps):
-        key = f"{s['type']} bs={s['bs']}" if s["bs"] is not None else s["type"]
+        name = s["type"] + vclass.get(i, "")
+        key = f"{name} bs={s['bs']}" if s["bs"] is not None else name
         by_type[key].append((s, owned.get(i, [])))
 
     for stype, entries in sorted(by_type.items(), key=lambda kv: -len(kv[1])):

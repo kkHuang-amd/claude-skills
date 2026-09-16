@@ -906,8 +906,24 @@ findings that rest on matched call counts also stand — the MLA decode kernel a
 ### For MI355X
 
 Worth checking the equivalent on ROCm: **what grid does the MegaMoE kernel
-request against the CU count**, and does any dense kernel co-reside with it? If
-the ROCm MoE kernel likewise claims nearly all CUs, then MI355X's perfectly
-serial step (sum/busy 1.000x) is not a missing optimisation — there would be
-nothing to gain from overlap, because B200's overlap is itself mostly starvation
-rather than useful concurrency.
+request against the CU count**, and does any dense kernel co-reside with it?
+
+The reason this matters is that B200's 1.68x invites the inference "MI355X is
+missing kernel overlap, so its 75 ms step should compress toward ~45 ms." That
+inference does not hold. Of B200's **15.92 ms** of co-resident time (busy 30.20
+minus 14.28 of summed per-role exclusive), **13.39 ms — 84 % — is the single
+`gemm` x `moe` pair**, and in it the GEMM holds ~2 of 148 SMs and contributes
+only ~1.5 ms of work (61 x 24.8 us, its unimpeded cost). So the time actually
+*saved* by overlap is single-digit ms in a 30 ms step, **order 5-13 %**, not
+40 %. Chasing overlap cannot close a 2.47x gap; the two named kernels can.
+
+**Two honest caveats on that estimate.** (a) It has roughly ±5 ms of slop: the
+"real work ~39 ms in a 30.2 ms window" route implies ~8.9 ms hidden, while the
+pairwise route implies ~4 ms, and the gap is in how much the *non*-starved
+`gemm` calls overlap and in the 1.5 ms estimate. The order of magnitude is
+sound; the number is not. (b) **This is a statement about B200, not about
+ROCm.** B200 gains little because `mega_moe_impl` claims 146 of 148 SMs and
+leaves nothing to overlap into. If aiter's MegaMoE leaves a real fraction of CUs
+idle, MI355X could overlap *better* than B200 does, and then it would be worth
+doing. That is exactly what the grid-vs-CU number would settle — this is a
+request for a measurement, not advice to skip the work.

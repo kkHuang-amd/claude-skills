@@ -216,6 +216,62 @@ wait — e.g. a single-rank / TP-only run with no DP group to sync with, or
 per-kernel achieved FLOPs/bandwidth against peak, which `record_shapes` already
 makes possible and which nobody has computed on either node.
 
+### 2b. Where the 44 ms actually goes, matched at bs=10
+
+*(b200, 2026-09-16. B200 = mean of TP-4 n=15 and TP-7 n=10 at bs=10; MI355X =
+rank 7 bs=10. All p50.)*
+
+The wall gap splits in two before any role is named:
+
+| | ms |
+|---|---:|
+| wall, B200 → MI355X | 30.0 → 74.0 (**+43.95**) |
+| of which: more kernel time | **+23.65** |
+| of which: overlap B200 gets and MI355X does not | **+20.30** |
+
+B200 fits 50.52 ms of kernels into a 30.0 ms wall (hides 20.48); MI355X fits
+74.17 into 74.0 (hides 0.17).
+
+The +23.65 ms of kernel time attributes as:
+
+| bucket | B200 | MI355X | delta | % of gap | % of B200 step | % of MI step | nature |
+|---|---:|---:|---:|---:|---:|---:|---|
+| attn | 7.35 | 15.67 | **+8.32** | **35.2 %** | 14.5 % | 21.1 % | pure execution both sides |
+| gemm+moe | 36.40 | 43.74 | **+7.34** | **31.0 %** | **72.0 %** | **59.0 %** | contains absorbed wait both sides |
+| comm | 0.64 | 6.48 | **+5.84** | **24.7 %** | 1.3 % | 8.7 % | pure |
+| copy+other | 3.85 | 4.95 | +1.10 | 4.6 % | 7.6 % | 6.7 % | classification boundary differs |
+| quant | 1.58 | 2.21 | +0.62 | 2.6 % | 3.1 % | 3.0 % | pure |
+| sample | 0.14 | 0.40 | +0.26 | 1.1 % | 0.3 % | 0.5 % | |
+| norm_rope | 0.56 | 0.72 | +0.16 | 0.7 % | 1.1 % | 1.0 % | |
+
+**The largest clean difference is attention, not MoE.** `attn` is 2.13x and is
+verified pure execution on both nodes, so it is the one row where a kernel-level
+comparison is meaningful today. With `comm` (10x, also pure) it is 60 % of the
+kernel gap, and neither needs a barrier-free assumption.
+
+`gemm+moe` dominates each step's *share* (72 % / 59 %) but its +7.34 is not a
+result — both platforms absorb their group wait into this bucket.
+
+`copy` and `other` are merged deliberately. Split, they read +3.93 and −2.82,
+which is mostly MI355X's new `fillbuffer|fill_padded_rows|fill_compress_tail`
+patterns moving time out of `other` while B200's `other` still holds
+`mhc_*_tilelang` and unclassified `nvjet_*`. Merged, the real difference is
++1.10.
+
+### 2c. Which B200 kernels absorb wait — measured, not assumed
+
+Same kernel, same call count, *less* work, *more* time:
+
+| kernel | bs=1 | bs=12 | calls/step | verdict |
+|---|---:|---:|---:|---|
+| `deep_gemm::smN_fp8_fp4_gemm_1d1d_impl` | 22.48 | 19.36 | 396 both | **absorbs** (56.8 → 48.9 µs/call) |
+| `deep_gemm::smN_fp8_fp4_mega_moe_impl` | 17.22 | 13.84 | 61 both | **absorbs** |
+| `flash_fwd_splitkv_mla_fp8_*` (attn) | 1.14 | 2.90 | 61 both | pure — scales with work |
+
+So **two** deep_gemm kernels absorb the group wait on B200, not just the MoE one;
+`attn`, `quant`, `norm_rope`, `comm` and `copy` track their own work. This is
+what makes the `attn` and `comm` rows above usable and the `gemm+moe` row not.
+
 ### 3. Candidate A — DP load imbalance: NOT ESTABLISHED, and the earlier
 ### framing of it was invalid
 

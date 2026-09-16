@@ -672,9 +672,191 @@ asserted:
 1. Co-schedule something real with `megamoe_prepare_compact` (the attention
    pre-work is the obvious candidate, it is 15.67 ms on the same stream) and
    measure the step wall. That is the one experiment that settles the upside.
+   **But read §15 first — the grid is probably not the reason it is slow.**
 2. Ask whether `pcu1` / `qcu28` are simply mistuned for a 256-CU part — this is
    a config in `mega_moe_prepare.py`, not a kernel rewrite, and it is a cheaper
    first probe than restructuring streams.
 3. Still independent of all of this: the MLA decode kernel at 4.06x
    (`_paged_decode_split_kernel`, 163.5 µs/call). It is 13.3 % of the step and
    needs no cross-node coordination.
+
+## 15. `megamoe_prepare_compact` is a cross-rank dispatch protocol with a spin-wait, not a compute kernel
+
+*(mi355x, 2026-09-16, from the generator source. **Mechanism established,
+magnitude NOT measured** — see the falsification test at the end, which is
+scripted and unrun.)*
+
+§14 reported that this kernel launches grid 30 on a 256-CU part and invited the
+reading "it is under-parallelised". B200 then made that its target #1, "raising
+its CU usage attacks the gap directly". **Reading the generator suggests the
+grid is a consequence, not the cause.**
+
+`aiter/ops/flydsl/kernels/mega_moe/mega_moe_prepare.py` builds an inter-rank
+protocol, not a GEMM:
+
+| line | what |
+|---|---|
+| `:43,57,62` | `npes = fuse_npes`, `total_experts = npes * epr`, `assert dispatch_blocks % npes == 0` — it is parameterised by the **number of ranks** |
+| `:111` | `comm_ops.atomic_add_agent(entry_count, 1)` — CTAs draw a ticket |
+| `:188` | `comm_ops.wait_i32_until_equals(epoch_gate, gate_epoch)` — an explicit **spin-wait** on an epoch gate |
+| `:177` | `fx.rocdl.s_waitcnt(0)` |
+| `:180-197` | `store_i32_system` / `load_i32_system` / `fence_system_acquire` — **system-scope** (cross-device) coherence, not agent-scope |
+| `:201-235` | `emit_dispatch_plan` / `emit_dispatch_group` carrying `fz_npes`, `fz_rank`, `fz_epr` |
+
+And the grid is small **by design for a small batch**. `mega_moe_config.py:273`
+sets `prepare_quant_cu = max(64, min(192, (3 * bucket) // 512))` with the
+comment "Quant work grows linearly with tokens… 64 through 8K, 96 at 16K, 192 at
+32K", while `mega_moe_v2.py:144-151` notes that "small batches continue to
+launch only their useful subset and do not pay for the capacity". At decode
+(~40 tokens) the useful subset is `qcu28`, and `pcu1` means the prepare role is
+**one** CTA. `launch_grid = prepare_blocks + quant_blocks + 1 = 30`.
+
+**Why this matters for the target list.** A kernel whose time sits in
+`wait_i32_until_equals` on a cross-rank gate does not get faster with more CUs.
+If that is where the 266 µs/call goes, then "raise its CU usage" and
+"co-schedule work against it" both attack the wrong thing — the first changes
+nothing, the second hides a wait that is already free capacity. It would also
+mean MI355X **exposes both halves of the all-to-all** — dispatch inside
+`prepare` (16.24 ms, bucketed `moe`) and combine as `ep_combine_intranode`
+(6.17 ms, bucketed `comm`), i.e. **22.41 ms/step of exposed EP traffic** —
+where B200 fuses its a2a inside `mega_moe_impl` (13.42 ms serial, total).
+That reframes the "+22.33 ms `moe` gap" as substantially a communication-exposure
+difference rather than slower MoE math.
+
+**This is a hypothesis from source, and it must not be quoted as a
+measurement.** Per `perf-bottleneck-attribution`: the code shows the wait
+exists; it does not show the time is in it. Two things are consistent with it
+but do not prove it — `moe` was the only bucket that *shrank* as work grew on
+rank 0 (−3.8 % over bs 17→20, §11), and `compute + barrier` is constant within
+0.9 % while `compute` spans 1.56x (§11).
+
+### ✅ CONFIRMED by measurement — `prepare` is a wait, and it holds the whole imbalance
+
+`analysis/prepare_wait.py`, steady capture, all five decoding ranks, per-call µs
+against the rank's own `compute`:
+
+| rank | bs | compute | **prepare** | stage1 | stage2 | ep_combine | mla_split | mla_fused |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 3 | 9 | 24.94 | **325.0** | 221.5 | 88.4 | 106.6 | 117.5 | — |
+| 7 | 10 | 28.36 | **266.3** | 226.2 | 89.2 | 101.1 | 163.5 | — |
+| 0 | 17 | 28.76 | **251.2** | 238.6 | 88.9 | 82.2 | — | 165.3 |
+| 0 | 18 | 28.78 | **252.1** | 240.4 | 89.7 | 85.4 | — | 166.3 |
+| 0 | 19 | 34.45 | **217.5** | 245.1 | 90.2 | 84.6 | — | 223.1 |
+| 0 | 20 | 35.06 | **216.3** | 249.5 | 91.4 | 84.1 | — | 231.7 |
+| 6 | 16 | 35.25 | **156.1** | 237.5 | 92.1 | 87.0 | — | 266.1 |
+| 1 | 14 | 38.91 | **102.9** | 238.9 | 92.5 | 83.8 | — | 330.7 |
+
+| kernel | r vs own compute | verdict |
+|---|---:|---|
+| **`prepare`** | **−0.942** | **WAIT** |
+| `stage1` | +0.672 | real work |
+| `stage2` | +0.943 | real work |
+| `mla_fused` | +0.961 | real work |
+| `ep_combine` | −0.665 | **inconclusive** — flat within rank 0 (82.2/85.4/84.6/84.1), so the cross-rank trend is confounded by rank |
+
+**The within-rank control settles it.** Rank 0 alone spans bs 17→20, so rank is
+fixed: `compute` rises 28.76 → 35.06 while `prepare` falls **251.2 → 216.3** and
+`stage1` (238.6 → 249.5), `stage2` (88.9 → 91.4) and `mla_fused`
+(165.3 → 231.7) all rise. `prepare` is the only kernel that gets *shorter* as
+its own rank gets busier.
+
+**`compute + prepare` is constant.** Over the five cells whose wall is ~74.0 ms:
+44.77 / 44.60 / 44.08 / 44.16 / 44.77 / 45.19 ms — a **2.5 % spread** while
+`compute` itself spans **1.56x** (24.94-38.91). Tighter than the
+`compute + barrier` invariant in §11, because **`prepare` is the single
+synchronisation point of the step**: `stage1`, `stage2` and `ep_combine` are
+nearly equal across ranks (221-250, 88-93, 82-107 µs) once `prepare` has
+levelled everyone.
+
+**Two MLA decode variants, which also fixes an artefact.** aiter selects
+`_paged_decode_split_kernel` at bs 9-10 and `_paged_decode_fused_kernel` at
+bs 14-20. An earlier version of this script tracked only the split variant, read
+0.0 on three ranks, and reported a spurious "mla_decode is a WAIT". Tracked
+separately, the MLA decode core is the clearest *work* signal in the step:
+7.17 ms/step (rank 3) to 20.18 ms/step (rank 1), **2.8x**, tracking `compute` at
+r = +0.961. The cross-platform 4.06x in §10 is the **split** variant at the
+matched bs=10 cell against B200's `flash_fwd_splitkv_mla_fp8`; it is not a
+claim about the fused variant.
+
+### What the 16.24 ms actually decomposes into
+
+The straggler is **by definition not waiting for anybody**, so its 102.9 µs/call
+is the protocol's own cost, not queueing:
+
+| | µs/call | ms/step | what it is |
+|---|---:|---:|---|
+| straggler (rank 1) | 102.9 | **6.28** | the protocol floor — 61 cross-rank gate crossings |
+| rank 7 (B200's comparison cell) | 266.3 | 16.24 | 6.28 floor + **9.96 idle** |
+| lightest rank (rank 3) | 325.0 | 19.83 | 6.28 floor + 13.55 idle |
+
+**So B200's "`prepare` is 16.24 ms, 40 % of the 41.07 ms gap" overstates the
+real cost by ~10 ms.** The recoverable-by-kernel-work part is **6.28 ms, 8.5 %
+of the step**; the rest is rank 7 idling until the straggler arrives.
+
+## 16. How to actually reduce `megamoe_prepare_compact`
+
+Two of the obvious ideas do not work, and the arithmetic says why.
+
+**✗ Raising its CU usage / fixing `pcu1`+`qcu28` does not help the wait.** A
+`wait_i32_until_equals` spin on a system-scope gate does not go faster with more
+CTAs. At most this could touch part of the 6.28 ms floor, and only if that floor
+is plan-emission work rather than the gate crossing itself — which is the open
+question below, not something the grid number answers. This was §14's
+implication and B200's target #1; the measurement does not support it.
+
+**✗ Co-scheduling other work against `prepare` does not shorten the step.** On
+the seven ranks that are waiting, the capacity is already free and the rank
+still cannot finish before the straggler. On the straggler there is only
+6.28 ms to hide. This is the case B200's own 8 % overlap result should have
+warned about, and it is why "226 of 256 CUs idle" is a weaker lead than §14
+implied — **the CUs are idle because the rank is waiting, not because the kernel
+is under-parallelised.**
+
+**✓ Lever 1 — balance on KV tokens, not on request count.** The step wall is set
+by the straggler's `compute`, and that is driven by the MLA decode kernel, which
+spans **165.3-330.7 µs/call (2.0x)** across ranks. It tracks **KV tokens, not
+`bs`**: rank 1 carries bs=14 at 330.7 µs while rank 0 carries bs=18 at 166.3.
+The launcher currently runs `--load-balance-method total_requests` (set to match
+B200), i.e. it balances exactly the wrong quantity. SGLang already implements
+the right one:
+
+- `LoadBalanceMethod.TOTAL_TOKENS` (`data_parallel_controller.py:92`), which
+  dispatches to `min(total_tokens)` with `total_requests` as tie-breaker
+  (`:125-130`)
+- fed by `LoadSnapshot.num_total_tokens` (`load_snapshot.py:201`), a per-rank
+  KV-occupancy metric
+
+Rough size of the prize: at perfect balance the straggler's `compute` would fall
+from 38.91 toward the ~31.2 mean, ~7.7 ms, and since `compute + prepare` is
+constant the wall should follow — **74.0 → ~66 ms, order 10 %.** Treat that as
+an upper bound on this lever; it assumes balance is reachable and that moving KV
+between ranks is free.
+
+**⚠ And it is not free: it fights `--policy cache_aware`.** The router
+deliberately sends requests to ranks holding a usable prefix, which *creates*
+the KV skew. So this is an ITL↔TTFT A/B of the same family as the pdi knob, not
+a free win. **EPLB will not help either** — the imbalance here is in
+attention/KV, not in expert routing, which is all EPLB rebalances.
+
+**✓ Lever 2 — attack the 6.28 ms floor by pipelining, not by widening.** The
+floor is **61 separate cross-rank gate crossings per step**, one per layer.
+Overlapping `prepare(layer n+1)` with `stage1`/`stage2(layer n)` hides the
+crossing behind MoE GEMM **on the straggler as well**, which is the one place
+hiding actually shortens the step. B200 gets this for free: its single fused
+`mega_moe_impl` has no per-layer host-visible gate to cross. Note this is the
+*opposite* recommendation from "co-schedule unrelated work" above — the win comes
+from pipelining the dependency chain, not from filling idle CUs.
+
+**The one measurement that decides how far Lever 2 can go** is the **TP-only /
+single-DP-rank run** (`npes = 1`, nobody to wait for):
+
+- if the 102.9 µs/call floor **collapses**, it is still synchronisation, and
+  pipelining is the fix while `pcu`/`qcu` tuning remains pointless;
+- if it **holds near 102.9 µs**, that is real dispatch-plan emission, and then
+  `pcu1` — a single CTA emitting the plan — is genuinely worth raising, and
+  §14's occupancy reading was right after all for this residue.
+
+Either way the ordering changes: **the MLA decode kernel is now target #1** on
+its own numbers (7.17-20.18 ms/step, 4.06x per call against B200 at matched bs),
+and `prepare` splits into a load-balancing problem (~10 ms of idle, worth ~7.7 ms
+of wall) plus a 6.28 ms pipelining problem.

@@ -37,6 +37,64 @@ at matched call counts), and 4.06x is a **floor** since B200's own §2c calls
 
 **Latest commits on origin:** B200 `3bcc032`, then mine.
 
+## CONTINUE HERE (2026-09-16 21:4x UTC+8) — target list reordered by measurement
+
+**`megamoe_prepare_compact` is a cross-rank WAIT, r = −0.942**, confirmed with
+`analysis/prepare_wait.py` and with rank held fixed (rank 0 spans bs 17→20:
+`compute` up 28.76→35.06 while `prepare` falls 251.2→216.3 µs/call, and
+`stage1`/`stage2`/MLA-decode all rise). `compute + prepare` is constant at
+44.1-45.2 ms while `compute` spans 1.56x — `prepare` is the step's single
+sync point.
+
+**So 10 of its 16.24 ms is idle.** The straggler waits for nobody, so its
+102.9 µs/call = **6.28 ms/step is the protocol floor**; rank 7's 16.24 is that
+plus 9.96 ms of idle. B200's "prepare = 40 % of the gap" overstates the real
+cost by ~10 ms.
+
+**Targets, in order:**
+
+1. **MLA decode kernel** — now #1 on its own numbers: 7.17-20.18 ms/step across
+   ranks, 4.06x per call vs B200 at matched bs=10. Note there are **two
+   variants**: `_paged_decode_split_kernel` (bs 9-10) and
+   `_paged_decode_fused_kernel` (bs 14-20). The 4.06x is the split one.
+2. **Balance on KV tokens** — the launcher runs
+   `--load-balance-method total_requests`, balancing the wrong quantity; the
+   MLA kernel tracks KV tokens, not `bs` (rank 1 bs=14 → 330.7 µs vs rank 0
+   bs=18 → 166.3). Switch to `total_tokens`
+   (`data_parallel_controller.py:92,125-130`, fed by
+   `LoadSnapshot.num_total_tokens`). Upper bound ~10 % of wall (74.0 → ~66).
+   **A/B it, don't just flip it** — it fights `--policy cache_aware`, which
+   creates the skew deliberately for prefix reuse, so expect a TTFT cost. EPLB
+   cannot help; this is attention/KV imbalance, not expert routing.
+3. **TP-only / single-DP-rank run** — the one measurement that decides the
+   6.28 ms floor. At `npes = 1` nobody waits: if the floor collapses it is
+   synchronisation and the fix is pipelining `prepare(n+1)` against
+   `stage1/2(n)`; if it holds, it is real plan emission and `pcu1` (one CTA) is
+   worth raising after all.
+
+**Do NOT** chase raising `prepare`'s CU count or co-scheduling work against it.
+A spin-wait does not parallelise, and the idle CUs are idle *because the rank is
+waiting*. That inverts §14's own implication and B200's target #1.
+
+---
+
+## ⚠ EARLIER: this session's shells were wedged — resolved by a terminal restart
+
+**State at handoff (2026-09-16 21:1x UTC+8):** I ran `kill -9 <pid>` on the PID
+the tool reported for a backgrounded `sed`, and that PID was the Cursor **shell
+bootstrap**. Every new shell now hangs — even `echo alive` did not complete in
+85 s. This is the exact trap already documented further down this file
+("never `pkill -P` / kill a process whose children you have not listed"), and
+hitting it again means the warning needs to be read as: *do not kill any PID the
+tool hands you unless you have listed its children first.*
+
+Nothing was broken on the node — no GPU work was running. A terminal restart
+fixed it and the verification then ran normally. **Kept as a warning, because
+this is the second time the same trap has been hit: do not `kill` a PID the tool
+hands you for a backgrounded shell without listing its children first.**
+
+---
+
 **Newest, and it reframes the overlap question (2026-09-16 17:2x):** answered
 B200's grid-vs-CU request. MI355X is gfx950 **SPX, 256 CUs**, and
 `megamoe_prepare_compact` — the largest kernel in the step, 16.244 ms,

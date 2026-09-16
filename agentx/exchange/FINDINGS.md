@@ -1115,3 +1115,150 @@ The B200 measurement bounds B200, not ROCm.
 Together these two kernels are ~58 % of the 41.07 ms. `gemm` is equal, `comm`
 is exposed rather than slower, and overlap is worth 8 % on the node that has no
 room for it.
+
+---
+
+## ✅ CONFIRMED: `megamoe_prepare_compact` is a cross-rank WAIT — r = −0.942,
+## and 10 of its 16.24 ms is idle, not work
+*(mi355x, 2026-09-16, measured with `analysis/prepare_wait.py`. This resolves
+the hypothesis block below and **revises B200's target #1**. Detail in
+`mi355x-decode-trace.md` §15-16.)*
+
+Per-call µs against each rank's own `compute`, steady capture, five decoding
+ranks:
+
+| kernel | r | verdict |
+|---|---:|---|
+| **`megamoe_prepare_compact`** | **−0.942** | **WAIT** |
+| `megamoe_stage1_compact` | +0.672 | real work |
+| `megamoe_stage2_compact` | +0.943 | real work |
+| MLA decode (`_paged_decode_fused`) | +0.961 | real work |
+| `ep_combine_intranode` | −0.665 | **inconclusive** — flat within one rank |
+
+**The within-rank control settles it**: rank 0 alone spans bs 17→20, so rank is
+fixed, and as its `compute` rises 28.76 → 35.06 `prepare` **falls 251.2 → 216.3
+µs/call** while `stage1`, `stage2` and MLA decode all rise. `prepare` is the
+only kernel that shortens as its own rank gets busier.
+
+**`compute + prepare` is constant at 44.1-45.2 ms (2.5 % spread) while
+`compute` spans 1.56x.** `prepare` is the single synchronisation point of the
+step — `stage1`/`stage2`/`ep_combine` are near-equal across ranks once it has
+levelled everyone.
+
+**Therefore the 16.24 ms is mostly idle.** The straggler is by definition not
+waiting for anyone, so its **102.9 µs/call = 6.28 ms/step is the protocol's own
+cost**; rank 7's 16.24 ms is that floor plus **9.96 ms of idle**, and the
+lightest rank's 19.83 ms is the floor plus 13.55. **B200's "prepare is 40 % of
+the 41.07 ms gap" overstates the real cost by ~10 ms — it is 6.28 ms, 8.5 % of
+the step.**
+
+### Both proposed fixes are wrong, for the same reason
+
+- **✗ Raising CU usage / retuning `pcu1`+`qcu28`.** A `wait_i32_until_equals`
+  spin does not parallelise. §14's "226 of 256 CUs idle" is real but the CUs are
+  idle **because the rank is waiting**, not because the kernel is
+  under-parallelised. That inverts §14's own implication.
+- **✗ Co-scheduling work against it.** On the seven waiting ranks the capacity
+  is already free and they still cannot finish before the straggler; on the
+  straggler there is only 6.28 ms to hide.
+
+### What would work
+
+1. **Balance on KV tokens, not request count.** The wall is set by the
+   straggler's `compute`, driven by the MLA decode kernel at **165.3-330.7
+   µs/call (2.0x)**, which tracks **KV tokens, not `bs`** — rank 1 has bs=14 at
+   330.7 µs, rank 0 has bs=18 at 166.3. The launcher runs
+   `--load-balance-method total_requests`, i.e. balances the wrong quantity.
+   SGLang already has `LoadBalanceMethod.TOTAL_TOKENS`
+   (`data_parallel_controller.py:92,125-130`) fed by
+   `LoadSnapshot.num_total_tokens` (`load_snapshot.py:201`), a per-rank KV
+   occupancy metric. Upper bound on the prize: straggler `compute` 38.91 → ~31.2
+   mean, so **wall 74.0 → ~66 ms, order 10 %**. **Not free** — it fights
+   `--policy cache_aware`, which creates the skew on purpose for prefix reuse,
+   so it is an ITL↔TTFT A/B. **EPLB cannot help**: this imbalance is in
+   attention/KV, not expert routing.
+2. **Pipeline the 6.28 ms floor, do not widen it.** The floor is **61 cross-rank
+   gate crossings per step**, one per layer. Overlapping `prepare(n+1)` with
+   `stage1/2(n)` hides the crossing behind MoE GEMM **on the straggler too**,
+   which is the only place hiding shortens the step. B200 gets this free: its
+   fused `mega_moe_impl` has no per-layer gate. Note this is the *opposite* of
+   "co-schedule unrelated work" — the win is pipelining the dependency chain.
+
+**The measurement that decides how far (2) goes: the TP-only / single-DP-rank
+run.** At `npes = 1` there is nobody to wait for. If the 102.9 µs floor
+collapses it is still synchronisation and pipelining is the fix; if it holds,
+that is real dispatch-plan emission and then `pcu1` — one CTA emitting the plan
+— *is* worth raising after all.
+
+**Net effect on the joint target list:** the **MLA decode kernel is target #1**
+on its own numbers (7.17-20.18 ms/step, 4.06x per call at matched bs=10), and
+`prepare` splits into a load-balancing problem (~10 ms idle, ~7.7 ms of wall)
+plus a 6.28 ms pipelining problem.
+
+### Also fixed: a self-inflicted artefact worth knowing about
+
+aiter selects **two** MLA decode variants by batch size —
+`_paged_decode_split_kernel` at bs 9-10, `_paged_decode_fused_kernel` at
+bs 14-20. A first version of the script tracked only the split variant, read
+0.0 on three ranks, and reported a spurious "mla_decode is a WAIT". Tracked
+separately it is the clearest *work* signal in the step. The published 4.06x is
+the **split** variant at the matched bs=10 cell; it is not a claim about the
+fused one.
+
+---
+
+## ⚠ superseded by the block above — HYPOTHESIS, unmeasured:
+## `megamoe_prepare_compact` is a cross-rank barrier
+*(mi355x, 2026-09-16, from the generator source. Detail in
+`mi355x-decode-trace.md` §15. **Mechanism established, magnitude NOT** —
+the falsification is scripted and unrun; see the shell note below.)*
+
+B200's target #1 is "`megamoe_prepare_compact`'s parallelism — 16.24 ms at grid
+30 … raising its CU usage attacks the gap directly". Reading
+`aiter/ops/flydsl/kernels/mega_moe/mega_moe_prepare.py` suggests **the grid is a
+consequence, not the cause**, and that the kernel is an inter-rank protocol
+rather than compute:
+
+- `:43,57,62` — parameterised by `npes` (rank count): `total_experts = npes*epr`,
+  `assert dispatch_blocks % npes == 0`
+- `:111` — `comm_ops.atomic_add_agent` ticket draw
+- **`:188` — `comm_ops.wait_i32_until_equals(epoch_gate, gate_epoch)`, an
+  explicit spin-wait**
+- `:177-197` — `s_waitcnt(0)`, `store/load_i32_system`, `fence_system_acquire`
+  — **system scope**, i.e. cross-device
+- `:201-235` — `emit_dispatch_plan` / `emit_dispatch_group` with `fz_npes`,
+  `fz_rank`
+
+The grid is small **by design for a small batch**, not by oversight:
+`mega_moe_config.py:273` scales quant CTAs with tokens (64 → 192 from 8K to 32K)
+and `mega_moe_v2.py:144-151` states "small batches continue to launch only their
+useful subset and do not pay for the capacity". At decode (~40 tokens) that
+subset is `qcu28`, and `pcu1` means the prepare role is **one** CTA.
+
+**If the time is in the wait, both proposed fixes miss.** More CUs do not speed
+up `wait_i32_until_equals`, and co-scheduling work against it hides a wait that
+is already free capacity. It would also mean MI355X **exposes both halves of the
+all-to-all** — dispatch inside `prepare` (16.24 ms, bucketed `moe`) plus
+`ep_combine_intranode` (6.17 ms, bucketed `comm`) = **22.41 ms/step of exposed
+EP traffic** — where B200 fuses its a2a inside `mega_moe_impl` (13.42 ms
+serial, total). That reframes the +22.33 ms `moe` gap as substantially
+**communication exposure**, not slower MoE math, and it would make the MLA
+decode kernel target #1 by default.
+
+**Not proven.** Per `perf-bottleneck-attribution`, source shows the wait exists,
+not that the time is in it. Consistent but non-probative: `moe` was the only
+bucket that *shrank* as work grew on rank 0 (−3.8 %, bs 17→20), and
+`compute + barrier` holds within 0.9 % while `compute` spans 1.56x.
+
+**Falsification, scripted and ready:**
+`python3 analysis/prepare_wait.py <trace dir>` compares each MoE kernel's
+µs/call against the rank's own `compute`; a barrier anti-correlates (busy rank
+arrives late, waits less). If `prepare` is anti-correlated (r < −0.5) while
+`stage1`/`stage2`/`mla_decode` track own work, reorder the targets. The
+independent check is the **TP-only / single-rank run**: at `npes = 1` there is
+nobody to wait for, so a barrier-dominated `prepare` collapses and real work
+does not.
+
+**Why it is unrun:** the MI355X session's shells wedged (see that node's
+CONTINUE_HERE) before the script could execute. It needs one command in a fresh
+terminal.

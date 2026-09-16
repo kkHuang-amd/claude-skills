@@ -4,6 +4,79 @@ Append only. Sign every block with node + date so a superseded number stays
 identifiable. Detail and provenance live in the per-node `<node>-<topic>.md`
 files; this file carries conclusions.
 
+**This file is ~1,500 lines and append-only, so most of it is superseded.
+Read the index below, then jump to the live blocks only.**
+
+---
+
+## INDEX — current state, and what is already dead
+
+*(maintained by both nodes; update it in the same commit as the block you add)*
+
+### The live answer, as of 2026-09-16 end of day
+
+AgentX c128, pdi=24, matched steady-state KV (~165-170k tok/req), both nodes
+serial. **Decode step wall 32.68 ms (B200) vs 74.0 ms (MI355X)**, and the decode
+step accounts for the entire log-implied gap. The 41.07 ms splits:
+
+| component | ms | nature |
+|---|---:|---|
+| MoE pipeline work, 3-stage vs fused | +12.4 | kernel work |
+| MI355X cross-rank idle (inside `prepare`) | +9.96 | **load balancing** |
+| MLA decode kernel, 4.06x per call | +7.47 | kernel work |
+| `ep_combine` exposed vs fused a2a | +6.17 | structure |
+| `copy` fill kernels, no B200 counterpart | +3.85 | kernel work |
+| quant + misc | +1.7 | |
+| `gemm` | −0.45 | **equal** |
+
+**Agreed target order:** (1) MLA decode kernel — 18 % directly and the
+multiplier on imbalance cost on both nodes, so it pays twice; (2) `total_tokens`
+balancing — both nodes' logs now justify it, but it fights `cache_aware` prefix
+reuse so it is an ITL↔TTFT A/B; (3) MoE pipeline structure.
+
+**Both nodes are KV-skewed by the same cause:** `--load-balance-method
+total_requests` levels request count (B200 1.29x, MI355X 1.38x) while cost
+follows KV tokens (B200 **2.45x**, MI355X 2.27x).
+
+### Retraction ledger — do not re-derive these
+
+Eight numbers were published and withdrawn in one day. Each row is a trap that
+cost real time; the "because" column is the general lesson.
+
+| withdrawn | replaced by | because |
+|---|---|---|
+| B200 decode wall **15.9 ms** | **30.0 ms** (multi), **32.68** (serial) | captured 2 min into the measurement phase, mid-ramp: ~61k KV tok/req against ~165k steady. Gate on the KV working set, never on a timer. |
+| "KV working set matched at 151,908" | capture-window KV, published per capture | the control came from a *different run's* steady state than the trace it was attached to |
+| `TARGET_VERIFY` p50 as one population | draft + full split by MoE call count | spec decoding emits **two** annotations per `run_batch` with the same `bs`; the tool averaged them (caught by MI355X) |
+| "MI355X's 14 ms `compute` spread = imbalance" | not established | each rank sat at its own `bs`; rank and batch were confounded |
+| "B200 `compute` is barrier-free" | it is pace-pinned | `compute` flat across bs 1-12 while `attn` rose 1.75x — it absorbs wait |
+| per-role **summed kernel** deltas | `credited` / union, then the serial arm | sums double-count concurrency on B200 (1.68x) and not on MI355X (1.00x); the two were being subtracted (caught by MI355X) |
+| "CU contention is 4.9 %" | ~10x on the one starved kernel | the multi-vs-single A/B never disabled the overlap under test — `use_stream_pool` ignores the flag on CUDA |
+| "`attn` is the biggest gap, not `moe`" | `moe`, +22.33 ms | artefact of summed kernel time; B200's `moe` sum 15.84 is credited 8.08 |
+| "raise `prepare`'s CU usage" (B200's target #1) | it is a cross-rank **wait**, r = −0.942 | a `wait_i32_until_equals` spin does not parallelise (caught by MI355X) |
+| "B200's ranks are level (0.0-0.3 ms spread)" | 1.98x MLA spread in the serial arm | the evidence came from the pace-pinned capture |
+
+### Method rules earned the hard way
+
+- Publish **step wall, its `bs`, and the capture window's KV working set**
+  together, always. Two of the three were missing from every early capture.
+- **Kernel identity cannot be established inside a graph-replayed window**
+  (`graph id` 32/92, 0 of 15,732 calls resolve). Attribute in `EXTEND` (eager,
+  `graph id` 0, 670/792 resolve) via the kernel event's own `External id`.
+- A **sum of kernel durations is not elapsed time** on a platform with
+  concurrency. Use `busy_ms.py` (`union` / `credited`) for elapsed, per-call for
+  kernel speed, and never subtract one from the other.
+- Verify the **outcome**, not the flag. `SGLANG_OPT_USE_MULTI_STREAM_OVERLAP=0`
+  left `sum/busy` at 1.55x for a day before anyone checked.
+
+### Tools
+
+`analysis/` — `show_result.py` (agg json), `decode_stats.py` (server.log),
+`trace_summary.py` / `trace_ranks.py` (per-role), `busy_ms.py` (**elapsed**,
+run this before comparing roles), `kernel_dump.py`, `prepare_wait.py`
+(wait-vs-work by anti-correlation), `kv_skew.py` (needs only a server.log).
+Method and every known trap: `analysis/METHOD.md`.
+
 ---
 
 ## ⚠ WITHDRAWN — the block below mixed DSPARK draft and full-model verify steps

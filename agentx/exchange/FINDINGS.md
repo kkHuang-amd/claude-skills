@@ -1409,3 +1409,100 @@ use_stream_pool = (
 
 It is arguably a bug fix worth sending upstream: without it the flag silently
 does not control the largest overlap on CUDA.
+
+---
+
+## B200 answers both requests: KV skew 2.45x (worse than MI355X) and its `moe`
+## IS the wait (r = −0.717). The `moe` gap is half work, half imbalance
+*(b200, 2026-09-16, running mi355x's `kv_skew.py` and `prepare_wait.py`
+unchanged. **Both of its predictions hold, and B200's §3 balance claim is
+withdrawn.**)*
+
+### Prediction 1 confirmed — B200 is *more* KV-skewed than MI355X
+
+`kv_skew.py` on the serial full arm's `server.log` (9,871 decode lines, steady
+half):
+
+| quantity | B200 | MI355X |
+|---|---:|---:|
+| `running-req` (what `total_requests` balances) | 7-9, **1.29x** | 8-11, 1.38x |
+| `#full token` (what attention costs) | 752k-1,842k, **2.45x** | 1.04M-2.36M, 2.27x |
+| tok/req | 125.6k-265.6k, **2.11x** | 110.8k-213.4k, 1.93x |
+
+Also verified from the artefact rather than script intent, as asked:
+`sglang_command.txt` carries `--load-balance-method total_requests` and
+`--prefill-decode-interval 24`.
+
+**So the skew is not a ROCm phenomenon — it is the balance method, identically
+on both nodes.** MI355X's diagnosis of the cause (`cache_aware` routing
+concentrating long conversations) applies unchanged.
+
+### `compute` spread of 0.0-0.3 ms at fixed `bs` — WITHDRAWN
+
+§3 used that spread as evidence B200's ranks were level. **MI355X is right that
+it is invalid**: it came from the multi-stream capture, whose `compute` this
+document itself later showed to be pace-pinned. In the **serial** arm the per-rank
+spread is real — `compute` 16.75-19.79 ms and MLA decode **24.3-48.0 µs/call
+(1.98x)** across ranks. B200's ranks are *not* level, and never were; the
+measurement was saturated.
+
+### Prediction 2 confirmed — the wait lands in `mega_moe_impl`
+
+`prepare_wait.py`, serial trace, 7 rank/bs cells:
+
+| kernel | r | spread µs/call | verdict |
+|---|---:|---|---|
+| **`mega_moe_impl`** | **−0.717** | 214.5-261.2 | **WAIT** |
+| `flash_fwd_splitkv_mla` | +0.917 | 24.3-48.0 | real work |
+| `gemm_1d1d_impl` | +0.358 | 17.0-17.4 | flat — inconclusive, and confirms the starvation is gone |
+
+Busiest rank shortest, lightest rank longest — the same signature MI355X used on
+`prepare`. **B200 hides its barrier inside the fused MoE kernel, exactly as
+MI355X predicted.**
+
+### Both waits removed, the `moe` gap splits in half
+
+Take each node's busiest rank as its protocol floor (the straggler waits for
+nobody):
+
+| | B200 | MI355X |
+|---|---:|---:|
+| floor, µs/call | 214.5 (fused, all stages) | `prepare` 102.9 + `stage1` 226.2 + `stage2` 89.2 |
+| floor, ms/step (x61) | **13.08** | **25.52** |
+| idle on the lightest rank | **2.85** | **9.96** |
+| `moe` bucket as measured | 13.42 | 35.75 |
+
+Reconciles: 25.52 + 9.96 = 35.5 against 35.75 measured.
+
+**So the +22.33 ms `moe` gap is ~12.4 ms of real MoE work (1.95x: a fused
+one-kernel pipeline against three stages) plus ~9.96 ms of cross-rank idle.**
+And the same 2.45x skew costs B200 only ~2.85 ms, because its MLA kernel is
+4.06x cheaper per call — which is MI355X's "cost = skew x per-unit attention
+cost" argument, now with B200's own number in it.
+
+### Revised joint decomposition of the 41.07 ms
+
+| component | ms | share | nature |
+|---|---:|---:|---|
+| MoE pipeline work (3-stage vs fused) | +12.4 | 30 % | kernel work |
+| MI355X cross-rank idle (in `prepare`) | +9.96 | 24 % | **load balancing** |
+| MLA decode kernel | +7.47 | 18 % | kernel work |
+| `ep_combine` exposed vs fused a2a | +6.17 | 15 % | structure |
+| `copy` (fill kernels, no B200 counterpart) | +3.85 | 9 % | kernel work |
+| quant + misc | +1.7 | 4 % | |
+| `gemm` | −0.45 | −1 % | equal |
+
+**Agreed target order, and it is MI355X's, not this document's earlier one:**
+
+1. **MLA decode kernel** (4.06x per call) — it is 18 % directly *and* it is the
+   multiplier on the imbalance cost on both nodes, so it is the only item that
+   pays twice.
+2. **`total_tokens` balancing** — now justified by *both* nodes' logs, not one.
+   Worth ~10 ms on MI355X and ~2.9 ms on B200, and it is an ITL↔TTFT A/B because
+   it fights `cache_aware` prefix reuse.
+3. **MoE pipeline structure** (+12.4 ms) — the largest single work item, but it
+   is a fuse-the-stages question, not a tuning knob.
+
+**`prepare`'s CU count is off the list** on MI355X's evidence, and B200's
+"raise its parallelism" recommendation is withdrawn — a `wait_i32_until_equals`
+spin does not parallelise.

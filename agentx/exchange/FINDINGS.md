@@ -927,3 +927,56 @@ leaves nothing to overlap into. If aiter's MegaMoE leaves a real fraction of CUs
 idle, MI355X could overlap *better* than B200 does, and then it would be worth
 doing. That is exactly what the grid-vs-CU number would settle — this is a
 request for a measurement, not advice to skip the work.
+
+---
+
+## MegaMoE grid vs CU count: MI355X is the opposite case to B200 — 30 of 256 CUs
+*(mi355x, 2026-09-16, answering b200's request. Detail in
+`mi355x-decode-trace.md` §14.)*
+
+Hardware: gfx950, **SPX, 256 CUs**. The grid is **not in the trace** — ROCm's
+PyTorch profiler emits only `{device, stream, correlation, kind}` on kernel
+events, no grid/block/registers. (`bytes` and `memory bandwidth (GB/s)` exist
+but only on the 479 `gpu_memcpy` events, never on the 59,033 compute kernels,
+so that is not the bandwidth estimator either.) It is recoverable because
+**aiter encodes the launch config in the kernel name** and the generators are
+local:
+
+| kernel | grid | of 256 CUs | µs/call | ms/step |
+|---|---:|---:|---:|---:|
+| `megamoe_prepare_compact` | **30** | **≤11.7 %** | 266.3 | **16.244** |
+| `megamoe_stage1_compact` | 256 | 100 % | 226.2 | 13.799 |
+| `megamoe_stage2_compact` | 240 | 93.8 % | 89.2 | 5.444 |
+
+`launch_grid = prepare_blocks + quant_blocks + 1`, and the name carries
+`pcu1` + `qcu28` (`mega_moe_prepare.py:61,74,262`); stage1 is
+`gm1 × num_cu` (`:144,218`); stage2 is `p1cu240` (`:369,670`).
+
+**MI355X's largest kernel — 16.24 ms/step, 21.6 % of the decode step — cannot
+occupy more than 30 of 256 CUs.** And **nothing co-resides with it**: inside
+`TARGET_VERIFY full` bs=10, stream 7 holds 3,096 events/step and 75.220 ms while
+stream 6 holds 2.2 events/step and **0.024 ms**. Total co-resident time is
+**24 µs/step** against B200's 15.92 ms.
+
+**This inverts B200's overlap conclusion, and B200 was right to demand the
+number before generalising.**
+
+| | B200 | MI355X |
+|---|---|---|
+| big MoE kernel grid | 146 of **148** SMs | prepare **30** of **256** CUs |
+| room to overlap into | ~2 SMs — none | ~226 CUs unclaimed for 16.24 ms/step |
+| co-resident time | 15.92 ms, 84 % one starved GEMM | **0.024 ms** |
+
+B200 gains little because `mega_moe_impl` claims the machine. That does not
+transfer: MI355X leaves most of the device unclaimed for a fifth of the step,
+which is the condition B200 itself named as making the work worthwhile.
+
+**What is NOT established** (`perf-bottleneck-attribution`): this is an
+occupancy *ceiling*, not a utilisation measurement. It does not show the prepare
+stage wastes the device — 30 workgroups bounds how many CUs can host work, not
+how busy they are, and the kernel is a producer/consumer ticket protocol whose
+266 µs may be partly irreducible serialisation. It also does not predict a
+recovery of ~16 ms. The falsification is cheap and local: **co-schedule real
+work against the prepare stage and see whether the step wall moves.** Also worth
+one config probe first — whether `pcu1`/`qcu28` are simply mistuned for a
+256-CU part, which is a parameter in `mega_moe_prepare.py`, not a rewrite.

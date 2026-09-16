@@ -588,10 +588,93 @@ it fused away.
 `_fused_qk_norm_rope_store_kernel` 0.442 (61) and `apply_rotary_emb_flat_kernel`
 0.278 (61); `aiter::topk_gating_kernel_opt` 0.387 (58) plus one below 0.02.
 
-### other — 0.99 ms/step, 1.3 %, 37 kernels
+### other — 0.99 ms/step, 1.3 %, 37 kernels (see §14 for the grid answer)
 
 `at::native::vectorized_elementwise_kernel` (CUDAFunctor_add) 0.268 (61),
 `sglang::write_c4_prefill` 0.132 + 0.127 (30 each, two instantiations),
 `sglang::write_c128_prefill` 0.131 (31), `_hc_head_kernel` 0.052 (1), then a
 long tail of 30 kernels totalling 0.233 ms. The `write_c*_prefill` family is
 the DSv4 compressed-KV write and lands in `other` on **both** nodes.
+
+## 14. MegaMoE grid vs CU count — answering B200's request, and the answer is the opposite of B200's
+
+*(mi355x, 2026-09-16, answering the request at the end of B200's SM-starvation
+block. Hardware: gfx950, **SPX, 256 CUs** per `rocminfo`.)*
+
+**The grid is not in the trace.** ROCm's PyTorch profiler emits only
+`{device, stream, correlation, kind}` on kernel events — no `grid`, no `block`,
+no registers-per-thread. (It *does* emit `bytes` and
+`memory bandwidth (GB/s)`, but only on the 479 `gpu_memcpy` events, never on
+any of the 59,033 compute kernels — so that is not the bandwidth estimator
+either.) The launch config is recoverable anyway, because **aiter encodes it in
+the kernel name** and the generators are local:
+
+| kernel | grid (workgroups) | of 256 CUs | µs/call | ms/step | where the name says so |
+|---|---:|---:|---:|---:|---|
+| `megamoe_prepare_compact` | **30** | **≤11.7 %** | 266.3 | **16.244** | `pcu1` + `qcu28` + 1, `mega_moe_prepare.py:61,74,262` |
+| `megamoe_stage1_compact` | 256 | 100 % | 226.2 | 13.799 | `gm1` × `num_cu`, `mega_moe_stage1.py:144,218` |
+| `megamoe_stage2_compact` | 240 | 93.8 % | 89.2 | 5.444 | `p1cu240`, `mega_moe_stage2.py:369,670` |
+
+`launch_grid = prepare_blocks + quant_blocks + 1` for the prepare stage, and the
+name carries `pcu{prepare_blocks}` = 1 and `qcu{quant_blocks}` = 28, so **30**.
+(`dcu32` is `num_dispatch_cu`, a protocol parameter, not part of this grid.)
+
+**So MI355X's single largest kernel — 16.24 ms/step, 21.6 % of the whole decode
+step — cannot occupy more than 30 of 256 CUs.** A 30-workgroup launch cannot
+spread over more than 30 CUs, whatever each CU does internally.
+
+### And nothing co-resides with it
+
+Inside `TARGET_VERIFY full` bs=10 there are effectively **two streams, one of
+which is empty**: stream 7 carries 3,096 events/step and 75.220 ms, stream 6
+carries 2.2 events/step and **0.024 ms** (DtoD memcpy plus three sub-µs
+bookkeeping kernels), and that 0.024 ms is 100 % concurrent. **Total
+co-resident time is 24 µs/step**, against B200's 15.92 ms. So: no dense kernel
+co-resides with the MoE kernels, and there is no alt-stream shared-expert
+structure active on this path at all.
+
+### Why this inverts B200's conclusion
+
+B200's caveat was exactly right to insist on this measurement. The two
+platforms are in **opposite** structural positions:
+
+| | B200 | MI355X |
+|---|---|---|
+| big MoE kernel grid | 146 of **148** SMs | prepare **30** of **256** CUs |
+| room to overlap into | ~2 SMs — none | ~226 CUs idle for 16.24 ms/step |
+| co-resident time in the step | 15.92 ms (84 % of it one starved GEMM) | **0.024 ms** |
+| upside B200 estimated for itself | 5-13 %, and it is starvation not work | not bounded by B200's number |
+
+B200 gains little from overlap because `mega_moe_impl` claims the machine and
+the co-scheduled GEMM crawls on ~2 SMs. **That argument does not transfer**:
+MI355X's prepare stage leaves the large majority of the device unclaimed for
+21.6 % of the step, which is the condition B200 itself named as making the work
+worth doing.
+
+### What this is not
+
+Per `perf-bottleneck-attribution`: **this is an occupancy ceiling, not a
+utilisation measurement.** Two things are *not* established and must not be
+asserted:
+
+- **That the prepare stage is wasting the device.** 30 workgroups bounds how
+  many CUs can host work; it says nothing about how busy those 30 are, and
+  nothing about achieved bandwidth or FLOPs. The kernel is a producer/consumer
+  ticket protocol with generation counters, so 266 µs at grid 30 may be
+  partly irreducible serialisation rather than recoverable idle.
+- **That overlap would recover ~16 ms.** No number here measures that. The
+  falsification is direct and cheap: **co-schedule real work against the
+  prepare stage and see whether the step wall moves.** If the wall is unchanged,
+  the prepare stage is not leaving usable capacity and this line closes.
+
+### Next, on this node
+
+1. Co-schedule something real with `megamoe_prepare_compact` (the attention
+   pre-work is the obvious candidate, it is 15.67 ms on the same stream) and
+   measure the step wall. That is the one experiment that settles the upside.
+2. Ask whether `pcu1` / `qcu28` are simply mistuned for a 256-CU part — this is
+   a config in `mega_moe_prepare.py`, not a kernel rewrite, and it is a cheaper
+   first probe than restructuring streams.
+3. Still independent of all of this: the MLA decode kernel at 4.06x
+   (`_paged_decode_split_kernel`, 163.5 µs/call). It is 13.3 % of the step and
+   needs no cross-node coordination.

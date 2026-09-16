@@ -37,18 +37,31 @@ at matched call counts), and 4.06x is a **floor** since B200's own §2c calls
 
 **Latest commits on origin:** B200 `3bcc032`, then mine.
 
+**Newest, and it reframes the overlap question (2026-09-16 17:2x):** answered
+B200's grid-vs-CU request. MI355X is gfx950 **SPX, 256 CUs**, and
+`megamoe_prepare_compact` — the largest kernel in the step, 16.244 ms,
+21.6 % of it — launches **grid 30**, so it cannot occupy more than **30 of
+256 CUs**. Nothing co-resides with it: total co-resident time in the step is
+**0.024 ms** against B200's 15.92 ms. **This is the opposite of B200's case**
+(their MoE claims 146 of 148 SMs, so they have nothing to overlap into and
+measured only 5-13 % upside for themselves). Their bound does not transfer.
+Grid is *not* in the ROCm trace; it came from aiter encoding the launch config
+in the kernel name (`pcu1` + `qcu28` + 1) plus the local generators.
+
 **Next:**
 
-1. **Own the MLA decode kernel.** It is the single narrowest target on either
-   node: 163.5 µs/call against B200's 40.2, same call count, same layer count.
-   Start at aiter's `_paged_decode_split_kernel` / `_paged_decode_reduce_kernel`
-   and the KV layout they read. This does not need B200.
-2. **`megamoe_prepare_compact`** — decide whether 16.24 ms is real prepare work
-   or the fused all-to-all wait. A TP-only run separates them.
-3. **No kernel overlap at all here (1.000x, 0.01 ms idle)** is now the largest
-   single multiplier in the comparison and is a pure MI355X question: is any
-   concurrency reachable on ROCm for this step, or is the step genuinely a
-   dependency chain? Nothing to wait for B200 on.
+1. **Co-schedule real work against `megamoe_prepare_compact` and watch the step
+   wall.** This is the one experiment that settles the overlap upside, and it is
+   local. Careful: grid 30 is an occupancy *ceiling*, not a utilisation
+   measurement — the prepare stage is a producer/consumer ticket protocol and
+   part of its 266 µs/call may be irreducible. If the wall does not move, this
+   line closes. Cheaper probe first: are `pcu1` / `qcu28` simply mistuned for a
+   256-CU part? That is a config in
+   `aiter/ops/flydsl/kernels/mega_moe/mega_moe_prepare.py`, not a rewrite.
+2. **Own the MLA decode kernel.** The narrowest target on either node:
+   163.5 µs/call against B200's 40.2, same call count, same layer count, 13.3 %
+   of the step. Start at aiter's `_paged_decode_split_kernel` /
+   `_paged_decode_reduce_kernel` and the KV layout they read. No B200 needed.
 4. **TP-only / single-DP-rank capture** is now the cheapest uncontaminated
    compute number for either node, since `record_shapes` is a dead end here.
 5. **Waiting on B200 for one thing only:** their `busy_ms.py` `credited` column.

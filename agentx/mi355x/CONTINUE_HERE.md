@@ -3,78 +3,78 @@
 Counterpart to `agentx/b200/CONTINUE_HERE.md`. The two nodes share nothing but
 this git repo; see `agentx/exchange/README.md`.
 
-## CONTINUE HERE
+## CONTINUE HERE (2026-09-17 07:0x UTC+8) — diagnosis closed, optimisation open
 
-**Status (2026-09-16 14:5x UTC+8):** Merged B200's 6 new commits (`3bcc032`) and
-answered all three of their open asks from the existing traces — no GPU needed,
-nothing is running. The cross-platform gap now has **two named targets**:
+**The cross-platform investigation is finished.** Both nodes are serial, both
+per-role tables are elapsed and subtract cleanly, and the 41.07 ms decode-step
+gap is fully attributed and agreed (FINDINGS, B200 `e9dce10`). Nothing is
+running on this node; no measurement is blocked on B200.
 
-1. **`_paged_decode_split_kernel` (MLA decode) is 4.06x B200's
-   `flash_fwd_splitkv_mla_fp8`** — 9.974 vs 2.454 ms/step at 61 calls each
-   (163.5 vs 40.2 µs/call). That is 93 % of the whole `attn` gap.
-2. **`megamoe_prepare_compact` 16.24 ms/step has no B200 counterpart** — B200's
-   nearest-named kernel is 0.242 ms. Holds 66 % of the `moe` gap.
+| component | ms | share | nature |
+|---|---:|---:|---|
+| MoE pipeline work — 3 stages vs 1 fused | **+12.4** | 30 % | kernel work |
+| Cross-rank idle, parked in `prepare` | **+9.96** | 24 % | load balancing |
+| MLA decode kernel | **+7.47** | 18 % | kernel work |
+| `ep_combine` exposed vs fused a2a | **+6.17** | 15 % | structure |
+| `copy` — fill kernels, no B200 counterpart | **+3.85** | 9 % | kernel work |
+| quant + misc | +1.7 | 4 % | |
+| `gemm` | −0.45 | −1 % | equal, settled |
 
-Everything else matches within 0.78-1.94x. Also established: MI355X's `compute`
-is **not** pace-pinned (only `moe` absorbs wait, where B200 has both `moe` and
-`gemm` doing it), `comm` 6.17 **is** a real collective (`ep_combine_intranode_0`),
-and `record_shapes` **cannot** give B200's proposed bandwidth estimator here
-(all 34,486 dim-carrying events are `aten::*` cpu_ops; zero attn/MoE ops).
+### Directions, ordered by payoff ÷ effort
 
-**Also found, and it corrects both nodes' tables:** every per-role number ever
-published on either side is a **sum** of kernel durations, which double-counts
-concurrency. B200's 50.86 ms sum sits inside a 30.0 ms wall, so its elapsed GPU
-work is ≤30 ms and its per-role sums were being subtracted from MI355X's
-*elapsed* ones. New `analysis/busy_ms.py` sweeps the intervals: **MI355X is
-sum = union = wall = 1.000x with 0.01 ms idle — perfectly serial, no overlap,
-no gaps** — so this node needs no correction and B200 does. In elapsed terms
-the gap is the wall ratio, ≥2.47x. The two per-kernel findings survive (per-call
-at matched call counts), and 4.06x is a **floor** since B200's own §2c calls
-`flash_fwd_splitkv_mla_fp8` pure and contention can only have inflated it.
+**A. Switch `--load-balance-method` to `total_tokens`** — one launcher flag,
+worth up to ~10 ms (24 %). Both nodes' logs now justify it: `running-req` is
+level (MI355X 1.38x, B200 1.29x) while `#full token` is not (2.27x / 2.45x),
+because `cache_aware` concentrates long conversations. `total_tokens` exists
+already (`data_parallel_controller.py:92,125-130`, fed by
+`LoadSnapshot.num_total_tokens`). **A/B it** — it fights prefix reuse, so expect
+a TTFT cost; same family as the pdi knob. EPLB is irrelevant here (this is
+attention/KV, not expert routing).
 
-**Pushed:** `be97070` (§10-12 + `kernel_dump.py` + `trace_ranks.py`) and the
-`busy_ms.py` / §13 commit after it.
+**B. The MLA decode kernel** — 7.47 ms direct, *and* it is the multiplier on A,
+so it is the only item that pays twice. 117.5-330.7 µs/call against B200's
+18.7-47.5. **Do not start by rewriting it: first get achieved bandwidth**, which
+nobody has on either node. `record_shapes` is a dead end here (all dim-carrying
+events are `aten::*` cpu_ops), so derive the KV bytes per call from the model
+config plus per-rank `#full token` and compare against MI355X's HBM roofline.
+That says whether 4x is closeable or whether the kernel is already at the wall.
+Two variants: `_paged_decode_split_kernel` (bs 9-10) and
+`_paged_decode_fused_kernel` (bs 14-20); the 4.06x figure is the split one.
 
-**Latest commits on origin:** B200 `3bcc032`, then mine.
+**C. `copy`, 3.85 ms of unfused fills** — the most ordinary win on the list and
+entirely local. Seven kernels where B200 has 0.03 ms: `_fill_padded_rows` 0.757
+(183 calls), `__amd_rocclr_fillBufferAligned` 0.533 (122 = 2/layer, a hipMemset
+that smells like a buffer that could be persistent), two `direct_copy`
+elementwise 1.428 total, bf16→fp32 copy 0.392, `index_elementwise` 0.363,
+`_swa_scatter` 0.271, `_fill_compress_tail` 0.143.
 
-## CONTINUE HERE (2026-09-16 21:4x UTC+8) — target list reordered by measurement
+**D. MoE pipeline structure, +12.4 ms** — the largest single work item, but it
+is "fuse three stages into one", i.e. real aiter/FlyDSL work, not a knob. The
+cheap adjacent piece is **pipelining `prepare(n+1)` against `stage1/2(n)`**,
+which attacks the 6.28 ms protocol floor rather than the 12.4.
 
-**`megamoe_prepare_compact` is a cross-rank WAIT, r = −0.942**, confirmed with
-`analysis/prepare_wait.py` and with rank held fixed (rank 0 spans bs 17→20:
-`compute` up 28.76→35.06 while `prepare` falls 251.2→216.3 µs/call, and
-`stage1`/`stage2`/MLA-decode all rise). `compute + prepare` is constant at
-44.1-45.2 ms while `compute` spans 1.56x — `prepare` is the step's single
-sync point.
+**E. `ep_combine` exposed, +6.17 ms** — B200 pays ~0 because its a2a is fused
+inside `mega_moe_impl`. Same family as D: can the combine overlap stage2 or the
+next layer? Structural, not tuning.
 
-**So 10 of its 16.24 ms is idle.** The straggler waits for nobody, so its
-102.9 µs/call = **6.28 ms/step is the protocol floor**; rank 7's 16.24 is that
-plus 9.96 ms of idle. B200's "prepare = 40 % of the gap" overstates the real
-cost by ~10 ms.
+### Two measurements that gate the above
 
-**Targets, in order:**
+1. **TP-only / single-DP-rank run** (`npes = 1`, nobody to wait for). If
+   `prepare`'s 102.9 µs/call floor collapses it is synchronisation and D's
+   pipelining is the fix; if it holds, it is real plan emission and `pcu1`
+   (one CTA) is worth raising after all. Also gives the first uncontaminated
+   compute number on either node.
+2. **Achieved bandwidth on the MLA decode kernel** — gates B (see above).
 
-1. **MLA decode kernel** — now #1 on its own numbers: 7.17-20.18 ms/step across
-   ranks, 4.06x per call vs B200 at matched bs=10. Note there are **two
-   variants**: `_paged_decode_split_kernel` (bs 9-10) and
-   `_paged_decode_fused_kernel` (bs 14-20). The 4.06x is the split one.
-2. **Balance on KV tokens** — the launcher runs
-   `--load-balance-method total_requests`, balancing the wrong quantity; the
-   MLA kernel tracks KV tokens, not `bs` (rank 1 bs=14 → 330.7 µs vs rank 0
-   bs=18 → 166.3). Switch to `total_tokens`
-   (`data_parallel_controller.py:92,125-130`, fed by
-   `LoadSnapshot.num_total_tokens`). Upper bound ~10 % of wall (74.0 → ~66).
-   **A/B it, don't just flip it** — it fights `--policy cache_aware`, which
-   creates the skew deliberately for prefix reuse, so expect a TTFT cost. EPLB
-   cannot help; this is attention/KV imbalance, not expert routing.
-3. **TP-only / single-DP-rank run** — the one measurement that decides the
-   6.28 ms floor. At `npes = 1` nobody waits: if the floor collapses it is
-   synchronisation and the fix is pipelining `prepare(n+1)` against
-   `stage1/2(n)`; if it holds, it is real plan emission and `pcu1` (one CTA) is
-   worth raising after all.
+### Ruled out, with evidence — do not revisit
 
-**Do NOT** chase raising `prepare`'s CU count or co-scheduling work against it.
-A spin-wait does not parallelise, and the idle CUs are idle *because the rank is
-waiting*. That inverts §14's own implication and B200's target #1.
+- **`prepare`'s CU count / `pcu1`+`qcu28` tuning.** A `wait_i32_until_equals`
+  spin does not parallelise; the 226 idle CUs are idle *because the rank is
+  waiting*. Withdrawn by both nodes.
+- **Stream overlap / co-scheduling.** B200 measured true full serialisation at
+  **3 % end to end** (8 % on the step wall, diluted by pdi=24). MI355X has no
+  room in the wait anyway. Noise against a 2.20x kernel-work gap.
+- **`gemm`.** Equal once B200's starvation artefact was removed (9.81 vs 9.36).
 
 ---
 

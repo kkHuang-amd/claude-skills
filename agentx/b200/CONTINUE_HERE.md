@@ -28,14 +28,22 @@ decode kernels.** Full detail and the two follow-ups are in
   is elapsed time and needs no barrier-free assumption.
 - decomposes as 1.50x more kernel time x 1.67x less overlap = 2.50x vs 2.47x
   measured.
-- **The 44 ms wall gap, matched at bs=10:** +23.65 ms is more kernel time,
-  +20.30 ms is overlap B200 gets and MI355X does not. Of the kernel time,
-  `attn` **+8.32 (35.2 %, 2.13x)** and `comm` **+5.84 (24.7 %, 10x)** are the
-  two clean rows — both verified pure execution on both nodes — and together
-  they are 60 % of it. `gemm+moe` is +7.34 (31 %) but contains absorbed wait on
-  both sides. Table in `exchange/FINDINGS.md` §2b.
-- **Attention is the actionable target**, not MoE, even though `gemm+moe` is
-  72 % of B200's step and 59 % of MI355X's.
+- **The gap on ELAPSED time (`credited`, both sides), bs=10:** GPU busy 30.20
+  vs 75.22 ms. `moe` **+27.67 (61.5 %)**, `attn` **+9.44 (21 %)**, real
+  collective `comm` +6.17 (13.7 %), `copy` +3.95, and `gemm` **−4.35** —
+  B200 is 1.46x *slower* in dense GEMM. `gemm+moe` 21.79 → 45.11 (2.07x).
+- **Neither node has idle to reclaim:** B200 98.1 % busy inside the step
+  (0.59 ms idle), MI355X 99.99 %.
+- **B200's concurrency is one thing only:** `moe` under `gemm`, 13.39 ms/step
+  of the two running together; `moe` exclusive is just 1.12. MI355X runs the
+  two serially.
+- **Biggest named target: MI355X's `megamoe_prepare_compact`** (16.24 ms,
+  61 calls, no B200 counterpart) — alone larger than B200's entire credited
+  `moe` of 8.08. Second: the MLA decode kernel at 4.06x per call, a floor.
+- **WITHDRAWN: "attention is the largest difference, not MoE."** That came from
+  summed kernel time, which double-counts B200's 1.68x concurrency; MI355X
+  caught it. B200's `moe` sum 15.84 is credited 8.08, a 1.96x inflation — the
+  most inflated bucket, which is why the ordering changed.
 - **Whether the 2.47x is kernel work or intra-step wait is NOT resolved.** The
   "`compute` is equal so it is not the kernels" claim was withdrawn the same
   day: B200's `compute` is pace-pinned, not barrier-free. Across bs 1→12 `attn`

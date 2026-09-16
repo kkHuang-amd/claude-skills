@@ -281,9 +281,11 @@ those are moved into `gemm` and `moe`:
 | quant | 1.52 | 2.21 | +0.69 | 3.0 % | yes |
 | sample+norm_rope+other | 1.79 | 2.10 | +0.31 | 1.3 % | yes |
 
-**`attn` is the largest difference, not MoE** — 2.18x, and `gemm+moe` is only
-+4.11 once B200's misclassified GEMM is returned to it, against the +7.34 an
-earlier revision of this block reported.
+**⚠ WITHDRAWN: "`attn` is the largest difference, not MoE".** This whole table
+is built on summed kernel time, which double-counts B200's concurrency. On
+elapsed (`credited`) time `moe` is +27.67 and 61.5 % of the gap while `attn` is
++9.44 — see the `busy_ms.py` block at the end of this file. The table is kept
+only so the withdrawal is traceable; do not quote its deltas.
 
 **The `comm` row is not a comparison and must not be quoted.** B200's `comm`
 bucket contains **no cross-rank collective at all**: it is
@@ -581,3 +583,109 @@ does not sum to total busy when roles overlap each other. It also gives two
 numbers nobody has for B200: **idle inside the 30 ms step**, and which roles
 overlap which (`union` − `exclusive`). A large idle would mean part of the
 2.47x is launch/sync gaps, which is a different fix again.
+
+---
+
+## B200 `credited` elapsed time — answering the busy_ms.py request, and it
+## makes `moe` the gap, not `attn`
+*(b200, 2026-09-16. `busy_ms.py` on
+`b200:/workspace/agentx/traces/b200-tp8-ep8-dpatrue-c128-pdi24trace_steady/`,
+`TARGET_VERIFY full` bs=10. Reclassified to the agreed scheme —
+`nvjet_*`→gemm, `silu_mul_clamp`→moe, `mega_moe_pre_dispatch`→moe,
+`flash_fwd_mla_combine`→attn — so `comm` means a real collective on both sides.)*
+
+MI355X was right and the correction is large. Two ranks, and they agree:
+
+| rank 4, n=15 | sum | union | excl | **credited** |
+|---|---:|---:|---:|---:|
+| gemm | 24.03 | 21.32 | 6.23 | **13.71** |
+| moe | 15.84 | 15.07 | 1.12 | **8.08** |
+| attn | 7.62 | 6.80 | 5.75 | **6.23** |
+| quant | 1.57 | 1.53 | 0.60 | 1.05 |
+| other | 1.03 | 1.03 | 0.30 | 0.64 |
+| norm_rope | 0.56 | 0.56 | 0.27 | 0.38 |
+| sample | 0.14 | 0.14 | 0.00 | 0.07 |
+| copy | 0.06 | 0.06 | 0.01 | 0.03 |
+| comm | 0.00 | — | — | **0.00** |
+| **total** | **50.87** | | | **30.20** |
+
+| | wall | summed | sum/busy | **GPU busy** | **idle in step** |
+|---|---:|---:|---:|---:|---:|
+| rank 4, n=15 | 30.79 (p50 29.95) | 50.87 | **1.684x** | **30.20** | **0.59** |
+| rank 7, n=10 | 32.03 (p50 30.15) | 51.92 | 1.681x | 30.88 | 1.15 |
+
+Rank 7 credited: gemm 13.52, moe 8.50, attn 6.43 — within 0.4 ms of rank 4 on
+every bucket.
+
+### The idle number neither node had
+
+**B200 is 98.1 % busy inside the step** (0.59 ms idle of 30.79), MI355X 99.99 %
+(0.01 of 75.23). **Neither node has idle to reclaim.** The whole gap is kernel
+work or wait absorbed inside kernels; there is no launch-gap or scheduling
+slack to recover on either side.
+
+### What overlaps what on B200 (the request's second half)
+
+Concurrent elapsed time per role pair, ms/step, rank 4:
+
+| pair | ms/step |
+|---|---:|
+| **gemm x moe** | **13.39** |
+| attn x gemm | 0.83 |
+| gemm x other | 0.63 |
+| moe x quant | 0.57 |
+| gemm x quant | 0.27 |
+| attn x norm_rope | 0.22 |
+| everything else | <0.2 each |
+
+Exclusive: gemm 6.23, attn 5.75, moe 1.12, quant 0.60, rest <0.31.
+
+**B200's concurrency is essentially one thing: the MoE kernel running underneath
+the dense GEMM.** `moe`'s union is 15.07 ms of which 13.39 is concurrent with
+`gemm` and only 1.12 is exclusive. MI355X runs the same two stages serially.
+That is the structural difference, stated as elapsed time rather than as a
+1.67x ratio.
+
+### The corrected cross-platform table — `credited` vs `credited`
+
+Both columns are now elapsed attributions of GPU busy time.
+
+| bucket | B200 credited | MI355X credited | delta | % of gap |
+|---|---:|---:|---:|---:|
+| **moe** | 8.08 | **35.75** | **+27.67** | **61.5 %** |
+| **attn** | 6.23 | **15.67** | **+9.44** | **21.0 %** |
+| comm (real collective) | 0.00 | 6.17 | +6.17 | 13.7 % |
+| copy | 0.03 | 3.98 | +3.95 | 8.8 % |
+| quant+other+norm_rope+sample | 2.14 | 4.32 | +2.18 | 4.8 % |
+| **gemm** | 13.71 | 9.36 | **−4.35** | **−9.7 %** |
+| **GPU busy** | **30.20** | **75.22** | **+45.02** | 100 % |
+
+`gemm+moe` as one bucket: **21.79 → 45.11, +23.32 (2.07x)**.
+
+### Consequences, including one of B200's own claims withdrawn
+
+- **"`attn` is the largest difference, not MoE" is WITHDRAWN.** That was
+  §2b, built on summed kernel time. On elapsed time `moe` is +27.67 and 61.5 %
+  of the gap, `attn` +9.44 and 21 %. MI355X's sum-based ordering (moe +19.91 >
+  attn +8.05) was the right one; `credited` widens moe further because B200's
+  MoE is the bucket that was most concurrency-inflated (sum 15.84 → credited
+  8.08, a factor of 1.96).
+- **`gemm` flips sign, as MI355X predicted.** B200 spends 13.71 ms of elapsed
+  time in dense GEMM against MI355X's 9.36 — B200 is 1.46x *slower* here. Note
+  B200's `gemm` absorbs wait (§2c), so its real GEMM work is below 13.71 and
+  the true flip may be smaller.
+- **`megamoe_prepare_compact` (16.24 ms, 61 calls, no B200 counterpart) is now
+  the single biggest named target**, since it alone exceeds B200's entire
+  credited `moe` of 8.08.
+- **The MLA decode kernel 4.06x stands as a floor**, unchanged: per-call at
+  matched call counts, and B200's side is pure work that concurrency can only
+  have inflated.
+- **What is still not separable:** both nodes' `moe` absorbs group wait, so
+  +27.67 mixes real MoE work with wait on both sides and its sign is safe but
+  its magnitude is not. The TP-only / single-DP-rank run remains the way out,
+  and MI355X has shown `record_shapes` cannot substitute for it.
+
+**Reproduce:** `python3 analysis/busy_ms.py <trace dir> 10`. The reclassified
+run and the pairwise matrix need the four FIX patterns above applied to
+`classify`; folding them into `trace_common.ROLES` is the obvious next tooling
+step so both nodes stop patching locally.

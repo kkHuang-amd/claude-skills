@@ -247,6 +247,37 @@ def main(d, mla_pats):
     # here, offline, before either costs an hour of GPU. "Balanced" is the
     # upper bound for A -- perfectly equal own work, which is more than a KV
     # token balancer can deliver.
+    # The A/B falsified `total_tokens` as a way to equalise ranks, but it did not
+    # touch the model: the step wall is still max_r(own) + floor. So ask the
+    # question the kernel can actually act on -- what if MLA's DISPERSION across
+    # ranks were removed, every rank paying what the cheapest rank pays today?
+    # That is what a straggler-aware kernel buys, and unlike a load balancer it
+    # does not require moving any work between ranks.
+    print("\nMLA DISPERSION -- what a straggler-aware kernel could buy:")
+    print(f"{'scenario':<40s} {'wall ms':>8s} {'saving':>8s}")
+    base_rows = []
+    for g, grp in zip(rows, groups):
+        O = {s["rank"]: s["own"] for s in grp}
+        M = {s["rank"]: s["mla"] for s in grp}
+        base_rows.append((g, O, M))
+    for label, mode in (("as measured", None),
+                        ("MLA equalised to the cheapest rank", "min"),
+                        ("MLA equalised to the mean", "mean"),
+                        ("MLA free (floor of this family)", "zero")):
+        vals = []
+        for g, O, M in base_rows:
+            tgt = (0.0 if mode == "zero" else
+                   min(M.values()) if mode == "min" else
+                   st.fmean(M.values()) if mode == "mean" else None)
+            adj = {r: (O[r] if tgt is None else O[r] - M[r] + tgt) for r in O}
+            vals.append(max(adj.values()) + g["floor"])
+        w = st.median(vals)
+        print(f"{label:<40s} {w:8.2f} {w - W:+8.2f}")
+    print("Equalising costs nothing in total work -- it only moves the critical")
+    print("rank's MLA down to what another rank already achieves today, so it is")
+    print("reachable by the kernel alone. Contrast with the balancer rows below,")
+    print("whose route the total_tokens A/B falsified.")
+
     print("\nDIRECTION A vs MLA -- same slack, so they do not add up:")
     print(f"{'scenario':<34s} {'wall ms':>8s} {'saving':>8s}")
     kb = 1.0 - 7.47 / mean_mla       # MLA at B200 speed: the published gap

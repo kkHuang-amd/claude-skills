@@ -3,7 +3,49 @@
 Counterpart to `agentx/b200/CONTINUE_HERE.md`. The two nodes share nothing but
 this git repo; see `agentx/exchange/README.md`.
 
-## CONTINUE HERE (2026-09-17 16:3x UTC+8) — layer-aware split-K WORKS: −7.67 ms/step for a ~20-line change. Ship it, then trace it
+## EVERY ARM RUN ON 2026-09-17, ONE TABLE
+
+All at mem-fraction 0.85, chunk/rank 8192, MegaMoE+EPLB EP8, DP8, MTP, tp8.
+`Δstep` is the **n-weighted matched-bs** log-implied step delta against the
+same-concurrency b200aligned reference — that is the claim. The aggregate
+columns are context, and at these sizes the throughput differences sit inside
+the 5.67 % replicate spread.
+
+| mode | conc | step p50 | **Δstep** | tok/s/chip | P90 intvty | ITL p90 | TTFT avg | TTFT p50 | cache hit | GPU-tier | GPU pool | ISL mean |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| ref (b200aligned) | 128 | 121.76 | — | 36,995 | 29.5 | 33.9 ms | 11.07 s | 4.01 s | 96.00 % | 95.61 % | 91 % | 108,371 |
+| total_tokens | 128 | 122.32 | **+0.78** | 39,029 | 29.2 | 34.3 ms | 9.61 s | 4.03 s | 96.10 % | 95.68 % | 100 % | 109,612 |
+| fake-kernel **[INVALID]** | 128 | 103.59 | **−17.07** | 43,291 | 35.0 | 28.6 ms | 8.03 s | 3.44 s | 96.16 % | 95.73 % | 91 % | 110,409 |
+| **HCA split-K=4** | 128 | 114.12 | **−7.50** | 40,346 | 31.4 | 31.8 ms | 9.31 s | 3.75 s | 96.12 % | 95.70 % | 84 % | 110,700 |
+| ref (b200aligned) | 256 | 156.19 | — | 57,516 | 22.8 | 43.9 ms | 26.22 s | 15.69 s | 96.41 % | 95.52 % | 78 % | 118,262 |
+| **split-K=4 + total_tokens** | 256 | 150.51 | **−5.37** | 58,508 | 23.2 | 43.1 ms | 26.30 s | 15.34 s | 96.39 % | 95.49 % | 69 % | 118,195 |
+
+Reading notes, in order of how easy they are to get wrong:
+
+- **The fake-kernel row is marked INVALID for every column except `Δstep`.**
+  It clamps kv_len to 128, so the model emits garbage; OSL, queueing, TTFT,
+  throughput and cache hit are all meaningless. It exists only as the
+  **ceiling**: −17.07 ms is what deleting ~95 % of MLA buys, and it is the
+  denominator the split-K result should be scored against.
+- **split-K captures 44 % of that ceiling at c128** (−7.50 of −17.07) for ~20
+  lines of code.
+- **`total_tokens` is +0.78 ms, i.e. null**, confirming the earlier c128
+  finding at full weighting. Its tok/s/chip looks +5.5 % better, which is
+  exactly why throughput is not the metric here.
+- **c256 gains less** (−5.37 ms on a 156 ms step, −3.4 %, versus −6.2 % at
+  c128) and none of it reaches end-to-end throughput (+1.7 %, inside noise).
+  Likely because at bs≈21 the base grid already fills the device, so split-K
+  has less to break up — untested; `mla_tail_bench.py` at bs≈21 would settle
+  it in 10 minutes.
+- The c256 arm changed **two** variables against its reference (balancer and
+  split-K), so it cannot attribute between them on its own. Given the c128
+  `total_tokens` null, the −5.37 is presumed mostly split-K.
+- Earlier prose quoted −7.67 ms for c128 split-K from bs 8-20; the −7.50 here
+  is the same computation over every common bs cell and supersedes it.
+
+---
+
+## CONTINUE HERE (2026-09-17 16:3x UTC+8) — layer-aware split-K WORKS: −7.50 ms/step for a ~20-line change. Ship it, then trace it
 
 **Node state:** arm complete, server and the orphaned launcher both killed,
 zero `sglang::`, ports clear, VRAM draining from 32 GB/GPU.

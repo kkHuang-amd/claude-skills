@@ -3,7 +3,58 @@
 Counterpart to `agentx/b200/CONTINUE_HERE.md`. The two nodes share nothing but
 this git repo; see `agentx/exchange/README.md`.
 
-## CONTINUE HERE (2026-09-17 08:0x UTC+8) — MLA is straggler-bound; A is the wrong knob for it
+## CONTINUE HERE (2026-09-17 08:3x UTC+8) — direction A arm is staged, blocked on VRAM reclaim
+
+**Status:** the `total_tokens` A/B arm is written and was launched once, then
+**killed 90 s in** because `cmd_diff` caught a confound (below). Waiting on the
+VRAM cliff before relaunching — 50 GB/GPU plateau, KFD entries stale, processes
+all dead. Do not launch on the plateau.
+
+**Arm:** `agentx/agentx_c128_totaltokens.sh` (also at
+`/shared_nfs/kk/pr35619/`). It answers two things at once:
+- Does `total_tokens` help end to end? Report ITL, TTFT and cache hit together;
+  expect a TTFT regression since it fights `cache_aware` prefix reuse.
+- **It is a falsification test of the straggler finding.** The kernel's cost
+  follows the batch's longest sequence, and `total_tokens` equalises the total,
+  so the prediction is that **MLA µs/call barely moves**. If it moves a lot, the
+  straggler result is wrong.
+Verify the outcome with `analysis/kv_skew.py` on the new `server.log`, not by
+the flag being present.
+
+**Instrumentation, `agentx/mla_kvlen_stats.patch`** (applied in
+`/sgl-workspace/sglang-MegaMoE`, env `SGLANG_MLA_KVLEN_STATS=1`): adds
+`kvlen mean/max/min` and `kvlen straggler` to each decode log line. This is the
+number that **sizes a straggler-aware rewrite** — `(max − mean)/max` — and
+nothing already in the trace or the log carries it. `kv_indptr` is built *inside*
+the cuda graph, so the reductions are device-only (capture-safe) and the
+scheduler reads the buffer from outside at the existing log interval. Recording
+in all 61 layers cost 14 % per call (345.6 → 394.4 µs); emitting in **one layer
+per forward** puts it at noise (344.1 vs 346.2).
+
+**⚠ New trap, cost an aborted launch: the launcher's MegaMoE+DP branch defaults
+`mem-fraction-static` to 0.65** (`dsv4_fp4_mi355x_sglang_mtp.sh:216`,
+`MEM_FRACTION_STATIC_DP_MEGAMOE`) while the reference arm ran **0.85**. Left
+alone it changes the KV pool, and with it cache hit and batch composition. New
+tool **`analysis/cmd_diff.py`** diffs a new arm's `sglang_command.txt` against
+the reference and exits non-zero on any unexpected flag — **run it ~60 s after
+every launch**. With the fix the two commands differ in exactly one flag.
+
+`--load-balance-method` is now `${LOAD_BALANCE_METHOD:-total_requests}` at
+launcher line 241, so the default is unchanged for every other arm.
+
+**Relaunch, once VRAM has cliffed to the 284 MB baseline:**
+```bash
+nohup bash /shared_nfs/kk/pr35619/agentx_c128_totaltokens.sh \
+      > /shared_nfs/kk/pr35619/tt_arm.log 2>&1 &
+sleep 90 && python3 /workspace/claude-skills/agentx/analysis/cmd_diff.py \
+  /workspace/results/megamoe-eplb-c128-b200aligned \
+  /workspace/results/megamoe-eplb-c128-b200aligned-totaltokens \
+  --expect load-balance-method
+```
+
+---
+
+## Earlier (2026-09-17 08:0x UTC+8) — MLA is straggler-bound; A is the wrong knob for it
 
 **Status:** microbenchmark done on an idle GPU 0, `analysis/mla_microbench.py`.
 Full block in `exchange/FINDINGS.md` (last section). Four results:

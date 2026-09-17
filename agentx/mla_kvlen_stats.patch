@@ -1,0 +1,113 @@
+diff --git a/python/sglang/kernels/ops/attention/dsv4/unified_kv_kernels/paged_decode.py b/python/sglang/kernels/ops/attention/dsv4/unified_kv_kernels/paged_decode.py
+index 391fe9c2a6..6ae7a5b4fd 100644
+--- a/python/sglang/kernels/ops/attention/dsv4/unified_kv_kernels/paged_decode.py
++++ b/python/sglang/kernels/ops/attention/dsv4/unified_kv_kernels/paged_decode.py
+@@ -52,6 +52,7 @@ the captured launch sequence.
+ from __future__ import annotations
+ 
+ import functools
++import os
+ 
+ import torch
+ import triton
+@@ -89,6 +90,50 @@ _FP8_GROUP_SIZE = 64
+ _FP8_DTYPE = torch.float8_e4m3fnuz if is_fp8_fnuz() else torch.float8_e4m3fn
+ 
+ 
++# --- kv_len distribution probe (SGLANG_MLA_KVLEN_STATS=1) -------------------
++# The decode kernel's cost is set by the LONGEST sequence in the batch, not by
++# the total KV (measured: +71 % for 2x the max at constant total, -4 % for half
++# the total at constant max). The size of a straggler-aware rewrite is therefore
++# (max - mean) / max, and nothing in the trace or the server log carries it.
++#
++# `kv_indptr` is built INSIDE the cuda graph, so no host code sees its values on
++# a replayed step. These reductions are pure device ops with no host sync, so
++# they are capture-safe: they record into a device buffer that the scheduler
++# reads from outside the graph. All 61 layers overwrite the same slot, which is
++# fine -- they share the batch, so any one of them answers the question.
++#
++# Cost control: recording in all 61 layers costs 14 % per call (measured:
++# 345.6 -> 394.4 us at T=98, kv_len=708), which is far too much to fold into an
++# arm we intend to take timings from. But Python only runs at CAPTURE time, so
++# emitting the ops in ONE layer per forward puts ~7 extra tiny kernels in the
++# replayed graph instead of 427 -- 0.07 % of a 74 ms step. `_EMIT_EVERY`
++# defaults to the layer count, so the modulo lands on one layer per forward.
++_KVLEN_STATS = None
++_KVLEN_STATS_ON = os.environ.get("SGLANG_MLA_KVLEN_STATS", "0") == "1"
++_KVLEN_EMIT_EVERY = int(os.environ.get("SGLANG_MLA_KVLEN_EVERY", "61"))
++_KVLEN_CALL_CT = 0
++
++
++def kvlen_stats_buffer():
++    """-> the [mean, max, min, T] device tensor, or None if never recorded."""
++    return _KVLEN_STATS
++
++
++def _record_kvlen_stats(kv_indptr):
++    global _KVLEN_STATS, _KVLEN_CALL_CT
++    emit = _KVLEN_CALL_CT % _KVLEN_EMIT_EVERY == 0
++    _KVLEN_CALL_CT += 1
++    if not emit:
++        return
++    if _KVLEN_STATS is None:
++        _KVLEN_STATS = torch.zeros(4, dtype=torch.float32, device=kv_indptr.device)
++    d = (kv_indptr[1:] - kv_indptr[:-1]).float()
++    _KVLEN_STATS[0] = d.mean()
++    _KVLEN_STATS[1] = d.max()
++    _KVLEN_STATS[2] = d.min()
++    _KVLEN_STATS[3] = d.numel()
++
++
+ @functools.lru_cache(maxsize=1)
+ def _cu_count() -> int:
+     """Compute-unit count of the active GPU, queried once via aiter.
+@@ -716,6 +761,9 @@ def _sparse_attn_v4_paged_decode_triton(
+     T, H, D = q.shape
+     out = torch.empty_like(q)
+ 
++    if _KVLEN_STATS_ON:
++        _record_kvlen_stats(kv_indptr)
++
+     if block_h is None:
+         block_h = triton.next_power_of_2(min(H, 64))
+     else:
+diff --git a/python/sglang/srt/managers/scheduler_components/metrics_reporter.py b/python/sglang/srt/managers/scheduler_components/metrics_reporter.py
+index 10e9426c28..5617ea36c4 100644
+--- a/python/sglang/srt/managers/scheduler_components/metrics_reporter.py
++++ b/python/sglang/srt/managers/scheduler_components/metrics_reporter.py
+@@ -3,8 +3,11 @@ from __future__ import annotations
+ import dataclasses
+ import logging
+ import math
++import os
+ import tempfile
+ import time
++
++_KVLEN_STATS_ON = os.environ.get("SGLANG_MLA_KVLEN_STATS", "0") == "1"
+ from collections import defaultdict, deque
+ from dataclasses import dataclass
+ from typing import TYPE_CHECKING, List, Optional, Tuple, Union
+@@ -926,6 +929,23 @@ class SchedulerMetricsReporter:
+             self.spec_num_block_accept_tokens = 0
+             self.spec_num_cap_tokens = 0
+             msg += f"accept len: {spec_accept_length:.2f}, accept rate: {spec_accept_rate:.2f}, "
++
++        # SGLANG_MLA_KVLEN_STATS=1: the MLA decode kernel's cost is set by the
++        # longest sequence in the batch, so (max - mean) / max is what sizes a
++        # straggler-aware rewrite. The buffer is filled inside the cuda graph;
++        # this read is outside it, at the existing log interval, so it costs one
++        # 4-element D2H per logged step and nothing on the steps between.
++        if _KVLEN_STATS_ON:
++            from sglang.kernels.ops.attention.dsv4.unified_kv_kernels.paged_decode import (
++                kvlen_stats_buffer,
++            )
++
++            buf = kvlen_stats_buffer()
++            if buf is not None:
++                mean, mx, mn, ntok = buf.tolist()
++                msg += (f"kvlen mean/max/min: {mean:.0f}/{mx:.0f}/{mn:.0f}, "
++                        f"kvlen straggler: {(1 - mean / mx) if mx else 0:.3f}, "
++                        f"kvlen T: {ntok:.0f}, ")
+             if spec_cap_length > 0:
+                 msg += f"cap len: {spec_cap_length:.2f}, "
+             if spec_block_accept_length > 0:

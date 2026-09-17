@@ -3,7 +3,68 @@
 Counterpart to `agentx/b200/CONTINUE_HERE.md`. The two nodes share nothing but
 this git repo; see `agentx/exchange/README.md`.
 
-## CONTINUE HERE (2026-09-17 08:3x UTC+8) — direction A arm is staged, blocked on VRAM reclaim
+## CONTINUE HERE (2026-09-17 09:1x UTC+8) — the A/B is blocked: the reference arm is NOT reproducible with the current launcher
+
+**Status:** three launches, three failures, all the same OOM at cuda-graph
+capture (`236.93 GiB` PyTorch-allocated, <1 GiB free of 288, on a different GPU
+each time). Root-caused. **Nothing is running; GPUs released.**
+
+**Root cause: the launcher has UNCOMMITTED changes made after the reference arm
+ran on 2026-09-15/16, and two of them move memory.** From
+`git diff` of `InferenceX/benchmarks/single_node/agentic/dsv4_fp4_mi355x_sglang_mtp.sh`
+(97 insertions, uncommitted):
+
+```
++    export MORI_SHMEM_HEAP_SIZE="${MORI_SHMEM_HEAP_SIZE:-40G}"
++        MEM_FRACTION_STATIC="${MEM_FRACTION_STATIC_DP_MEGAMOE:-0.65}"
+```
+
+The mori symmetric heap is charged **outside** `mem-fraction-static`. Memory
+accounting at the same point in both runs:
+
+| | reference (2026-09-15) | now |
+|---|---:|---:|
+| PyTorch allocated | 236.93 GiB | 236.93 GiB |
+| free at target-verify capture begin | **41.84** | **~1.0** |
+| implied non-PyTorch | **~9.2 GiB** | **~50.1 GiB** |
+
+The 40.9 GiB difference is the new 40G heap. Target-verify capture needs
+20.99 GiB, which fits in the reference's 41.8 and not in our ~1.
+
+**Two further traps found on the way, both already fixed in the arm script:**
+
+1. **The reference arm ran from `/sgl-workspace/sglang-MegaMoE/python`** (36
+   occurrences in its `server.log`), but a bare `import sglang` now resolves to
+   **`/sgl-workspace/sglang`** — a different checkout with **27 dirty files**
+   (including `dp_attn.py`, `forward_batch_info.py`, `eplb/*`) and a **live vim
+   session**. Two launches went there. The arm script now pins
+   `PYTHONPATH=/sgl-workspace/sglang-MegaMoE/python`, and the accidental patch
+   to the other owner's tree has been reverted. *(The microbenchmark results are
+   unaffected: the two trees' `paged_decode.py` are byte-identical apart from
+   the instrumentation.)*
+2. `mem-fraction-static` 0.65 vs the 0.85 that **all** published MegaMoE numbers
+   used — fixed with `MEM_FRACTION_STATIC_DP_MEGAMOE=0.85`.
+
+**`cmd_diff.py` cannot catch any of this.** It compares CLI flags, and all three
+confounds were environment or code. Flags matched exactly (46, one expected
+difference) in every failed launch. **A flag diff is necessary and not
+sufficient; the tree and the memory-affecting env have to be checked too.**
+
+**Next — a decision is needed, it is not mine to make:**
+- `MORI_SHMEM_HEAP_SIZE=16G` is the value this file's trap notes record
+  ("mem-frac 0.85 plus the 16 GiB mori heap needs 261 of 288 GiB") and would
+  leave ~26 GiB for a 21 GiB capture. But the reference ran with ~9 GiB
+  non-PyTorch, i.e. effectively **no** mori heap — the a2a backend here is
+  `megamoe`, not mori, so the heap may simply be unused.
+- Setting it to 16G reproduces the *documented* configuration, not the
+  *reference* one. If the reference is the comparison target, the cleanest route
+  is to **re-baseline**: run `total_requests` and `total_tokens` back to back on
+  today's launcher, and compare those two to each other rather than to
+  2026-09-15.
+
+---
+
+## Earlier (2026-09-17 08:3x UTC+8) — direction A arm staged
 
 **Status:** the `total_tokens` A/B arm is written and was launched once, then
 **killed 90 s in** because `cmd_diff` caught a confound (below). Waiting on the

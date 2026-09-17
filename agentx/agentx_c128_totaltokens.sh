@@ -27,6 +27,17 @@ SKILL_DIR=/workspace/claude-skills/agentx
 cd /workspace/InferenceX
 source "$SKILL_DIR/agentx_env.sh"
 
+# ⚠ PIN THE TREE. The reference arm ran from /sgl-workspace/sglang-MegaMoE
+# (36 occurrences in its server.log), but a bare `import sglang` now resolves to
+# /sgl-workspace/sglang, which is a DIFFERENT, actively-edited checkout (27
+# dirty files as of 2026-09-17, including dp_attn.py and forward_batch_info.py,
+# with a live vim session in it). Two launches against that tree OOMed
+# identically at cuda-graph capture -- 236.93 GiB allocated, 588 MiB free --
+# where the reference had ~20 GiB spare at the same point. Even had it started,
+# the arm would have been confounded by another person's work in progress.
+# cmd_diff.py cannot catch this: it compares CLI flags, not code.
+export PYTHONPATH="/sgl-workspace/sglang-MegaMoE/python${PYTHONPATH:+:$PYTHONPATH}"
+
 export MODEL="/shared_nfs/deepseek-ai/DeepSeek-V4-Pro-0813"
 export MODEL_PATH="$MODEL"
 export MODEL_PREFIX="dsv4"

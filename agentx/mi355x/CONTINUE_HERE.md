@@ -3,7 +3,159 @@
 Counterpart to `agentx/b200/CONTINUE_HERE.md`. The two nodes share nothing but
 this git repo; see `agentx/exchange/README.md`.
 
-## CONTINUE HERE (2026-09-17 13:0x UTC+8) — fresh-session handoff. MLA straggler confirmed; next action is the fake-kernel arm
+## CONTINUE HERE (2026-09-17 14:3x UTC+8) — the fake-kernel arm PASSED. The MLA line is confirmed end to end; next is the tail microbench
+
+**Node state:** arm complete, server killed, VRAM draining from a 32 GB/GPU
+plateau at the time of writing. Wait for the 0.28 GB cliff before any GPU work.
+
+### THE RESULT — "MLA faster ⇒ step wall drops" is now tested under intervention, and it holds
+
+`megamoe-eplb-c128-fakekvlen` vs reference `megamoe-eplb-c128-b200aligned`,
+log-implied step p50 at matched `bs` (`analysis/decode_stats.py`):
+
+| bs | ref ms | fake ms | Δ |
+|---|---|---|---|
+| 8 | 111.11 | 97.58 | −13.53 |
+| 10 | 116.45 | 102.73 | −13.72 |
+| 12 | 119.90 | 104.75 | −15.15 |
+| **14** | **123.83** | **105.64** | **−18.19 (−14.7 %)** |
+| 16 | 130.40 | 110.37 | −20.03 |
+| 18 | 134.65 | 111.78 | −22.87 |
+
+**The prediction was written before the run and it landed: bs=14 was predicted
+at ~104 ms from −19.5 ms of "MLA free", and measured 105.64.** The
+falsification threshold was a drop of only 3-5 ms; the measured drop is 18.19.
+So the floor does **not** grow and no new serialisation appears when MLA
+shrinks — the component-level model of the step composes, and the trace
+inversion's −19.54 ms for "MLA free" is trustworthy as an upper bound.
+
+Δ grows monotonically with `bs` (−13.5 at 8 to −22.9 at 18), which is what MLA
+cost scaling with batch predicts and is a second, independent consistency check
+on the attribution.
+
+**Not confounded:** `accept len` 3.78 vs 3.78, cuda-graph replay 100 % of steps
+in both, KV pool identical at 12,077,312, 46/46 flags identical, aiperf
+`0/11,284` errors. The `bs` mix did shift (running-req p50 11 vs 12) exactly as
+expected from garbage output, which is why only matched-`bs` rows are quoted.
+Aggregate ITL p90 34.54 vs 39.60 ms moves the same way but is part composition,
+so do not quote it as the effect size.
+
+**What this does and does not license.** It licenses spending on MLA: the
+ceiling for a perfect straggler fix is 59 % of this 18 ms, i.e. ~11 ms/step at
+bs=14. It does **not** say any realisable kernel reaches that — the clamp
+removed 95 % of the work, which no straggler-aware design can.
+
+### THE TAIL MICROBENCH IS DONE TOO, AND IT OVERTURNS "split-K is the wrong tool"
+
+`analysis/mla_tail_bench.py`, GPU0, logs `/shared_nfs/kk/mla_tail_bench.log`
+and `..._csa.log`. Ragged vectors from LogNormal(median 1,000, p99 3,096); the
+`--cap` flag switches between the two layer families.
+
+**The two families are different kernels in all but name.** At bs=14:
+
+| | CSA layers (`--cap 1152`) | HCA layers (`--cap 5000`) |
+|---|---|---|
+| dispersion (max−mean)/max | 0.19 | 0.77 |
+| ragged, heuristic splits | 504.1 µs (splits=1) | 1884.2 µs (splits=1) |
+| flat at the mean | 441.5 µs | 539.3 µs |
+| straggler-fix ceiling | **12.4 %** | **71.4 %** |
+| split-K=8 vs heuristic | **+5.1 % (loses)** | **−59.4 % (wins)** |
+
+**`_kv_splits_heuristic` picks splits=1 for both, which is right for CSA and
+catastrophic for HCA.** Plain uniform split-K captures −59.4 % of the HCA call
+— most of the 71.4 % dispersion ceiling — with no new kernel at all.
+
+**This retires the "uniform split-K is the wrong tool" verdict, and the reason
+is a one-line correction to the premise.** That verdict rested on "the
+heuristic reads only capture-time scalars, so it cannot tell ragged from
+uniform shapes". True of the batch — but the thing that decides which regime a
+layer is in is **`compress_ratio`, a static per-layer constant from
+`config.json`, which IS known at capture time.** CSA is clamped to
+`index_topk`+128 = 1152 and is nearly uniform; HCA is unclamped and is where
+all the dispersion lives. So the discrimination the heuristic was said to be
+incapable of is available for free.
+
+Also: at bs=10 the heuristic picks splits=2 and split-K=8 still wins −33.6 %;
+at bs=18, −51.6 %. The mis-selection is not a bs=14 artefact.
+
+**Read the ratios, not the absolute µs.** The synthetic applies one aggregate
+distribution to *every* call, whereas real layers alternate between the two
+regimes, so 1884 µs/call is far above the in-situ 330.7 µs/call at bs=14 (and
+the probe's own stats are layer-averaged). The dispersion here, 0.77, is also
+above the 0.61 measured in production.
+
+### NEXT ACTION — make `_kv_splits_heuristic` layer-aware, then re-measure
+
+Cheapest first, in this order:
+
+1. **Confirm the premise in code:** find where `compress_ratio` is available at
+   the `_sparse_attn_v4_paged_decode_triton` call site
+   (`deepseek_v4_backend_hip_radix.py:333` is where CSA gets clamped to
+   `index_topk`) and thread it, or the resulting kv_len cap, into
+   `_kv_splits_heuristic` in `paged_decode.py`.
+2. **Pick splits from the cap, not from `T`/`H` alone:** unclamped (HCA) ⇒ bias
+   to 4-8; clamped (CSA) ⇒ leave at the current choice, which the table above
+   shows is already right.
+3. **Arm it exactly like the fake-kernel arm** — same launcher template, same
+   gates, same matched-`bs` read. Budget the expectation against the fake-kernel
+   arm's −18.19 ms at bs=14: that is MLA reduced ~95 %, so a split-K fix on half
+   the layers should be scored as a fraction of it, not against zero.
+4. Only if that disappoints: per-sequence split or a persistent-CTA work queue.
+
+### Housekeeping before the next timing arm
+
+`SGLANG_MLA_FAKE_KVLEN` defaults to 0, so leaving it unset disables the clamp —
+but the code sits in the **dirty, uncommitted** working tree of
+`/sgl-workspace/sglang-MegaMoE` next to `mla_kvlen_stats.patch`. Re-run
+`cmd_diff.py` and check the env echo for any future arm regardless.
+
+### How the arm was built and validated (for reuse)
+
+The intervention is `SGLANG_MLA_FAKE_KVLEN=128`: `_fake_clamp_indptr` in
+`paged_decode.py` rebuilds the indptr device-side as a compacted cumsum of
+`clamp(len, 128)`, so every token reads at most 128 entries. It is the upper
+bound of any MLA work, straggler-aware or otherwise. Offsets only ever shrink,
+so `kv_indices` is never read out of bounds; the output is garbage.
+
+Pre-flight passed before launch (`analysis/fake_kvlen_validate.py`, GPU0, ~7 s,
+log `/shared_nfs/kk/fake_kvlen_validate.log`): indptr arithmetic exact on a
+hand-computed case, eager cost at the production distribution
+**1891.7 → 90.9 µs/call (0.05x)**, and a local `torch.cuda.CUDAGraph` capture +
+replay around the real kernel succeeds with finite output. That third check is
+the one that matters — launch #4 died with `hipErrorStreamCaptureUnsupported`.
+
+**Verdict rule, fixed before the run.** Compare **log-implied step ms at matched
+bs** and ITL p90 only — never throughput, TTFT, OSL or cache hit, all of which
+the garbage output invalidates. Reference `megamoe-eplb-c128-b200aligned`:
+**bs=14 p50 = 123.83 ms, n=247** (`analysis/decode_stats.py`). MLA free is
+−19.5 ms on the pure-decode scale, so **bs=14 should land at ~104 ms**. A drop
+of only 3-5 ms falsifies the whole MLA line, and then neither the microbenchmark
+nor any kernel work should proceed.
+
+**Read it with:**
+
+```bash
+cd /workspace/claude-skills/agentx
+python3 analysis/decode_stats.py /workspace/results/megamoe-eplb-c128-fakekvlen/server.log
+python3 arm_report.py /workspace/results/megamoe-eplb-c128-b200aligned \
+                      /workspace/results/megamoe-eplb-c128-fakekvlen
+```
+
+### After it finishes, in this order
+
+1. Read the verdict above and write it into `exchange/FINDINGS.md`.
+2. Only if the step moved: the microbench at the real distribution (SECOND
+   ACTION below), which is still unrun — `mla_microbench.py` sweeps kv_len
+   ≤2048 while the real max is ~5,000. Needs 1 GPU, 10 min, so it must wait for
+   this arm to release the node.
+3. Revert the fake clamp before any timing arm that is not this one:
+   `SGLANG_MLA_FAKE_KVLEN` defaults to 0, so unsetting it is enough — but the
+   code lives in the dirty working tree of `/sgl-workspace/sglang-MegaMoE`
+   alongside `mla_kvlen_stats.patch`, uncommitted.
+
+---
+
+## Previous block (2026-09-17 13:0x UTC+8) — fresh-session handoff. MLA straggler confirmed; next action is the fake-kernel arm
 
 **Node state:** nothing running, GPUs released, VRAM draining from the probe arm
 (28 GB/GPU plateau at handoff — wait for the 0.28 GB cliff before any arm).

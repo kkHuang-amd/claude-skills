@@ -3,7 +3,115 @@
 Counterpart to `agentx/b200/CONTINUE_HERE.md`. The two nodes share nothing but
 this git repo; see `agentx/exchange/README.md`.
 
-## CONTINUE HERE (2026-09-17 11:0x UTC+8) — `total_tokens` A/B done. Balancing is NOT an ITL lever; MLA is the only line left
+## CONTINUE HERE (2026-09-17 13:0x UTC+8) — fresh-session handoff. MLA straggler confirmed; next action is the fake-kernel arm
+
+**Node state:** nothing running, GPUs released, VRAM draining from the probe arm
+(28 GB/GPU plateau at handoff — wait for the 0.28 GB cliff before any arm).
+
+### What is settled today, and must not be re-litigated
+
+| line | verdict | evidence |
+|---|---|---|
+| **A `total_tokens`** | **closed — keep the flag, not an ITL lever** | skew 2.08x→1.69x but step time moved 0 to +2.4 % at matched bs. TTFT 11.07→9.61 s, cache unchanged, throughput +5.5 % is inside the 5.67 % replicate spread = null |
+| **cross-rank balancing** | **falsified as a route** | the −7.35 ms "balanced ranks" counterfactual row is withdrawn |
+| **MLA straggler** | **confirmed, within-batch** | 2,772 samples: at 150-200k tok/req the batch's p50 token reads ~1,000 entries, p99 reads ~3,100. Dispersion grows with KV (0.20→0.61) |
+| **MLA roofline** | **1.2-3.1 % of both** | so the 4.06x gap to B200 is a design gap, not silicon |
+| **uniform split-K** | **wrong tool** | wins ragged (419→355 µs), loses uniform (247→317); `_kv_splits_heuristic` reads only capture-time scalars so it cannot tell them apart |
+| **C, copy kernels** | **attributed, low ceiling** | whole bucket 3.85 ms; largest single kernel 0.757 ms; the dead-write fix is ~0.25 ms (0.34 % of the step). Cleanup, not a main line |
+
+### The structural fact that explains everything (found late, easy to miss)
+
+**Two of the three index streams have different caps.** CSA (`compress_ratio 4`)
+is clamped to `index_topk`=1024 (`deepseek_v4_backend_hip_radix.py:333`), so its
+kv_len tops out at 1024+128. **HCA (`compress_ratio 128`) has no such clamp** —
+it covers the whole context at 1/128 resolution, so its kv_len ≈ context/128 and
+grows without bound (ISL p99 634,941 ÷ 128 = 4,960, matching the measured
+per-layer maxima of 3,958-5,288). `config.json`'s `compress_ratios` alternates
+128/4 per layer.
+
+Consequences: `#full token` is **not** fully decoupled from per-step cost (it
+drives the HCA layers); the within-batch straggler **is** the long-context
+request on HCA layers; and a fix should target those layers, not all 61.
+
+### NEXT ACTION — the fake-kernel arm. It is the decisive experiment
+
+Everything above is component-level. The chain "MLA faster ⇒ step wall drops"
+has never been tested under intervention, and the chain is what has been wrong
+twice today. `floor` = 5.19 ms was measured with MLA unchanged; whether it grows
+or another serialisation appears when MLA shrinks, no model can say.
+
+**Design (single variable, capture-safe):** clamp per-token kv_len to a small
+constant (128) inside `_sparse_attn_v4_paged_decode_triton`. Build the indptr
+device-side (`cumsum` of a filled tensor) — **never write a host scalar into a
+device tensor**, that is what aborted a launch today with
+`hipErrorStreamCaptureUnsupported`. Validate under a local
+`torch.cuda.CUDAGraph` capture+replay **before** launching, as the kv_len probe
+now is.
+
+**Quote only step-level numbers**: log-implied step time at matched `bs`, and
+ITL p90. Not throughput, not TTFT — garbage output changes OSL and queueing.
+`accept len` is **not** a confound: AgentX pins it
+(`SGLANG_SIMULATE_ACC_LEN=3.77`, launcher :302-311).
+
+**Prediction to falsify, written before the run:** MLA free takes the pure
+decode step 74.02 → 54.48 ms, i.e. −19.5 ms. On the log-implied scale bs=14
+should go **123.83 → ~104 ms**. A drop of only 3-5 ms kills the whole MLA line
+and neither the microbenchmark nor the kernel work should proceed.
+
+### SECOND ACTION — microbench at the real distribution (10 min, 1 GPU, no cliff needed)
+
+Retires two debts and fills the wait for the VRAM cliff. `mla_microbench.py`
+currently sweeps kv_len ≤2048 while the real max is ~5,000 — **the tail is
+exactly where the win is and it has never been measured.** Three cases, ragged
+vectors matching the measured distribution (p50 ~1,000, p99 ~3,100, max ~5,000):
+ragged as-is; clamp-to-mean (identical total work, zero dispersion — the floor a
+perfect straggler fix reaches); uniform split-K 1/2/4/8. Difference between the
+first two is the **measured** achievable win per call.
+
+### Two debts of mine, both recorded so they are not inherited silently
+
+1. **The logged `kvlen straggler` field is the wrong statistic.** It mixes
+   within-batch dispersion with across-layer dispersion (its `max` is across
+   layers, its `mean` is layer-averaged). Use `(p99−mean)/p99`. Fixing it is one
+   line in `metrics_reporter.py` (per-layer `(max−mean)/max`, then average) plus
+   one arm.
+2. **`mla_microbench.py`'s kv_len ceiling is 2048**, below the real maximum, so
+   its absolute per-call figures understate the tail. The inversion's "implied
+   kv_len 244-708" are 61-layer averages, not per-token lengths.
+
+### Repro / tools (all no-GPU unless noted)
+
+```bash
+cd /workspace/claude-skills/agentx
+python3 analysis/mla_counterfactual.py /shared_nfs/kk/pr35619/trace_c128_pdi24_steady
+python3 analysis/copy_attrib.py        /shared_nfs/kk/pr35619/trace_c128_pdi24_steady
+python3 analysis/kv_skew.py     /workspace/results/megamoe-eplb-c128-b200aligned-totaltokens/server.log
+python3 analysis/decode_stats.py /workspace/results/megamoe-eplb-c128-b200aligned-totaltokens/server.log
+python3 arm_report.py /workspace/results/megamoe-eplb-c128-b200aligned \
+                      /workspace/results/megamoe-eplb-c128-b200aligned-totaltokens
+HIP_VISIBLE_DEVICES=0 python3 analysis/mla_microbench.py --quick   # needs 1 GPU
+```
+
+### Launching any arm — the checklist that cost five failures today
+
+1. VRAM at the **0.28 GB baseline**, confirmed twice a minute apart. Never on a
+   plateau.
+2. Zero `sglang::*` processes (`pgrep '^sglang::'`) — **list PIDs before
+   killing**, and note a finished arm leaves its server running.
+3. Ports 8888/8889 clear.
+4. Use `agentx/agentx_c128_totaltokens.sh` as the template: it pins
+   `PYTHONPATH=/workspace/InferenceX:/sgl-workspace/sglang-MegaMoE/python:/sgl-workspace/mori`,
+   `MEM_FRACTION_STATIC_DP_MEGAMOE=0.85`, `MORI_SHMEM_HEAP_SIZE=16G`. **The
+   launcher's own defaults (0.65, 40G, and a bare import resolving to
+   `/sgl-workspace/sglang`) do not reproduce any published MegaMoE number.**
+5. 90 s after launch run `analysis/cmd_diff.py` against the reference arm. It is
+   necessary and **not sufficient** — it compares CLI flags only, and all five
+   of today's failures had identical flags. Also check the tree in `server.log`
+   and the environment echo in the launch log.
+
+---
+
+## Earlier today (2026-09-17 11:0x UTC+8) — `total_tokens` A/B: balancing is NOT an ITL lever
 
 **Status:** arm complete and clean (3,628 s, `errors=0`, gates pass, 46 flags
 with only `--load-balance-method` differing, KV pool identical at 12,077,312).

@@ -72,7 +72,43 @@ ranks — which is why it survives the `total_tokens` falsification.
 ~140k by minute 15 and 147-172k by 25-40 (steady state 165-170k), so discard
 early samples. `DURATION=1800`.
 
-**Still untouched: C**, the 3.85 ms of unfused copy kernels. No GPU needed.
+### C — the copy kernels are attributed. The biggest one is a ROCm-only fallback
+
+`analysis/copy_attrib.py` on the existing trace, no GPU. 27.58 ms of `copy`-role
+kernels across 8 ranks' EXTEND windows, 80 % resolved.
+
+**`_fill_padded_rows_kernel` — 7.41 ms in EXTEND, grid 3254x256, and exactly
+183 calls/step = 3 x 61 layers.** Three call sites, all MoE top-k padding
+housekeeping: `topk.py:1578` (`_mask_topk_ids_padded_region`),
+`topk.py:1591` (`_zero_topk_weights_padded_region`) and
+`mega_moe_flydsl.py:263`. **B200 has no counterpart because the CUDA path never
+reaches this kernel** — `topk.py:1573` is
+`if _is_cuda and topk_ids.dtype == torch.int32 and fill_value == -1:
+mask_topk_ids(...)`, and ROCm falls through to `_fill_padded_rows`. This is a
+gated fast path, not a missing optimisation, which makes it the cheapest item on
+the whole list to attack.
+
+**`_swa_scatter_kernel` — 3.42 ms, grid 3254x512, 61 calls/step = one per
+layer**, from `store_swa_into_unified` (`unified_kv_kernels/runtime.py:85`).
+The SWA KV write.
+
+Everything else resolves to ordinary aten ops (`aten::copy_`, `aten::cat`,
+`aten::scatter_add_`, `aten::index`) and `Memcpy DtoD`.
+
+**Two method notes worth keeping:**
+- **`External id` does not attribute Triton kernels.** A kernel event carries
+  `correlation`, not `External id`; the id lives on the `cuda_runtime` launch
+  event, and only aten's `hipLaunchKernel` has one —
+  `hipModuleLaunchKernel` (Triton) does not. The tool therefore walks
+  `correlation -> launch event -> timestamp` and finds the innermost enclosing
+  `cpu_op`/annotation. Triton launches sit inside no aten op, so the trace can
+  only place them in the step; the call site came from `rg` on the kernel name
+  plus the calls/step count as the cross-check (183 = 3x61 pins all three sites).
+- **⚠ CORRECTION: grid IS in the ROCm trace.** Every kernel event carries
+  `args.grid` and `args.block` (e.g. `_fill_padded_rows_kernel` grid
+  `[3254,1,1]`, block `[256,1,1]`). This file previously said it was not, and
+  that `megamoe_prepare_compact`'s grid 30 had to be inferred from aiter's
+  kernel-name encoding. It can be read directly, and `copy_attrib.py` prints it.
 
 ---
 

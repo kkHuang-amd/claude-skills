@@ -65,6 +65,7 @@ cost real time; the "because" column is the general lesson.
 | "`attn` is the biggest gap, not `moe`" | `moe`, +22.33 ms | artefact of summed kernel time; B200's `moe` sum 15.84 is credited 8.08 |
 | "raise `prepare`'s CU usage" (B200's target #1) | it is a cross-rank **wait**, r = −0.942 | a `wait_i32_until_equals` spin does not parallelise (caught by MI355X) |
 | "B200's ranks are level (0.0-0.3 ms spread)" | 1.98x MLA spread in the serial arm | the evidence came from the pace-pinned capture |
+| "a fake MLA kernel would collapse `accept len`" | acceptance is **simulated** at a golden 3.77 | AgentX throughput runs export `SGLANG_SIMULATE_ACC_LEN`; there is no real target verification to break. Logged accept len is simulator variance, **not a health signal** |
 
 ### Method rules earned the hard way
 
@@ -1656,12 +1657,33 @@ its value *falls* as MLA improves.
 **Upper bound, not a forecast.** Three optimistic assumptions, all in the
 tool's docstring: slack is assumed fungible, `floor` is held constant, and MLA
 is removed in place with no cache/occupancy interaction. Two GPU arms validate
-it: k=2 by running the real kernel twice (bit-identical outputs, so accept len,
-OSL and KV are untouched — a true single-variable test), then k=0 with a fake
-kernel, from which **only trace-derived per-step numbers are quotable**: DSPARK
-is on (accept len 3.65, accept rate 0.44 of 7 draft tokens) and OSL is
-EOS-driven, so garbage logits move both and no ITL/TTFT/throughput figure from
-that arm means anything.
+it: k=2 by running the real kernel twice (bit-identical outputs — a true
+single-variable test), then k=0 with a fake kernel.
+
+**[CORRECTION, MI355X 2026-09-17] The accept-len objection to the fake-kernel
+arm is withdrawn.** This block originally argued that garbage logits would
+collapse `accept len` from 3.65 to ~1 and confound the arm. That is wrong:
+**AgentX throughput runs do not do real target verification.** The launcher
+exports, for every non-`EVAL_ONLY` run,
+
+```
+SGLANG_SIMULATE_ACC_LEN=3.77          # golden AL, gamma=6, thinking_on
+SGLANG_SIMULATE_ACC_METHOD=match-expected
+SGLANG_SIMULATE_ACC_TOKEN_MODE=real-draft-token
+```
+
+(`dsv4_fp4_mi355x_sglang_mtp.sh:302-311`, and confirmed present in both the
+reference arm's and the new arm's launch logs). Acceptance is pinned to a golden
+distribution, so it does not depend on the target's logits at all — which is
+also why the logged 3.65 and 3.81 are simulator variance around 3.77 and **not
+a health signal**. One of the two confounds against the fake-kernel arm was
+never there.
+
+The remaining question is OSL: emitted tokens are `real-draft-token`, so the
+text comes from the draft path, but whether the target's bonus token — and
+therefore EOS and OSL — is insulated has **not** been read out of
+`dspark_worker_v2.py` yet. Settle that before quoting anything but trace-derived
+per-step numbers from a fake-kernel arm.
 
 ---
 

@@ -1842,3 +1842,53 @@ the decode step.
 **Recommendation:** keep `total_tokens` — it is one flag, it costs nothing
 measurable, it improves TTFT and it reduces skew — but **do not count it against
 the MLA gap**. It is not an ITL lever on this workload.
+
+---
+
+## MI355X 2026-09-17 — measured: the MLA straggler is real. Within-batch kv_len spread is 3.1x at steady state
+
+`agentx_c128_kvlenprobe.sh` + `mla_kvlen_stats.patch`, 2,772 decode samples,
+read against tok/req rather than against the clock.
+
+| tok/req | n | within-batch mean | p50 | p99 | (p99−mean)/p99 |
+|---:|---:|---:|---:|---:|---:|
+| 0-50k | 181 | 740 | 669 | 921 | 0.20 |
+| 100-150k | 1146 | 1059 | 913 | 2513 | 0.58 |
+| **150-200k** | **770** | **1198** | **998** | **3106** | **0.61** |
+| 200-250k | 164 | 1344 | 1069 | 2967 | 0.55 |
+
+At a representative KV working set the median token in a batch attends ~1,000
+entries and the p99 token attends ~3,100. **The dispersion is within a batch,
+not merely between ranks — this is the case where a straggler-aware kernel
+works.** It also grows with the KV working set (0.20 → 0.61), so it is worst
+exactly where it costs most.
+
+### Three corrections this measurement forces
+
+1. **`kv_len` is NOT capped at `index_topk = 1024`.** Measured per-layer maxima
+   reach **3,958-5,288**. The microbenchmark swept 256-2048 and its inversion
+   assumed ≤1024, so the "implied kv_len 244-708" figures are 61-layer
+   *averages*, not per-token lengths. The kernel's absolute cost at the real
+   tail is therefore higher than that sweep showed.
+2. **Layers differ enormously — 128 to 5,288.** The 128s are sliding-window
+   layers (`sliding_window=128`); `compress_ratios` alternates 128/4 per layer
+   (`config.json`), and the backend picks SWA / CSA / HCA indptr per layer
+   (`deepseek_v4_backend_hip_radix.py:1431-1448`). Sampling one layer would
+   have been meaningless, and cuda-graph capture freezes which layer is sampled.
+3. **[METHOD ERROR, mine] The `kvlen straggler` field in the log is not
+   trustworthy.** It computes `1 − mean/max` where `mean` is layer-averaged
+   within-batch mean but `max` is the maximum *across* layers, so it mixes
+   within-batch dispersion (fixable by the kernel) with across-layer dispersion
+   (by design, and not fixable — each layer is its own launch). Use
+   `(p99−mean)/p99` from the table above, which compares two statistics
+   aggregated the same way. A corrected reporter computes per-layer
+   `(max−mean)/max` first and then averages; that needs one more arm.
+
+### Consequence
+
+The design question is answered: **straggler-aware split-K / a persistent-CTA
+work queue, not a general speed-up**, and the win concentrates in the minority
+of layers with long `kv_len` rather than spreading over all 61. Uniform split-K
+remains the wrong tool — measured earlier, it wins on ragged shapes (419 → 355
+µs) and loses on uniform ones (247 → 317), and `_kv_splits_heuristic` cannot
+tell them apart because it reads only capture-time scalars.

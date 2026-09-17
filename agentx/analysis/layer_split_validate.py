@@ -15,9 +15,10 @@ Four checks; all must pass before an 8-GPU launch.
      path that production has been capturing until now.
 """
 import math
+import os
 import sys
 
-sys.path.insert(0, "/sgl-workspace/sglang-MegaMoE/python")
+sys.path.insert(0, os.environ.get("SGLANG_TREE", "/sgl-workspace/sglang-MegaMoE") + "/python")
 sys.path.insert(0, "/workspace/claude-skills/agentx/analysis")
 
 import torch  # noqa: E402
@@ -54,7 +55,8 @@ def main():
     T = 98
     lens = real_lens(T, 0, 5000, 1300.0)     # HCA shape at steady state
     args, sc = build(T, lens, dev)
-    assert pd._FAKE_KVLEN == 0, "the fake clamp must be OFF for this check"
+    # Absent entirely in trees that never carried the fake-kernel arm.
+    assert getattr(pd, "_FAKE_KVLEN", 0) == 0, "the fake clamp must be OFF here"
 
     ref = pd.sparse_attn_v4_paged_decode(*args, kv_scales=sc)
     spl = pd.sparse_attn_v4_paged_decode(*args, kv_scales=sc, kv_splits=4)

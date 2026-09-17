@@ -34,14 +34,42 @@ Reading notes, in order of how easy they are to get wrong:
   exactly why throughput is not the metric here.
 - **c256 gains less** (−5.37 ms on a 156 ms step, −3.4 %, versus −6.2 % at
   c128) and none of it reaches end-to-end throughput (+1.7 %, inside noise).
-  Likely because at bs≈21 the base grid already fills the device, so split-K
-  has less to break up — untested; `mla_tail_bench.py` at bs≈21 would settle
-  it in 10 minutes.
+  **Now explained and measured — see the bs sweep below.**
 - The c256 arm changed **two** variables against its reference (balancer and
   split-K), so it cannot attribute between them on its own. Given the c128
   `total_tokens` null, the −5.37 is presumed mostly split-K.
 - Earlier prose quoted −7.67 ms for c128 split-K from bs 8-20; the −7.50 here
   is the same computation over every common bs cell and supersedes it.
+
+### WHY c256 GAINS LESS — measured, and it is the grid filling up, not dispersion
+
+`/shared_nfs/kk/hca_bs_sweep.log`, HCA shape (median 1,300, cap 5,000), % vs the
+heuristic's splits=1:
+
+| bs | T | base CTAs | dispersion | split 2 | split 4 | split 8 |
+|---|---|---|---|---|---|---|
+| 14 | 98 | 196 | 0.699 | −35.1 | −50.3 | **−54.2** |
+| 18 | 126 | 252 | 0.707 | −25.6 | −41.8 | **−44.5** |
+| 21 | 147 | 294 | 0.701 | −24.3 | −34.1 | **−36.8** |
+| 24 | 168 | 336 | 0.706 | −13.8 | **−24.4** | −22.7 |
+| 28 | 196 | 392 | 0.713 | −16.8 | **−24.3** | −21.9 |
+
+**Dispersion is flat at ~0.70 in every row, so this is not a change in the
+straggler — it is the base grid filling the device.** The target is
+1.5 × 256 = 384 CTAs; the benefit decays as `T × 2` approaches it and flattens
+once past it (bs≈28). Split-K helps by giving idle CUs something to do, and
+past saturation there are none.
+
+This predicts the c256 result quantitatively. c256 runs at bs p50 21 against
+c128's 12-14, i.e. a per-call win of 34.1 % instead of ~50.3 %. Scaling the
+c128 step delta by that ratio gives −7.50 × 34.1/50.3 = **−5.08 ms predicted
+against −5.37 measured** — within 6 %, from a microbenchmark to an end-to-end
+arm. (The step composition also differs between the two, so treat the agreement
+as strong support rather than proof.)
+
+**It also re-confirms splits=4 as the right static choice:** at bs≥24, 8 is
+WORSE than 4 (−22.7 vs −24.4, and −21.9 vs −24.3). 4 degrades gracefully across
+the whole batch range; 8 only wins at small batch.
 
 ---
 

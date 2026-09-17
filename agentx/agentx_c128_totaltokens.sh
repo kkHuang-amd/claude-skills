@@ -36,7 +36,13 @@ source "$SKILL_DIR/agentx_env.sh"
 # where the reference had ~20 GiB spare at the same point. Even had it started,
 # the arm would have been confounded by another person's work in progress.
 # cmd_diff.py cannot catch this: it compares CLI flags, not code.
-export PYTHONPATH="/sgl-workspace/sglang-MegaMoE/python${PYTHONPATH:+:$PYTHONPATH}"
+#
+# All three values below are RECOVERED FROM THE REFERENCE ARM'S OWN LAUNCH LOG
+# (/shared_nfs/kk/pr35619/b200aligned_c128.log), not guessed:
+#   MEM_FRACTION_STATIC=0.85
+#   MORI_SHMEM_HEAP_SIZE=17179869184        (= 16 GiB, NOT the launcher's 40G)
+#   PYTHONPATH=/workspace/InferenceX:/sgl-workspace/sglang-MegaMoE/python:/sgl-workspace/mori:
+export PYTHONPATH="/workspace/InferenceX:/sgl-workspace/sglang-MegaMoE/python:/sgl-workspace/mori${PYTHONPATH:+:$PYTHONPATH}"
 
 export MODEL="/shared_nfs/deepseek-ai/DeepSeek-V4-Pro-0813"
 export MODEL_PATH="$MODEL"
@@ -63,9 +69,25 @@ export PORT="${PORT:-8888}"
 # analysis/cmd_diff.py against the reference ~60 s after launch.
 export MEM_FRACTION_STATIC_DP_MEGAMOE="${MEM_FRACTION_STATIC_DP_MEGAMOE:-0.85}"
 
+# The launcher gained `MORI_SHMEM_HEAP_SIZE:-40G` after the reference arm ran,
+# and that heap is charged OUTSIDE mem-fraction-static, so 40G does not fit:
+#   236.93 (PyTorch static at 0.85) + 40 (heap) + 20.99 (target-verify capture)
+#   = 297.9 GiB > 287.98 GiB, before the ~5 GiB driver context.
+# Four launches OOMed on exactly that, each on a different GPU, <1 GiB free.
+# The reference ran 16 GiB (see the launch log quoted above), which is also the
+# value the launcher's own comment records as measured-sufficient.
+export MORI_SHMEM_HEAP_SIZE="${MORI_SHMEM_HEAP_SIZE:-16G}"
+
 # The two variables under test.
 export LOAD_BALANCE_METHOD="${LOAD_BALANCE_METHOD:-total_tokens}"
-export SGLANG_MLA_KVLEN_STATS="${SGLANG_MLA_KVLEN_STATS:-1}"
+# OFF. The probe as written is NOT cuda-graph-capture-safe: writing the
+# host-side `d.numel()` into the device buffer is a pageable H2D copy, which
+# aborts capture with hipErrorStreamCaptureUnsupported. Lazily allocating the
+# buffer inside capture is the second problem. Fix both (drop the host scalar,
+# allocate the buffer from the backend's init, outside capture) before turning
+# this on, or sample the distribution from a --disable-cuda-graph run instead,
+# where the distribution is identical and Python runs every step.
+export SGLANG_MLA_KVLEN_STATS="${SGLANG_MLA_KVLEN_STATS:-0}"
 
 export RESULT_DIR="${RESULT_DIR:-/workspace/results/megamoe-eplb-c128-b200aligned-totaltokens}"
 export RESULT_FILENAME="dsv4_fp4_sglang_tp${TP}-pp1-dcp1-pcp1-ep${EP_SIZE}-dpa${DP_ATTENTION}_disagg-false_spec-mtp_agentic_c${CONC}"

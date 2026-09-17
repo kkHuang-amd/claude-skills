@@ -3,7 +3,75 @@
 Counterpart to `agentx/b200/CONTINUE_HERE.md`. The two nodes share nothing but
 this git repo; see `agentx/exchange/README.md`.
 
-## CONTINUE HERE (2026-09-17 09:1x UTC+8) — the A/B is blocked: the reference arm is NOT reproducible with the current launcher
+## CONTINUE HERE (2026-09-17 09:3x UTC+8) — reference environment RECOVERED; arm ready, not launched
+
+**Status:** five launches, five failures, all root-caused, **all from launcher
+and environment drift, none from the change under test**. Nothing running, GPUs
+at the 0.28 GB baseline. The arm is now configured from the reference arm's own
+launch log and is ready to go on approval.
+
+**The reference environment, recovered verbatim** from
+`/shared_nfs/kk/pr35619/b200aligned_c128.log` (the arm's own launch log — it
+echoes the environment, which `sglang_command.txt` does not):
+
+```
+MEM_FRACTION_STATIC=0.85
+MORI_SHMEM_HEAP_SIZE=17179869184        # 16 GiB, NOT the launcher's current 40G
+PYTHONPATH=/workspace/InferenceX:/sgl-workspace/sglang-MegaMoE/python:/sgl-workspace/mori:
+```
+
+**Why 40G cannot work here, arithmetically** — the heap is charged *outside*
+`mem-fraction-static`:
+
+```
+236.93 (PyTorch static at 0.85) + 40 (heap) + 20.99 (target-verify capture)
+  = 297.9 GiB  >  287.98 GiB      before the ~5 GiB driver context
+```
+
+Four launches OOMed on exactly this, on GPUs 1/2/7, each with <1 GiB free. The
+reference log confirms it independently: at capture end it had `avail mem=20.85`
+with 257.92 GiB PyTorch-allocated, leaving **9.23 GiB** non-PyTorch — a 40 GiB
+heap cannot be resident in that.
+
+**The five failures, so none is repeated:**
+
+| # | cause | mine? |
+|---|---|---|
+| 1 | `mem-fraction-static` 0.65 (launcher's new MegaMoE default) vs 0.85 | no |
+| 2 | wrong tree: bare `import sglang` → `/sgl-workspace/sglang`, 27 dirty files, live vim | no |
+| 3 | same, plus 40G heap | no |
+| 4 | **my kv_len probe is not capture-safe** — `hipErrorStreamCaptureUnsupported` | **yes** |
+| 5 | 40G heap, probe off, correct tree — clean proof that 0.85+40G cannot fit | no |
+
+Failure 4 is a real bug in `mla_kvlen_stats.patch`: writing the host-side
+`d.numel()` into the device buffer is a pageable H2D copy, which aborts cuda
+graph capture, and lazily allocating the buffer inside capture is a second
+problem. **The probe is now default-OFF.** Fix both (drop the host scalar,
+allocate from backend init) or sample the distribution from a
+`--disable-cuda-graph` run instead — the distribution is workload-driven and
+identical there, and Python runs every step so no device buffer is needed.
+
+**Standing lesson, stronger than before:** `cmd_diff.py` reported "46 flags,
+only the expected difference" on **every one of these failures**. A CLI-flag
+diff is necessary and nowhere near sufficient. The launch log's environment
+echo is the artefact that actually settles reproduction — **capture it for every
+arm, and diff it too.**
+
+**Ready to launch (needs approval — ~1 h GPU):**
+```bash
+nohup bash /shared_nfs/kk/pr35619/agentx_c128_totaltokens.sh \
+      > /shared_nfs/kk/pr35619/tt_arm.log 2>&1 &
+sleep 90 && python3 /workspace/claude-skills/agentx/analysis/cmd_diff.py \
+  /workspace/results/megamoe-eplb-c128-b200aligned \
+  /workspace/results/megamoe-eplb-c128-b200aligned-totaltokens \
+  --expect load-balance-method
+```
+Only `--load-balance-method` differs from the reference. "16G + probe off" has
+never actually been run: failure 4 was the probe, not memory.
+
+---
+
+## Earlier (2026-09-17 09:1x UTC+8) — root cause of the launch failures
 
 **Status:** three launches, three failures, all the same OOM at cuda-graph
 capture (`236.93 GiB` PyTorch-allocated, <1 GiB free of 288, on a different GPU

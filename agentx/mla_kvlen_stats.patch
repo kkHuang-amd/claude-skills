@@ -1,5 +1,5 @@
 diff --git a/python/sglang/kernels/ops/attention/dsv4/unified_kv_kernels/paged_decode.py b/python/sglang/kernels/ops/attention/dsv4/unified_kv_kernels/paged_decode.py
-index 391fe9c2a6..6ae7a5b4fd 100644
+index 391fe9c2a6..4051ff67b9 100644
 --- a/python/sglang/kernels/ops/attention/dsv4/unified_kv_kernels/paged_decode.py
 +++ b/python/sglang/kernels/ops/attention/dsv4/unified_kv_kernels/paged_decode.py
 @@ -52,6 +52,7 @@ the captured launch sequence.
@@ -10,7 +10,7 @@ index 391fe9c2a6..6ae7a5b4fd 100644
  
  import torch
  import triton
-@@ -89,6 +90,50 @@ _FP8_GROUP_SIZE = 64
+@@ -89,6 +90,59 @@ _FP8_GROUP_SIZE = 64
  _FP8_DTYPE = torch.float8_e4m3fnuz if is_fp8_fnuz() else torch.float8_e4m3fn
  
  
@@ -50,18 +50,27 @@ index 391fe9c2a6..6ae7a5b4fd 100644
 +    if not emit:
 +        return
 +    if _KVLEN_STATS is None:
-+        _KVLEN_STATS = torch.zeros(4, dtype=torch.float32, device=kv_indptr.device)
-+    d = (kv_indptr[1:] - kv_indptr[:-1]).float()
++        # Allocate only on an EAGER call. sglang runs warmup forwards before it
++        # captures, so this lands outside capture; allocating inside a captured
++        # region would tie the buffer to that graph's private pool.
++        if torch.cuda.is_current_stream_capturing():
++            return
++        _KVLEN_STATS = torch.zeros(5, dtype=torch.float32, device=kv_indptr.device)
++    d = (kv_indptr[1:] - kv_indptr[:-1]).to(torch.float32)
++    # Every write below is device->device. Writing a HOST scalar here (an
++    # earlier version stored `d.numel()`) is a pageable H2D copy, which aborts
++    # capture with hipErrorStreamCaptureUnsupported. That bug cost one launch.
 +    _KVLEN_STATS[0] = d.mean()
 +    _KVLEN_STATS[1] = d.max()
 +    _KVLEN_STATS[2] = d.min()
-+    _KVLEN_STATS[3] = d.numel()
++    _KVLEN_STATS[3] = d.median()
++    _KVLEN_STATS[4] = torch.quantile(d, 0.99)
 +
 +
  @functools.lru_cache(maxsize=1)
  def _cu_count() -> int:
      """Compute-unit count of the active GPU, queried once via aiter.
-@@ -716,6 +761,9 @@ def _sparse_attn_v4_paged_decode_triton(
+@@ -716,6 +770,9 @@ def _sparse_attn_v4_paged_decode_triton(
      T, H, D = q.shape
      out = torch.empty_like(q)
  
@@ -72,7 +81,7 @@ index 391fe9c2a6..6ae7a5b4fd 100644
          block_h = triton.next_power_of_2(min(H, 64))
      else:
 diff --git a/python/sglang/srt/managers/scheduler_components/metrics_reporter.py b/python/sglang/srt/managers/scheduler_components/metrics_reporter.py
-index 10e9426c28..5617ea36c4 100644
+index 10e9426c28..c054fd3cab 100644
 --- a/python/sglang/srt/managers/scheduler_components/metrics_reporter.py
 +++ b/python/sglang/srt/managers/scheduler_components/metrics_reporter.py
 @@ -3,8 +3,11 @@ from __future__ import annotations
@@ -87,7 +96,7 @@ index 10e9426c28..5617ea36c4 100644
  from collections import defaultdict, deque
  from dataclasses import dataclass
  from typing import TYPE_CHECKING, List, Optional, Tuple, Union
-@@ -926,6 +929,23 @@ class SchedulerMetricsReporter:
+@@ -926,6 +929,26 @@ class SchedulerMetricsReporter:
              self.spec_num_block_accept_tokens = 0
              self.spec_num_cap_tokens = 0
              msg += f"accept len: {spec_accept_length:.2f}, accept rate: {spec_accept_rate:.2f}, "
@@ -104,10 +113,13 @@ index 10e9426c28..5617ea36c4 100644
 +
 +            buf = kvlen_stats_buffer()
 +            if buf is not None:
-+                mean, mx, mn, ntok = buf.tolist()
-+                msg += (f"kvlen mean/max/min: {mean:.0f}/{mx:.0f}/{mn:.0f}, "
-+                        f"kvlen straggler: {(1 - mean / mx) if mx else 0:.3f}, "
-+                        f"kvlen T: {ntok:.0f}, ")
++                mean, mx, mn, p50, p99 = buf.tolist()
++                # `straggler` is the fraction of the kernel's wall that a
++                # perfect straggler-aware split could remove: cost follows the
++                # longest sequence, so (max - mean) / max is the headroom.
++                msg += (f"kvlen mean/p50/p99/max/min: "
++                        f"{mean:.0f}/{p50:.0f}/{p99:.0f}/{mx:.0f}/{mn:.0f}, "
++                        f"kvlen straggler: {(1 - mean / mx) if mx else 0:.3f}, ")
              if spec_cap_length > 0:
                  msg += f"cap len: {spec_cap_length:.2f}, "
              if spec_block_accept_length > 0:

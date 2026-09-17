@@ -42,6 +42,36 @@ Two things gate the design, in this order:
    `paged_decode.py`, under the constraint that kv_len is unknowable at capture
    time.
 
+**The kv_len probe is now capture-safe and validated locally.**
+`agentx_c128_kvlenprobe.sh` + `mla_kvlen_stats.patch`. Two fixes to the bug that
+killed launch #4: allocate the buffer only when
+`torch.cuda.is_current_stream_capturing()` is false (sglang's warmup forwards
+run eager, so it lands there), and never write a host scalar into the device
+buffer. **Verified before use, not on the node**: a local `torch.cuda.CUDAGraph`
+capture + replay around the real kernel succeeds and returns correct stats, and
+the overhead is noise (345.6 vs 347.5 µs). It logs
+`kvlen mean/p50/p99/max/min` and `kvlen straggler = (max−mean)/max` per decode
+line.
+
+**Why `(max−mean)/max` decides the next step.** The kernel's cost follows the
+batch's longest sequence, so that ratio *is* the headroom a straggler-aware
+kernel can win. It also discriminates two worlds: the 2.9x spread we know about
+(per-rank implied kv_len 244-708) is **between** ranks, and nobody has measured
+the spread **within** a batch. Within-batch dispersion ⇒ the straggler fix
+works. Ranks internally uniform but at different levels ⇒ it does nothing, and
+the only route left is making MLA faster outright.
+
+Priced beforehand so the probe has something to falsify
+(`mla_counterfactual.py`, same trace): equalising MLA across ranks to what the
+**cheapest rank already achieves** takes the step wall **74.02 → 62.48 ms
+(−11.54, −15.6 %)**; to the mean, −6.48; MLA free, −19.54. Dispersion removal
+alone is 59 % of the total MLA opportunity and needs no work moved between
+ranks — which is why it survives the `total_tokens` falsification.
+
+**Read the probe against tok/req, never against the clock.** tok/req reaches
+~140k by minute 15 and 147-172k by 25-40 (steady state 165-170k), so discard
+early samples. `DURATION=1800`.
+
 **Still untouched: C**, the 3.85 ms of unfused copy kernels. No GPU needed.
 
 ---

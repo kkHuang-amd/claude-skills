@@ -1662,3 +1662,91 @@ kernel, from which **only trace-derived per-step numbers are quotable**: DSPARK
 is on (accept len 3.65, accept rate 0.44 of 7 draft tokens) and OSL is
 EOS-driven, so garbage logits move both and no ITL/TTFT/throughput figure from
 that arm means anything.
+
+---
+
+## MI355X 2026-09-17 — the MLA decode kernel is straggler-bound, not work-bound. `total_tokens` is the wrong knob for it
+
+Standalone microbenchmark of `_paged_decode_fused_kernel` on an idle MI355X,
+`analysis/mla_microbench.py`. Shapes from the DSv4-Pro config, not guessed:
+H=128, D=512, q bf16, KV fp8 + 1x64 fp32 scales (544 B/tok), `block_h=64` so the
+grid is `(T, 2)`. **`T = bs x 7` is confirmed, not assumed:** split-K needs
+`T <= 96`, and bs 9/10 → T 63/70 use split while bs 14 → T 98 uses fused,
+exactly matching the trace.
+
+### 1. The in-situ durations are the kernel's own work — no absorbed stall
+
+Inverting the sweep for the kv_len that reproduces each rank's µs/call:
+
+| rank | bs | in-situ µs | implied kv_len | standalone at that kv_len |
+|---:|---:|---:|---:|---:|
+| 1 | 14 | 330.7 | 708 | 343.0 |
+| 6 | 16 | 266.1 | 551 | 274.2 |
+| 0 | 18 | 166.3 | 321 | 178.8 |
+| 0 | 20 | 231.7 | 244 | 242.0 |
+
+**Every implied kv_len is below the `index_topk = 1024` cap.** Had the duration
+contained a stall, the inversion would have demanded an impossible kv_len. It
+did not, on any rank. So the rank spread is a **kv_len spread**, the kernel's
+time is its own work, and the previous commit's counterfactual is not circular.
+*(Credit: this was argued from first principles before it was measured — MI355X
+is single-stream, and `attn+gemm+quant+norm_rope+sample` contains no sync, so
+there is nothing for a kernel duration to absorb. The `prepare_wait.py`
+self-correlation flaw noted in the previous commit is still a real flaw in that
+tool, but its conclusion happened to be right.)*
+
+### 2. Cost follows the LONGEST sequence, not the total — and that re-prices direction A
+
+Ragged per-token kv_len, T=98, mean held near 500:
+
+| shape | mean | max | total kKV | µs |
+|---|---:|---:|---:|---:|
+| uniform 500 | 500 | 500 | 49.0 | **244.4** |
+| half 250 / half 750 | 500 | 750 | 49.0 | 322.1 |
+| one long: 493 + 1x1000 | 498 | 1000 | 48.8 | **418.3** |
+| one long: 250 + 1x1000 | 258 | 1000 | **25.2** | 402.8 |
+
+**Halving the batch's total KV moves the time by 4 %; doubling the longest
+sequence at constant total moves it by 71 %.** One straggler CTA holds the whole
+grid. Consequence: `--load-balance-method total_tokens` equalises a quantity
+this kernel is nearly insensitive to. The longest conversation still lands on
+somebody, and that rank still pays. **Direction A should be expected to do
+little for MLA**; whatever it wins will come from elsewhere.
+
+### 3. Time is flat in `bs` within a wave, then steps ~78 %
+
+At kv_len=1024: bs 14/16/17/18 (196→252 CTAs, 0.77→0.98 wave) all cost 469-480
+µs, then bs 19 (266 CTAs, 1.04 waves) costs **851 µs**. A 5 % batch increase
+costs 78 %. Marginal batch is free up to the wave boundary and catastrophic
+across it.
+
+### 4. Achieved utilisation: 1.2-3.1 % of both rooflines
+
+Across the whole sweep the kernel reaches **1.3-3.1 % of 8 TB/s** and
+**1.2-2.8 % of ~2.5 PFLOP/s**. Independently corroborated in situ by
+`umc_activity` 19.5 % and flat clocks (2372-2393 MHz, `throttle_status` 0).
+**This kernel is nowhere near any hardware wall.** The 4.06x gap to B200 is a
+design gap, not a silicon gap, so it is available.
+
+### 5. The fix is straggler-aware split-K, and uniform split-K is not it
+
+Same knob, opposite sign depending on raggedness — which is precisely what a
+capture-time-only heuristic cannot see:
+
+| shape | splits=1 | 2 | 4 |
+|---|---:|---:|---:|
+| one long: 493 + 1x1000 | 419.3 | 365.8 | **355.3** |
+| uniform 500 | **247.5** | 279.3 | 317.4 |
+
+`_kv_splits_heuristic` is **correctly tuned for uniform shapes** (splits=1 wins
+at every production point, by 10-86 %) and **wrong for ragged ones**, and it
+cannot tell them apart by construction: it reads only capture-time scalars
+`(T, H, block_h)`, never kv_len. Uniform split-K recovers only ~40 % of the
+straggler gap (419 → 355 against a 247 floor) because it also splits the short
+CTAs. The design that closes the rest is per-sequence split or a persistent-CTA
+work queue.
+
+**Ruled out here, with evidence:** retuning `_kv_splits_heuristic`'s
+`target_wg_per_cu` / `max_kv_splits` for the production point (splits=1 already
+wins there), clock/power skew (flat), and HBM bandwidth (19.5 % umc, <3.1 % of
+peak).

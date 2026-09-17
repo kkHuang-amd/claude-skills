@@ -3,7 +3,46 @@
 Counterpart to `agentx/b200/CONTINUE_HERE.md`. The two nodes share nothing but
 this git repo; see `agentx/exchange/README.md`.
 
-## CONTINUE HERE (2026-09-17 07:4x UTC+8) — MLA is the whole imbalance; step 0 done
+## CONTINUE HERE (2026-09-17 08:0x UTC+8) — MLA is straggler-bound; A is the wrong knob for it
+
+**Status:** microbenchmark done on an idle GPU 0, `analysis/mla_microbench.py`.
+Full block in `exchange/FINDINGS.md` (last section). Four results:
+
+1. **No absorbed stall.** Inverting the sweep gives implied kv_len 244-708 for
+   the four in-situ points, all **below** the `index_topk = 1024` cap. The rank
+   spread is a kv_len spread and the counterfactual is not circular.
+2. **Cost follows the longest sequence, not the total.** At fixed mean kv_len,
+   raising the max 500→1000 costs **+71 %**; halving the batch's *total* KV
+   costs **−4 %**. One straggler CTA holds the grid. **So `total_tokens`
+   balancing equalises something this kernel barely feels — expect direction A
+   to do little for MLA.**
+3. **Flat in bs within a wave, then a step.** kv_len=1024: bs 14-18 all
+   469-480 µs, bs 19 **851 µs**. Marginal batch is free, then catastrophic.
+4. **1.2-3.1 % of both rooflines**, corroborated in situ by `umc_activity`
+   19.5 %. The 4.06x gap to B200 is a design gap, not a silicon gap.
+
+**The fix, and the shape of it:** straggler-aware split-K. Uniform split-K wins
+on ragged shapes (419 → 355 µs) and loses on uniform ones (247 → 317), and
+`_kv_splits_heuristic` cannot tell them apart — by construction it reads only
+`(T, H, block_h)` at capture time, never kv_len. It is correctly tuned for
+uniform and wrong for ragged. Per-sequence split or a persistent-CTA work queue
+closes the rest of the 419→247 gap.
+
+**Next:** design that, in
+`sglang-MegaMoE/python/sglang/kernels/ops/attention/dsv4/unified_kv_kernels/paged_decode.py`.
+The CUDA-graph constraint is the hard part: kv_len is not knowable at capture
+time, so the split factor cannot depend on it — a persistent-CTA work queue
+sidesteps that, since the grid is then capture-time constant and the *work
+assignment* is what varies.
+
+**Repro (GPU 0, ~7 s):**
+```bash
+HIP_VISIBLE_DEVICES=0 python3 /workspace/claude-skills/agentx/analysis/mla_microbench.py --quick
+```
+
+---
+
+## Earlier (2026-09-17 07:4x UTC+8) — MLA is the whole imbalance; step 0 done
 
 **Status:** offline critical-path counterfactual finished, no GPU used. The
 component table below **double-counts**: the MLA row (+7.47) and the cross-rank

@@ -3,6 +3,73 @@
 Counterpart to `agentx/b200/CONTINUE_HERE.md`. The two nodes share nothing but
 this git repo; see `agentx/exchange/README.md`.
 
+## CONTINUE HERE (2026-09-17 21:3x UTC+8) — TWO ARMS ARE RUNNING UNATTENDED. Read the summary file first, do not relaunch
+
+**A detached chain is driving the node with no operator attached.**
+
+```bash
+cat /shared_nfs/kk/chain_summary.md     # results land here as each arm finishes
+tail -20 /shared_nfs/kk/chain.log       # chain progress / gates
+ps -eo pid,args | rg 'run_chai[n]'      # is it still alive?
+```
+
+`run_chain.sh` (PID 1301865 at launch, started 13:30 UTC) runs, in order:
+
+1. `agentx_c128_hcasplit_rep2.sh` → `/workspace/results/megamoe-eplb-c128-hcasplit4-rep2`
+2. `agentx_c256_hcasplit.sh` → `/workspace/results/megamoe-eplb-c256-hcasplit4-totalreq`
+
+Both are MegaMoE+EPLB, HCA split-K=4, **`total_requests`**, DURATION 3600.
+Expect the chain to finish roughly 3.5 h after 13:30 UTC.
+
+**What each one is for:**
+
+- **The c128 arm is a REPLICATE** of `megamoe-eplb-c128-hcasplit4`, which
+  already measured −7.50 ms. Same config, new result dir. Its value is the
+  **run-to-run spread on this exact config** — we have only ever quoted a 5.67 %
+  replicate spread for throughput, never one for matched-bs step time. Compare
+  the two split4 runs against each other, not just against the reference.
+- **The c256 arm is the CLEAN one.** The earlier c256 result (−5.37 ms) moved
+  two variables against its reference (balancer *and* split-K). This one keeps
+  `total_requests`, so split-K is the only difference and the number is
+  attributable.
+
+**When it finishes,** read `chain_summary.md` (it already contains
+`decode_stats.py` output per arm), then do the matched-bs weighted comparison
+against `megamoe-eplb-c128-b200aligned` / `megamoe-eplb-c256-b200aligned` the
+same way as the table below.
+
+### Three traps the chain script encodes — keep them if you rewrite it
+
+1. **The agentx launcher never exits.** It leaves the server running after the
+   benchmark ends, so completion is detected from the **log marker**
+   (`Validated aiperf request error rate`), not from process exit.
+2. **`pgrep '^sglang::'` misses the parent.** `python3 -m sglang.launch_server`
+   gets reparented to init and respawns tokenizer workers, holding the port for
+   hours. Kill it FIRST — and match it as `launch_serve[r]` so the pattern does
+   not match your own command line, which self-killed a shell today.
+3. **VRAM sits on a multi-GB plateau for 20-35 min** after the processes die.
+   Gate on the 0.28 GB baseline confirmed twice a minute apart; launching on the
+   plateau OOMs at cuda-graph capture.
+
+### Still open when the chain finishes
+
+- **GSM8K is NOT done.** `gsm8k_ab.sh` failed: hand-rolling the server from
+  `sglang_command.txt` is not enough, because MegaMoE is turned on by launcher
+  **env**, not by `--moe-a2a-backend megamoe` alone. The missing set includes
+  `SGLANG_AMD_USE_FLYDSL_MEGA_MOE=1`, `SGLANG_AMD_FLYDSL_MEGA_QUANT=a8w4`,
+  `SGLANG_USE_AITER=1`, `SGLANG_MOE_PADDING=1`; without them the MoE falls into
+  the Triton path and dies on
+  `fused_moe_triton_kernels.py:863 assert triton.cdiv(...) == B_scale.shape[-2]`.
+  Copy the env block out of a launch log. Use `--max-new-tokens 8192` (DSv4
+  reasoning CoT truncates at 2048 and scores 0) and do **not** set
+  `SGLANG_SIMULATE_ACC_LEN`, which fakes MTP acceptance.
+- **The kernel trace** still has no usable capture; see the trace section below.
+- **PR [#39968](https://github.com/sgl-project/sglang/pull/39968)** is filled in
+  but is a **draft**, and every `pr-gate` check fails on the step literally named
+  `Block draft PR`. Marking it ready for review is what unblocks CI.
+
+---
+
 ## EVERY ARM RUN ON 2026-09-17, ONE TABLE
 
 All at mem-fraction 0.85, chunk/rank 8192, MegaMoE+EPLB EP8, DP8, MTP, tp8.

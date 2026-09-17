@@ -20,6 +20,16 @@ MORI_SHMEM_HEAP_SIZE=17179869184        # 16 GiB, NOT the launcher's current 40G
 PYTHONPATH=/workspace/InferenceX:/sgl-workspace/sglang-MegaMoE/python:/sgl-workspace/mori:
 ```
 
+**Provenance of the 16 GiB, since no wrapper script sets it:** the launch log is
+a `set -x` trace, and line 453 is `+ export MORI_SHMEM_HEAP_SIZE=17179869184`
+immediately after `SGLANG_AMD_FLYDSL_MEGA_QUANT=a8w4` — the *launcher's own*
+line, at the exact position where the working copy now reads `40G`. The
+committed launcher has no such export at all, so that whole MegaMoE block has
+always been uncommitted, and **the line was edited in place from 16 GiB to 40G
+after the reference arm ran**. `git diff` shows the block as a pure addition and
+therefore hides the edit; only the execution trace reveals it. Setting 16G is
+restoring the reference configuration, not deviating from it.
+
 **Why 40G cannot work here, arithmetically** — the heap is charged *outside*
 `mem-fraction-static`:
 

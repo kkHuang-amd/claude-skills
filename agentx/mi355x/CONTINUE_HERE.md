@@ -3,7 +3,62 @@
 Counterpart to `agentx/b200/CONTINUE_HERE.md`. The two nodes share nothing but
 this git repo; see `agentx/exchange/README.md`.
 
-## CONTINUE HERE (2026-09-17 14:3x UTC+8) — the fake-kernel arm PASSED. The MLA line is confirmed end to end; next is the tail microbench
+## CONTINUE HERE (2026-09-17 15:1x UTC+8) — the layer-aware split-K arm is RUNNING
+
+**Node state:** `agentx_c128_hcasplit.sh` launched 15:11 UTC+8, shell PID
+1203690, launch log `/shared_nfs/kk/hcasplit4_c128.log`, results
+`/workspace/results/megamoe-eplb-c128-hcasplit4/`. `DURATION=3600`, so it ends
+about 16:25. Env echo confirms `SGLANG_MLA_HCA_KV_SPLITS=4` and
+`SGLANG_MLA_FAKE_KVLEN=0`.
+
+**The change:** `_kv_splits_for_stream(compress_ratio)` in `paged_decode.py`,
+threaded through `runtime.decode(kv_splits=...)` from the one call site that
+knows the stream (`deepseek_v4_backend_hip_radix.py`). HCA (ratio 128) gets
+splits=4; SWA and CSA keep the occupancy heuristic. Env-tunable, 0 restores the
+old behaviour, so the A/B needs no code edit.
+
+Pre-flight passed (`analysis/layer_split_validate.py`, GPU0, ~8 s,
+`/shared_nfs/kk/layer_split_validate.log`): stream gating `[None, None, 4]`,
+the override reaching the kernel (heuristic would have picked 1), **numerics
+against the fused path relL2 2.46e-03**, and CUDAGraph capture + replay on the
+split path — which is a different code path (partial buffers + reduce kernel)
+from the fused one production has been capturing.
+
+**Prediction, written before the run:** HCA is ~80 % of MLA time, rank 1's MLA
+is 20.17 ms/step, splits=4 takes ~50 % off the HCA part ⇒ **bs=14 should go
+123.83 → ~116 ms (−8 ms)**, about 44 % of the fake-kernel arm's −18.19 ms
+ceiling. **Under −2 ms means the synthetic microbench does not transfer to the
+real per-layer shapes** — then investigate why, do not tune the split count.
+
+Unlike the fake-kernel arm the output is CORRECT here, so throughput, TTFT and
+cache hit are all readable; still lead with matched-bs step time for
+comparability.
+
+### Also fixed in this session (rides along with this arm)
+
+`metrics_reporter.py`'s `kvlen straggler` now reports per-layer
+`(max−mean)/max` averaged over layers, instead of dividing a layer-averaged
+mean by the across-layer max. That was recorded debt #1. Inert while
+`SGLANG_MLA_KVLEN_STATS=0`.
+
+### Cleanup trap that cost a launch gate today — `pgrep '^sglang::'` IS NOT ENOUGH
+
+After the fake-kernel arm, VRAM returned to the 0.28 GB baseline and
+`pgrep '^sglang::'` returned zero, yet port 8889 was still held. The parent
+**`python3 -m sglang.launch_server`** had been orphaned to init and was
+respawning tokenizer workers for two hours; its command line does not start
+with `sglang::`, so every check in the existing checklist missed it. Kill the
+parent FIRST:
+
+```bash
+pgrep -af 'sglang.launch_server'     # list before killing
+kill -9 <launch_server pid>; sleep 5
+for p in $(pgrep '^sglang::'); do kill -9 "$p"; done
+```
+
+---
+
+## Previous block (2026-09-17 14:3x UTC+8) — the fake-kernel arm PASSED. The MLA line is confirmed end to end; next is the tail microbench
 
 **Node state:** arm complete, server killed, VRAM draining from a 32 GB/GPU
 plateau at the time of writing. Wait for the 0.28 GB cliff before any GPU work.

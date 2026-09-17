@@ -3,13 +3,64 @@
 Counterpart to `agentx/b200/CONTINUE_HERE.md`. The two nodes share nothing but
 this git repo; see `agentx/exchange/README.md`.
 
-## CONTINUE HERE (2026-09-17 15:1x UTC+8) — the layer-aware split-K arm is RUNNING
+## CONTINUE HERE (2026-09-17 16:3x UTC+8) — layer-aware split-K WORKS: −7.67 ms/step for a ~20-line change. Ship it, then trace it
 
-**Node state:** `agentx_c128_hcasplit.sh` launched 15:11 UTC+8, shell PID
+**Node state:** arm complete, server and the orphaned launcher both killed,
+zero `sglang::`, ports clear, VRAM draining from 32 GB/GPU.
+
+### THE RESULT — predicted −8 ms, measured −7.67 ms
+
+`megamoe-eplb-c128-hcasplit4` vs `megamoe-eplb-c128-b200aligned`, log-implied
+step p50 at matched `bs`. The fake-kernel column is the ceiling (MLA ~deleted):
+
+| bs | ref ms | split4 ms | Δ | ceiling Δ | captured |
+|---|---|---|---|---|---|
+| 10 | 116.45 | 111.55 | −4.90 | −13.72 | 36 % |
+| 12 | 119.90 | 112.96 | −6.94 | −15.15 | 46 % |
+| 14 | 123.83 | 117.27 | −6.56 | −18.19 | 36 % |
+| 16 | 130.40 | 116.82 | −13.58 | −20.03 | 68 % |
+| 18 | 134.65 | 121.83 | −12.82 | −22.87 | 56 % |
+
+**n-weighted mean over bs 8-20: −7.67 ms/step** against a pre-registered −8.00,
+with the falsification threshold at −2. The synthetic microbench transfers.
+
+Aggregate: implied step p50 121.76 → 114.12 ms, ITL p50 32.28 → 30.24 ms,
+`accept len` 3.78 → 3.77, cuda-graph replay 100 % both, 46/46 flags identical,
+`0/10,488` errors. Output is CORRECT here (unlike the fake arm), and gen
+tput/rank moved 389.36 → 393.73 tok/s — **inside the 5.67 % replicate spread,
+so do not quote it**; the step-time result is the claim.
+
+Per-cell Δ is noisy (bs=19 only −2.20 with n=41, bs=16 −13.58 with n=173),
+which is why the weighted mean is the headline and single cells are not.
+
+### NEXT — in this order
+
+1. **Trace it, and settle the MegaMoE `prepare` question at the same time.**
+   Short traced capture of THIS config (recipe in
+   `analysis/MI355X_CAPTURE_PROMPT.md`), then `prepare_wait.py` against the
+   reference trace. Two questions, one capture: how much of the −7.67 ms came
+   from MLA per-call time versus from the `prepare` wait collapsing, and
+   whether `prepare` is still r ≈ −0.94 anti-correlated once the straggler is
+   smaller. If it is, the imbalance has a second source and that is the next
+   line of work.
+2. **Then decide 4 vs 8 on real shapes.** The microbench said 4 is the robust
+   pick and it was right about the magnitude, but the arm never tested 8 in
+   situ. One arm with `SGLANG_MLA_HCA_KV_SPLITS=8` answers it, and the
+   partial-buffer cost (205 MB vs 103 MB at bs=14) is the thing to watch.
+3. **Upstream it.** The change is ~20 lines across three files and is
+   env-gated; it is the first shippable win of this line.
+
+### The change, for the record
+
+`_kv_splits_for_stream(compress_ratio)` in `paged_decode.py` → threaded through
+`runtime.decode(kv_splits=...)` → set at the one call site that knows the
+stream (`deepseek_v4_backend_hip_radix.py`). HCA (ratio 128) gets splits=4;
+SWA and CSA keep the occupancy heuristic. `SGLANG_MLA_HCA_KV_SPLITS=0` restores
+the old behaviour with no code edit.
+
+**Node state during the run (kept for reuse):** launched 15:11 UTC+8, PID
 1203690, launch log `/shared_nfs/kk/hcasplit4_c128.log`, results
-`/workspace/results/megamoe-eplb-c128-hcasplit4/`. `DURATION=3600`, so it ends
-about 16:25. Env echo confirms `SGLANG_MLA_HCA_KV_SPLITS=4` and
-`SGLANG_MLA_FAKE_KVLEN=0`.
+`/workspace/results/megamoe-eplb-c128-hcasplit4/`, `DURATION=3600`.
 
 **The change:** `_kv_splits_for_stream(compress_ratio)` in `paged_decode.py`,
 threaded through `runtime.decode(kv_splits=...)` from the one call site that

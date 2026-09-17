@@ -1,5 +1,5 @@
 diff --git a/python/sglang/kernels/ops/attention/dsv4/unified_kv_kernels/paged_decode.py b/python/sglang/kernels/ops/attention/dsv4/unified_kv_kernels/paged_decode.py
-index 391fe9c2a6..4051ff67b9 100644
+index 391fe9c2a6..95758717b8 100644
 --- a/python/sglang/kernels/ops/attention/dsv4/unified_kv_kernels/paged_decode.py
 +++ b/python/sglang/kernels/ops/attention/dsv4/unified_kv_kernels/paged_decode.py
 @@ -52,6 +52,7 @@ the captured launch sequence.
@@ -10,7 +10,7 @@ index 391fe9c2a6..4051ff67b9 100644
  
  import torch
  import triton
-@@ -89,6 +90,59 @@ _FP8_GROUP_SIZE = 64
+@@ -89,6 +90,72 @@ _FP8_GROUP_SIZE = 64
  _FP8_DTYPE = torch.float8_e4m3fnuz if is_fp8_fnuz() else torch.float8_e4m3fn
  
  
@@ -34,7 +34,11 @@ index 391fe9c2a6..4051ff67b9 100644
 +# defaults to the layer count, so the modulo lands on one layer per forward.
 +_KVLEN_STATS = None
 +_KVLEN_STATS_ON = os.environ.get("SGLANG_MLA_KVLEN_STATS", "0") == "1"
-+_KVLEN_EMIT_EVERY = int(os.environ.get("SGLANG_MLA_KVLEN_EVERY", "61"))
++# Default 1: record EVERY layer. This probe does not measure time -- the ~14 %
++# per-call cost of the reductions is irrelevant to it, and per-layer coverage
++# is not. Set it to the layer count if you ever need the probe on a timing arm.
++_KVLEN_EMIT_EVERY = int(os.environ.get("SGLANG_MLA_KVLEN_EVERY", "1"))
++_KVLEN_SLOTS = 80
 +_KVLEN_CALL_CT = 0
 +
 +
@@ -55,22 +59,31 @@ index 391fe9c2a6..4051ff67b9 100644
 +        # region would tie the buffer to that graph's private pool.
 +        if torch.cuda.is_current_stream_capturing():
 +            return
-+        _KVLEN_STATS = torch.zeros(5, dtype=torch.float32, device=kv_indptr.device)
++        _KVLEN_STATS = torch.zeros(_KVLEN_SLOTS, 5, dtype=torch.float32,
++                                   device=kv_indptr.device)
++    # One slot per layer. DSv4 decode runs three ragged index streams
++    # (SWA / CSA / HCA, sliding_window=128), so if layers differ in which stream
++    # they read, sampling a single layer biases the very ratio this probe
++    # exists to measure -- and capture freezes WHICH layer, so it never rotates.
++    # _KVLEN_SLOTS > layers-per-forward, so the layers of one captured graph get
++    # distinct slots. The index is a Python int resolved at capture time, so it
++    # is a static offset, not a host-to-device write.
++    slot = (_KVLEN_CALL_CT - 1) % _KVLEN_SLOTS
 +    d = (kv_indptr[1:] - kv_indptr[:-1]).to(torch.float32)
 +    # Every write below is device->device. Writing a HOST scalar here (an
 +    # earlier version stored `d.numel()`) is a pageable H2D copy, which aborts
 +    # capture with hipErrorStreamCaptureUnsupported. That bug cost one launch.
-+    _KVLEN_STATS[0] = d.mean()
-+    _KVLEN_STATS[1] = d.max()
-+    _KVLEN_STATS[2] = d.min()
-+    _KVLEN_STATS[3] = d.median()
-+    _KVLEN_STATS[4] = torch.quantile(d, 0.99)
++    _KVLEN_STATS[slot, 0] = d.mean()
++    _KVLEN_STATS[slot, 1] = d.max()
++    _KVLEN_STATS[slot, 2] = d.min()
++    _KVLEN_STATS[slot, 3] = d.median()
++    _KVLEN_STATS[slot, 4] = torch.quantile(d, 0.99)
 +
 +
  @functools.lru_cache(maxsize=1)
  def _cu_count() -> int:
      """Compute-unit count of the active GPU, queried once via aiter.
-@@ -716,6 +770,9 @@ def _sparse_attn_v4_paged_decode_triton(
+@@ -716,6 +783,9 @@ def _sparse_attn_v4_paged_decode_triton(
      T, H, D = q.shape
      out = torch.empty_like(q)
  
@@ -81,7 +94,7 @@ index 391fe9c2a6..4051ff67b9 100644
          block_h = triton.next_power_of_2(min(H, 64))
      else:
 diff --git a/python/sglang/srt/managers/scheduler_components/metrics_reporter.py b/python/sglang/srt/managers/scheduler_components/metrics_reporter.py
-index 10e9426c28..c054fd3cab 100644
+index 10e9426c28..f0fbf5cbb1 100644
 --- a/python/sglang/srt/managers/scheduler_components/metrics_reporter.py
 +++ b/python/sglang/srt/managers/scheduler_components/metrics_reporter.py
 @@ -3,8 +3,11 @@ from __future__ import annotations
@@ -96,7 +109,7 @@ index 10e9426c28..c054fd3cab 100644
  from collections import defaultdict, deque
  from dataclasses import dataclass
  from typing import TYPE_CHECKING, List, Optional, Tuple, Union
-@@ -926,6 +929,26 @@ class SchedulerMetricsReporter:
+@@ -926,6 +929,41 @@ class SchedulerMetricsReporter:
              self.spec_num_block_accept_tokens = 0
              self.spec_num_cap_tokens = 0
              msg += f"accept len: {spec_accept_length:.2f}, accept rate: {spec_accept_rate:.2f}, "
@@ -113,7 +126,22 @@ index 10e9426c28..c054fd3cab 100644
 +
 +            buf = kvlen_stats_buffer()
 +            if buf is not None:
-+                mean, mx, mn, p50, p99 = buf.tolist()
++                # One row per layer; rows never written are all-zero. Aggregate
++                # over the live rows, and report how much the per-layer max
++                # itself varies -- if the three index streams differ by layer,
++                # that spread is where it shows up.
++                live = buf[buf[:, 1] > 0]
++                if live.numel() == 0:
++                    live = buf[:1]
++                mean = live[:, 0].mean().item()
++                mx = live[:, 1].max().item()
++                mn = live[:, 2].min().item()
++                p50 = live[:, 3].mean().item()
++                p99 = live[:, 4].mean().item()
++                lmax_lo = live[:, 1].min().item()
++                lmax_hi = live[:, 1].max().item()
++                msg += (f"kvlen layers: {live.shape[0]}, "
++                        f"kvlen layer-max range: {lmax_lo:.0f}-{lmax_hi:.0f}, ")
 +                # `straggler` is the fraction of the kernel's wall that a
 +                # perfect straggler-aware split could remove: cost follows the
 +                # longest sequence, so (max - mean) / max is the headroom.

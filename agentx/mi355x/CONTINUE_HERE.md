@@ -13,13 +13,15 @@ tail -20 /shared_nfs/kk/chain.log       # chain progress / gates
 ps -eo pid,args | rg 'run_chai[n]'      # is it still alive?
 ```
 
-`run_chain.sh` (PID 1301865 at launch, started 13:30 UTC) runs, in order:
+`run_chain.sh` (PID 1311610, started 13:37 UTC) runs, in order:
 
-1. `agentx_c128_hcasplit_rep2.sh` → `/workspace/results/megamoe-eplb-c128-hcasplit4-rep2`
-2. `agentx_c256_hcasplit.sh` → `/workspace/results/megamoe-eplb-c256-hcasplit4-totalreq`
+1. `agentx_c128_hcasplit_rep2.sh` → `megamoe-eplb-c128-hcasplit4-rep2` (total_requests)
+2. `agentx_c256_hcasplit.sh` → `megamoe-eplb-c256-hcasplit4-totalreq` (total_requests)
+3. `agentx_c128_hcasplit_tt.sh` → `megamoe-eplb-c128-hcasplit4-totaltokens` (total_tokens)
 
-Both are MegaMoE+EPLB, HCA split-K=4, **`total_requests`**, DURATION 3600.
-Expect the chain to finish roughly 3.5 h after 13:30 UTC.
+All three are MegaMoE+EPLB with HCA split-K=4, DURATION 3600. Expect ~5 h from
+13:37 UTC. An earlier two-arm chain was aborted 7 min in to add arm 3; its
+partial summary is `chain_summary_aborted.md` and can be deleted.
 
 **What each one is for:**
 
@@ -31,7 +33,12 @@ Expect the chain to finish roughly 3.5 h after 13:30 UTC.
 - **The c256 arm is the CLEAN one.** The earlier c256 result (−5.37 ms) moved
   two variables against its reference (balancer *and* split-K). This one keeps
   `total_requests`, so split-K is the only difference and the number is
-  attributable.
+  attributable. Paired with the earlier run it also isolates the balancer *in
+  the presence of split-K* — the interaction test.
+- **Arm 3 fills the last cell of the c128 2x2.** Before today's chain that grid
+  was: no-split/total_requests 121.76 (reference), no-split/total_tokens 122.32
+  (+0.78, null), split4/total_requests 114.12 (−7.50), and
+  split4/total_tokens never run. Arm 3 is that missing cell.
 
 **When it finishes,** read `chain_summary.md` (it already contains
 `decode_stats.py` output per arm), then do the matched-bs weighted comparison

@@ -38,9 +38,9 @@ from sglang.kernels.ops.attention.dsv4.unified_kv_kernels.paged_decode import ( 
 MU, SIGMA, CAP = 1000.0, 0.486, 5000
 
 
-def real_lens(T, seed=0, cap=CAP):
+def real_lens(T, seed=0, cap=CAP, median=MU):
     g = torch.Generator().manual_seed(seed)
-    x = torch.exp(torch.log(torch.tensor(MU))
+    x = torch.exp(torch.log(torch.tensor(median))
                   + SIGMA * torch.randn(T, generator=g))
     return x.clamp(64, cap).to(torch.int64).tolist()
 
@@ -57,13 +57,19 @@ def main():
     # CSA layers (compress_ratio 4) are clamped to index_topk+128 = 1152;
     # HCA layers (compress_ratio 128) have no clamp and reach ~5,000.
     ap.add_argument("--cap", type=int, default=CAP)
+    # HCA kv_len ~ context/128, so it GROWS through the run: a few hundred
+    # early, ~1,300 at the 165-170k tok/req steady state. A captured graph is
+    # reused across all of it, so a static per-layer split must win on the
+    # whole range, not just at steady state.
+    ap.add_argument("--median", type=float, default=MU)
+    ap.add_argument("--splits", type=int, nargs="+", default=[1, 2, 4, 8])
     a = ap.parse_args()
     dev = "cuda"
     print(f"device: {torch.cuda.get_device_name(0)}  H={H} D={D} CUs={NUM_CU}")
 
     for bs in a.bs:
         T = bs * 7
-        lens = real_lens(T, a.seed, a.cap)
+        lens = real_lens(T, a.seed, a.cap, a.median)
         mean = sum(lens) // len(lens)
         flat = [mean] * T
         disp = 1 - mean / max(lens)
@@ -78,7 +84,7 @@ def main():
         print(f"flat at the mean, same total    {us_f:8.1f} us   "
               f"win {us_r - us_f:6.1f} us ({100 * (us_r - us_f) / us_r:4.1f} %)"
               "  <- ceiling of a perfect straggler fix")
-        for sp in (1, 2, 4, 8):
+        for sp in a.splits:
             us = bench_ragged(T, lens, dev, splits=sp)
             print(f"  ragged split-K={sp:<2d}              {us:8.1f} us   "
                   f"{100 * (us - us_r) / us_r:+5.1f} % vs heuristic")

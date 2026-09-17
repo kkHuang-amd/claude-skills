@@ -84,6 +84,38 @@ regimes, so 1884 µs/call is far above the in-situ 330.7 µs/call at bs=14 (and
 the probe's own stats are layer-averaged). The dispersion here, 0.77, is also
 above the 0.61 measured in production.
 
+### THE kv_len x splits SWEEP IS DONE — pick 4, not 8
+
+`/shared_nfs/kk/hca_split_sweep.log`, bs=14, HCA shape (cap 5,000), median
+swept over the run's range (HCA kv_len ~ context/128: a few hundred early,
+~1,300 at the 165-170k tok/req steady state). % is vs the heuristic's splits=1:
+
+| median | p50 | dispersion | split 2 | split 4 | split 8 | split 16 |
+|---|---|---|---|---|---|---|
+| 200 | 211 | 0.78 | −30.0 | **−41.8** | −35.8 | −21.8 |
+| 500 | 529 | 0.78 | −35.7 | −51.4 | **−51.9** | −45.1 |
+| 1300 | 1377 | 0.70 | −34.8 | −50.1 | **−54.0** | −49.7 |
+| 3000 | 3179 | 0.36 | −13.5 | −23.8 | **−27.0** | −22.4 |
+
+Three things the sweep settles:
+
+1. **Split-K never loses anywhere on the HCA shape** — the worst cell is still
+   −21.8 %. The concern that a static choice must survive the low-kv_len early
+   run does not bite. The losing case is the CSA shape (+5.1 %), which
+   `compress_ratio` gates out.
+2. **16 is always worse than 8.** The sweep's earlier upper bound was not a
+   ceiling artefact; the optimum is interior.
+3. **Take 4.** It wins outright at the low end (−41.8 vs −35.8) and gives ~93 %
+   of 8's benefit at the steady-state operating point (−50.1 vs −54.0), for
+   **half the partial-buffer memory**: `acc_partial` is
+   `T x splits x h_padded x D x 4 B` = 103 MB at splits=4 against 205 MB at
+   splits=8 for bs=14, and splits=1 allocates none at all (fused path). That
+   memory is the real reason the heuristic is conservative, and it is charged
+   inside the graph pool at `mem_fraction_static` 0.85.
+
+Even at dispersion 0.36 split-K wins 27 %, so the lever is not narrowly tuned
+to the high-dispersion assumption.
+
 ### NEXT ACTION — make `_kv_splits_heuristic` layer-aware, then re-measure
 
 Cheapest first, in this order:
@@ -93,14 +125,47 @@ Cheapest first, in this order:
    (`deepseek_v4_backend_hip_radix.py:333` is where CSA gets clamped to
    `index_topk`) and thread it, or the resulting kv_len cap, into
    `_kv_splits_heuristic` in `paged_decode.py`.
-2. **Pick splits from the cap, not from `T`/`H` alone:** unclamped (HCA) ⇒ bias
-   to 4-8; clamped (CSA) ⇒ leave at the current choice, which the table above
-   shows is already right.
+2. **Pick splits from the cap, not from `T`/`H` alone:** unclamped (HCA) ⇒ 4
+   (see the sweep above); clamped (CSA) ⇒ leave at the current choice, which
+   the table above shows is already right.
 3. **Arm it exactly like the fake-kernel arm** — same launcher template, same
    gates, same matched-`bs` read. Budget the expectation against the fake-kernel
    arm's −18.19 ms at bs=14: that is MLA reduced ~95 %, so a split-K fix on half
    the layers should be scored as a fraction of it, not against zero.
 4. Only if that disappoints: per-sequence split or a persistent-CTA work queue.
+
+### OPEN QUESTION — does the MegaMoE `prepare` wait shrink too? The arm does NOT answer it
+
+Asked of `megamoe_prepare_compact_m32_dcu32_pcu1_pc384_qcu28qcap256_fov_runtime_dyn_tss12488_v13`.
+The fake-kernel arm produced **server-log step times only, no trace**, so this
+is not measured and must not be asserted.
+
+What IS established, from `analysis/prepare_wait.py` on the reference trace:
+`prepare` is **r = −0.942 ANTI-correlated** with the rank's own compute, spread
+102.9-325.0 µs across 61 calls/step — i.e. it is a **wait**, not work. Rank 1 at
+bs=14 has the slowest MLA (330.7 µs) and the shortest prepare (102.9); rank 3 at
+bs=9 has the fastest MLA (117.5) and the longest prepare (325.0). The straggler
+does not wait; everyone else waits for it.
+
+Two consequences, and the second is the trap:
+
+1. **Expect the spread to collapse, not merely shrink.** The clamp removes MLA
+   on every rank, so MLA stops contributing to the cross-rank difference that
+   `prepare` absorbs. Whether `prepare` then goes to ~0 or simply re-forms
+   around the next-largest rank-varying kernel is exactly what is unmeasured —
+   and "a new straggler appears" is the same failure mode the arm was built to
+   test at step level.
+2. **Do not add it to the 18.19 ms.** `prepare` is a wait that already sits
+   inside the step wall. Rank 1's MLA is 330.7 µs x 61 = **20.17 ms/step**, and
+   the measured step drop is 18.19 ms — i.e. the drop is already ~90 % of
+   "delete the straggler rank's entire MLA". Counting a prepare reduction on
+   top would double-count the same time.
+
+**Cheap way to settle it:** a short fake-kernel arm with tracing on (recipe in
+`analysis/MI355X_CAPTURE_PROMPT.md`), then `prepare_wait.py` on the new trace
+against the reference. It also re-tests the anti-correlation, which is the real
+claim: if `prepare` stays large and stays anti-correlated after MLA is gone,
+the imbalance has a second source that no MLA work can fix.
 
 ### Housekeeping before the next timing arm
 

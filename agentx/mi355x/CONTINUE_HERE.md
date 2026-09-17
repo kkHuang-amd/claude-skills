@@ -33,16 +33,49 @@ so do not quote it**; the step-time result is the claim.
 Per-cell Δ is noisy (bs=19 only −2.20 with n=41, bs=16 −13.58 with n=173),
 which is why the weighted mean is the headline and single cells are not.
 
+### THE TRACE ATTEMPT — partial, and at the WRONG operating point. Do not quote it
+
+`/shared_nfs/kk/pr35619/trace_hcasplit4`, triggered 17:04 by
+`trace_trigger.sh`. **Two independent problems, both fixable, neither fatal to
+the arm result above.**
+
+1. **Only 4 of 8 ranks flushed** (TP-1..4). At `num_steps=40` a rank died
+   mid-capture and the rest cascaded through NCCL heartbeat / TCPStore reset —
+   the exact risk `MI355X_CAPTURE_PROMPT.md` records for 40 steps, except here
+   it landed before all ranks wrote.
+2. **The window caught bs=5-7, while the reference trace is bs=9-20.** A
+   120 s settle after warmup is not steady state: the profiling phase had only
+   just begun and the batch was still ramping. Nothing at bs=5-7 can be
+   compared against the reference at matched bs, and matched bs is the whole
+   method.
+
+What the partial capture still says, qualitatively:
+
+- **`prepare` is STILL a wait, and if anything more so: r = −0.969** (reference
+  −0.942). Its spread narrowed to 98.3-183.2 µs from the reference's
+  102.9-325.0, which is the direction a smaller straggler predicts — but bs
+  differs, so treat it as a hint, not a measurement.
+- **`ep_combine` is also a wait** (r = −0.959), as before.
+- **`mla_split` = 61 calls/step and `mla_fused` = 0.** Not a bug and not
+  evidence the override leaked to CSA: at bs=5-7 the occupancy heuristic
+  already picks splits=4 on its own (T=35, 70 base CTAs against a 384 target),
+  so every stream takes the split path at that size. It does confirm the split
+  path runs and is captured cleanly under cuda graph.
+
+**Re-capture recipe (the two fixes):** settle to真 steady state — wait for
+tok/req to reach ~150k rather than a fixed 120 s, i.e. 10-15 min into the
+profiling phase — and drop to `num_steps=8-16` so all 8 ranks flush before any
+instability. `trace_trigger.sh` takes `SETTLE` as an env var and `num_steps` as
+`$3`.
+
 ### NEXT — in this order
 
-1. **Trace it, and settle the MegaMoE `prepare` question at the same time.**
-   Short traced capture of THIS config (recipe in
-   `analysis/MI355X_CAPTURE_PROMPT.md`), then `prepare_wait.py` against the
-   reference trace. Two questions, one capture: how much of the −7.67 ms came
-   from MLA per-call time versus from the `prepare` wait collapsing, and
-   whether `prepare` is still r ≈ −0.94 anti-correlated once the straggler is
-   smaller. If it is, the imbalance has a second source and that is the next
-   line of work.
+1. **Re-capture the trace** with the two fixes above, then `prepare_wait.py`
+   against the reference at MATCHED bs. The question is unchanged: how much of
+   the −7.67 ms came from MLA per-call time versus the `prepare` wait
+   collapsing, and whether `prepare` stays anti-correlated once the straggler
+   is smaller. If it does, the imbalance has a second source and that is the
+   next line of work.
 2. **Then decide 4 vs 8 on real shapes.** The microbench said 4 is the robust
    pick and it was right about the magnitude, but the arm never tested 8 in
    situ. One arm with `SGLANG_MLA_HCA_KV_SPLITS=8` answers it, and the

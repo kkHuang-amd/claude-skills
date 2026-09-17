@@ -45,10 +45,11 @@ export DURATION="${DURATION:-3600}"
 export PORT="${PORT:-8888}"
 
 # The launcher's MegaMoE+DP branch defaults mem-fraction-static to 0.65
-# (dsv4_fp4_mi355x_sglang_mtp.sh:216), but the reference arm ran 0.85. Left
-# alone this silently changes the KV pool, and with it cache hit and batch
-# composition -- a confound that would have invalidated the whole arm. Verify
-# with analysis/cmd_diff.py against the reference ~60 s after launch.
+# (dsv4_fp4_mi355x_sglang_mtp.sh:216), but EVERY MegaMoE number we have
+# published was taken at 0.85 -- so the default is off-matrix, not just
+# different from this arm's reference. Left alone it silently changes the KV
+# pool, and with it cache hit and batch composition. Verify with
+# analysis/cmd_diff.py against the reference ~60 s after launch.
 export MEM_FRACTION_STATIC_DP_MEGAMOE="${MEM_FRACTION_STATIC_DP_MEGAMOE:-0.85}"
 
 # The two variables under test.

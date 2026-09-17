@@ -34,7 +34,12 @@ per forward** puts it at noise (344.1 vs 346.2).
 **⚠ New trap, cost an aborted launch: the launcher's MegaMoE+DP branch defaults
 `mem-fraction-static` to 0.65** (`dsv4_fp4_mi355x_sglang_mtp.sh:216`,
 `MEM_FRACTION_STATIC_DP_MEGAMOE`) while the reference arm ran **0.85**. Left
-alone it changes the KV pool, and with it cache hit and batch composition. New
+alone it changes the KV pool, and with it cache hit and batch composition.
+
+**This is not specific to this arm. Every MegaMoE number we have published was
+taken at 0.85**, so the 0.65 default is off-matrix and any MegaMoE arm launched
+without `MEM_FRACTION_STATIC_DP_MEGAMOE=0.85` is not comparable to any of them.
+Export it in every MegaMoE arm script, or change the launcher default. New
 tool **`analysis/cmd_diff.py`** diffs a new arm's `sglang_command.txt` against
 the reference and exits non-zero on any unexpected flag — **run it ~60 s after
 every launch**. With the fix the two commands differ in exactly one flag.

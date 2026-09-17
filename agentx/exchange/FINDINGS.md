@@ -29,6 +29,14 @@ step accounts for the entire log-implied gap. The 41.07 ms splits:
 | quant + misc | +1.7 | |
 | `gemm` | −0.45 | **equal** |
 
+**UPDATE 2, MI355X 2026-09-17 (A/B run, last block in this file):** the
+`total_tokens` arm is in. The skew fell **2.08x → 1.69x** and the decode step
+did **not** move at matched `bs` (0 to +2.4 %). **The imbalance-recovery route
+is falsified**: the −7.35 ms "balanced ranks" row below is withdrawn. TTFT
+improved 13 % and cache hit was unchanged, so the predicted prefix-reuse
+regression did not happen; throughput +5.5 % is inside the 5.67 % replicate
+spread and is a null. Keep the flag, but do not count it against the MLA gap.
+
 **UPDATE, MI355X 2026-09-17 (last block in this file):** the component table
 below double-counts. MLA and the cross-rank idle are **the same slack** — MLA is
 the whole imbalance (remove it and the cross-rank spread falls 13.50 → 1.96 ms),
@@ -1772,3 +1780,65 @@ work queue.
 `target_wg_per_cu` / `max_kv_splits` for the production point (splits=1 already
 wins there), clock/power skew (flat), and HBM bandwidth (19.5 % umc, <3.1 % of
 peak).
+
+---
+
+## MI355X 2026-09-17 — `total_tokens` A/B: the skew fell, the decode step did not move. The imbalance-recovery hypothesis is falsified for this knob
+
+Single-variable A/B, c128, pdi=24. Gated on `cmd_diff.py`: **46 flags, only
+`--load-balance-method` differs**, KV pool identical (`max_total_num_tokens`
+12,077,312 both), environment restored from the reference arm's own launch log.
+Both arms 3,628 s, `errors=0`, gates pass.
+
+### The intervention worked — outcome verified, not just the flag
+
+`kv_skew.py` on the new `server.log`: `#full token` skew **2.08x → 1.69x**
+(`running-req` unchanged at 1.20x). So the balancer did what it was asked.
+
+### The decode step did not respond. At matched `bs`:
+
+| bs | reference step_ms | `total_tokens` step_ms | Δ |
+|---:|---:|---:|---:|
+| 10 | 116.45 | 116.75 | +0.3 % |
+| 12 | 119.90 | 122.26 | +2.0 % |
+| 14 | 123.83 | 126.79 | +2.4 % |
+| 16 | 130.40 | 131.03 | +0.5 % |
+| 18 | 134.65 | 135.29 | +0.5 % |
+
+**Removing 19 % of the KV skew bought zero decode-step time** — if anything it is
+marginally slower. And the new arm carries *more* KV at the same `bs`
+(tok/req 140.8k-232.6k vs 114.3k-218.3k, GPU pool 100 % vs 91 %), so equal step
+time at higher KV is, if anything, a small per-unit gain.
+
+**This falsifies the balancing route and confirms the straggler model.** The
+critical-path counterfactual (earlier today) priced "balanced ranks" at
+−7.35 ms of a 74 ms step; a third of the way to balanced should have shown
+~−2.6 ms and showed none. The microbenchmark's explanation predicts exactly
+this: the kernel's cost follows the batch's **longest** sequence, and
+`total_tokens` equalises the **total**. Two independent methods now agree, and
+the "cross-rank idle is recoverable by load balancing" line is closed.
+
+### End to end it is a null on throughput and a real TTFT win
+
+| | reference | `total_tokens` |
+|---|---:|---:|
+| tok/s/GPU | 36,994.7 | 39,029.1 (+5.5 %) |
+| TTFT p50 | 11.07 s | **9.61 s (−13.2 %)** |
+| ITL p90 | 33.93 ms | 34.27 ms (+1.0 %) |
+| successful | 9,825 / 11,247 | 10,244 / 11,666 |
+| cache hit | 0.956 | 0.957 |
+
+**+5.5 % throughput is INSIDE the documented replicate spread (5.67 %) — report
+it as a null**, per `arm_report.py`'s own gate. The TTFT move is larger and in
+the opposite direction to what was predicted.
+
+**The expected TTFT regression did not happen — TTFT *improved* 13 %, and prefix
+cache hit was unchanged at 0.956/0.957.** The concern that `total_tokens` would
+fight `cache_aware` prefix reuse is not supported: the router is a separate
+process still doing prefix-aware routing, and the DP balancer evidently does not
+disturb it. Whatever the arm wins, it wins in scheduling and admission, not in
+the decode step.
+
+**Recommendation:** keep `total_tokens` — it is one flag, it costs nothing
+measurable, it improves TTFT and it reduces skew — but **do not count it against
+the MLA gap**. It is not an ITL lever on this workload.

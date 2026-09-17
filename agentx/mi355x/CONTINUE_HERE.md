@@ -3,7 +3,50 @@
 Counterpart to `agentx/b200/CONTINUE_HERE.md`. The two nodes share nothing but
 this git repo; see `agentx/exchange/README.md`.
 
-## CONTINUE HERE (2026-09-17 09:3x UTC+8) — reference environment RECOVERED; arm ready, not launched
+## CONTINUE HERE (2026-09-17 11:0x UTC+8) — `total_tokens` A/B done. Balancing is NOT an ITL lever; MLA is the only line left
+
+**Status:** arm complete and clean (3,628 s, `errors=0`, gates pass, 46 flags
+with only `--load-balance-method` differing, KV pool identical at 12,077,312).
+Nothing running. Full block in `exchange/FINDINGS.md`, last section.
+
+**The intervention worked and the step did not care.** `#full token` skew
+**2.08x → 1.69x** (verified with `kv_skew.py` on the new `server.log`, not from
+the flag), and at matched `bs` the decode step moved **0 to +2.4 %** — nothing,
+or marginally slower. The new arm even carries *more* KV at the same `bs`
+(tok/req 140.8-232.6k vs 114.3-218.3k).
+
+**So the balancing route is closed, by two independent methods agreeing.** The
+microbenchmark said the kernel's cost follows the batch's **longest** sequence;
+`total_tokens` equalises the **total**; the A/B confirms removing 19 % of the
+skew buys zero step time. **The −7.35 ms "balanced ranks" row in this morning's
+counterfactual is withdrawn.**
+
+**End to end:** TTFT **11.07 → 9.61 s (−13.2 %)**, ITL p90 flat (+1.0 %),
+throughput +5.5 % which is **inside the 5.67 % replicate spread, so a null**,
+cache hit unchanged (0.956 → 0.957). **The predicted TTFT regression did not
+happen** — `total_tokens` does not disturb the router's `cache_aware` prefix
+reuse. Keep the flag (free, better TTFT, less skew) but **do not count it
+against the MLA gap**.
+
+**Next: MLA is the only remaining line, and it is unambiguous.** The kernel runs
+at **1.2-3.1 % of both rooflines**, its cost is set by one straggler CTA, and
+uniform split-K cannot fix that (it wins on ragged shapes, loses on uniform, and
+the heuristic cannot tell them apart — it reads only capture-time scalars).
+Two things gate the design, in this order:
+1. **Size it.** `(max − mean)/max` of the per-token kv_len in production. Not in
+   any artefact we have. The probe for it (`mla_kvlen_stats.patch`) is written
+   but **not capture-safe** — see below. Cheapest correct route: a short
+   `--disable-cuda-graph` run, where the distribution is identical and Python
+   runs every step, so no device buffer is needed.
+2. **Then design** per-sequence split or a persistent-CTA work queue in
+   `paged_decode.py`, under the constraint that kv_len is unknowable at capture
+   time.
+
+**Still untouched: C**, the 3.85 ms of unfused copy kernels. No GPU needed.
+
+---
+
+## Earlier (2026-09-17 09:3x UTC+8) — reference environment recovered
 
 **Status:** five launches, five failures, all root-caused, **all from launcher
 and environment drift, none from the change under test**. Nothing running, GPUs

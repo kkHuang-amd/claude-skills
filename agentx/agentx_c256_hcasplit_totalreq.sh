@@ -1,4 +1,14 @@
 #!/usr/bin/env bash
+# c256 + LAYER-AWARE SPLIT-K + total_tokens balancing.
+#
+# Same code and same gates as the c128 split-K arm; only CONC and the
+# balancer differ. The launcher derives max-running-requests (512) and
+# prefill-decode-interval (20) from CONC -- verify both in the produced
+# sglang_command.txt, and expect the KV pool to differ from c128
+# (11,906,048 vs 12,077,312), which is normal at this concurrency.
+#
+# ORIGINAL HEADER FOLLOWS -- the prediction in it is the c128 one.
+#
 # LAYER-AWARE SPLIT-K ARM. The first arm in this line that ships a real
 # optimization rather than a counterfactual.
 #
@@ -66,7 +76,7 @@ export PYTHONPATH="/workspace/InferenceX:/sgl-workspace/sglang-MegaMoE/python:/s
 export MODEL="/shared_nfs/deepseek-ai/DeepSeek-V4-Pro-0813"
 export MODEL_PATH="$MODEL"
 export MODEL_PREFIX="dsv4"
-export TP="${TP:-8}" CONC="${CONC:-128}"
+export TP="${TP:-8}" CONC="${CONC:-256}"
 export EP_SIZE="${EP_SIZE:-8}"
 export DP_ATTENTION="${DP_ATTENTION:-true}"
 export ENABLE_MEGAMOE=1
@@ -77,7 +87,7 @@ export KV_OFFLOADING="${KV_OFFLOADING:-dram}"
 export KV_OFFLOAD_BACKEND="${KV_OFFLOAD_BACKEND:-hicache}"
 export KV_OFFLOAD_BACKEND_METADATA="${KV_OFFLOAD_BACKEND_METADATA:-{\"name\":\"hicache\"}}"
 export TOTAL_CPU_DRAM_GB="${TOTAL_CPU_DRAM_GB:-2399}"
-export DURATION="${DURATION:-2700}"   # trace only, but long enough that the steady-state gate is reachable inside the profiling phase
+export DURATION="${DURATION:-3600}"   # matches the reference arm
 export PORT="${PORT:-8888}"
 
 # The launcher's MegaMoE+DP branch defaults mem-fraction-static to 0.65
@@ -103,20 +113,20 @@ export MORI_SHMEM_HEAP_SIZE="${MORI_SHMEM_HEAP_SIZE:-16G}"
 # pool at mem-fraction 0.85). 0 = keep the occupancy heuristic.
 export SGLANG_MLA_HCA_KV_SPLITS="${SGLANG_MLA_HCA_KV_SPLITS:-4}"
 
-# Must be exported BEFORE the server starts -- the profiler reads it at init.
-export SGLANG_TORCH_PROFILER_DIR="${SGLANG_TORCH_PROFILER_DIR:-/shared_nfs/kk/pr35619/trace_hcasplit4}"
-mkdir -p "$SGLANG_TORCH_PROFILER_DIR"
-
 # OFF -- that was the counterfactual arm, and it produces garbage output.
 export SGLANG_MLA_FAKE_KVLEN="${SGLANG_MLA_FAKE_KVLEN:-0}"
 
 # OFF: ~14 % per call, and this is a timing arm.
 export SGLANG_MLA_KVLEN_STATS="${SGLANG_MLA_KVLEN_STATS:-0}"
 
-# Matches the reference arm.
+# total_tokens, as asked. NOTE this makes the arm differ from the c256
+# reference (megamoe-eplb-c256-b200aligned, total_requests) in TWO ways,
+# balancer and split-K, so the two cannot be attributed apart from this
+# run alone. At c128 total_tokens was measured null on step time
+# (0 to +2.4 % at matched bs), so the delta here should be mostly split-K.
 export LOAD_BALANCE_METHOD="${LOAD_BALANCE_METHOD:-total_requests}"
 
-export RESULT_DIR="${RESULT_DIR:-/workspace/results/megamoe-eplb-c128-hcasplit4-trace}"
+export RESULT_DIR="${RESULT_DIR:-/workspace/results/megamoe-eplb-c256-hcasplit4-totalreq}"
 export RESULT_FILENAME="dsv4_fp4_sglang_tp${TP}-pp1-dcp1-pcp1-ep${EP_SIZE}-dpa${DP_ATTENTION}_disagg-false_spec-mtp_agentic_c${CONC}"
 export AGENTIC_OUTPUT_DIR="$RESULT_DIR"
 mkdir -p "$RESULT_DIR"

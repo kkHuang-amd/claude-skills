@@ -35,6 +35,182 @@ inflated the cross-platform ITL gap by ~38 %. Tools there
 
 ## CONTINUE HERE
 
+**Status (2026-09-14): c128 on `dsv4_fp4_mi355x_sglang_mtp.sh` lands
+35,406 tok/s/chip -- the best c128 on this node, +26 % over the `DPA+TBO newmain`
+row below, with no TBO.** Certified, `errors=0`, 9,593 requests / 78 sessions,
+1,470 s warmup + 3,600 s profiling. Row is in `summary_table.py`. The lever is
+`--speculative-algorithm DSPARK` (block-size 6, draft-tokens 7), which this
+launcher uses where the older arms used EAGLE: measured accept length **3.80 vs
+2.48**. Caveats for comparison: `mem-fraction-static 0.92` (older c128 rows are
+0.90), chunk/rank 8192 (they use 16384), ISL mean 106,222 (they are 96.8-99.9 k),
+and `--enforce-shared-experts-fusion` was ON the whole time without hitting the
+OOR wall documented below -- that trap looks mitigated on sglang `ab201bd1ba`
+plus a rebuilt aiter `ffa945f93`, on the `DeepSeek-V4-Pro-0813` checkpoint.
+
+**c256 is the better operating point and MegaMoE wins it:** MegaMoE+EPLB EP8
+reaches **53,991 tok/s/chip** at c256 versus 50,600 for the plain DP arm (+6.7 %),
+while at c128 MegaMoE *loses* by 2.0 %. The sign flips with concurrency -- see
+the next section before quoting either number.
+
+### MegaMoE's sign flips with concurrency -- c128 loses, c256 wins
+
+**2026-09-15, one arm per cell, all on the same launcher and stack.** MegaMoE+EPLB
+at EP8 versus the plain DP arm:
+
+| conc | DPA (no EP), mf 0.92 | MegaMoE+EPLB EP8, mf 0.85 | MegaMoE |
+|---|---:|---:|---:|
+| 128 | 35,406 | 34,713 | **-2.0 %** |
+| 256 | 50,600 | **53,991** | **+6.7 %** |
+| 512 (fixed-length, not AgentX) | 41,526 | **45,663** | **+10 %** |
+
+`errors=0` on all four AgentX arms; 233 and 265 rebalances at c128/c256; no
+fault, and no fusion OOR even at c256 with `--enforce-shared-experts-fusion`.
+The 512 row is the ISL/OSL 8192/1024 benchmark from
+`dsv4/megamoe/PR35619_GSM8K_2026-09-14.md`, included because it extends the same
+trend, not because it is comparable in absolute terms.
+
+**Read the c128 -2 % as the exception, not the trend.** MegaMoE's fused a2a
+carries a fixed cost that a light per-rank batch cannot amortise; by c256 the
+per-rank token batch is large enough that the fused kernel beats DP gatherv, and
+at c256 it wins *every* column: intvty 16.0 vs 14.5, ITL p90 62.5 vs 69.2 ms,
+TTFT p50 5.61 vs 7.47 s (-25 %). An earlier version of this section, written
+when only c128 existed, reported the -2 % as MegaMoE being worse on agentic
+workloads. That was one point on a curve that crosses.
+
+**The `prefill_delayer` mixed-slot guard was measured and reverted.** PR #35619
+added a mixed-slot delay branch to `managers/prefill_delayer.py` guarded by
+`SGLANG_PREFILL_DELAYER_MIXED_SLOT_GUARD`, **defaulting to true with no `is_hip()`
+or MegaMoE gate** -- the PR's only ungated common-path change. Instrumented with a
+counter that logs on the first hit, it fired **zero times** across a healthy c256
+MegaMoE+EPLB run (3,486 requests, `errors=0`, 88 rebalances, guard confirmed
+`mixed_slot_guard=True` and `--enable-prefill-delayer` in argv). Both the source
+and its e2e test case were reverted to upstream main, which never carried the
+logic. If it is ever reintroduced, gate it.
+
+Neither arm is memory-bound at either concurrency: **GPU pool is 78 % at c256 on
+both sides** (97 % at c128), so the historical c256 rows sitting at 100 % do not
+generalise to this stack. MegaMoE also wins c256 while holding a **20 % smaller
+KV pool** (11.9 M vs 14.9 M tokens, the cost of dropping mem-frac to 0.85 for the
+mori heap), with cache hit and ISL mean flat across the pair -- so the pool is not
+what separates them in either direction.
+
+### Intermittent: EPLB rebalance deadlocks and the run looks merely slow
+
+**Seen once, 2026-09-15, c256 MegaMoE+EPLB.** All eight ranks logged
+`[EPLBManager] rebalance start` at the same second, **none** ever logged a
+completion, and the run sat there until killed. It was the run's *first*
+rebalance, 8 minutes into warmup. The same config completed 265 rebalances over
+3600 s earlier the same day, and a straight re-run completed 88 rebalances
+cleanly -- so it is intermittent, not a reproducible regression. Frequency
+unknown; 1 in 3 observed.
+
+**The symptom is easy to misread as "the benchmark is slow."** What it looks
+like from each vantage point:
+
+| where | what you see |
+|---|---|
+| aiperf | `returned` frozen (97/2,845), `in_flight` frozen at 188, `errors=0` |
+| `server.log` | `/metrics ... 200 OK` every second, forever |
+| last batch line | ~50 min stale, `#running-req: 0`, `#queue-req: 23`, `full token usage: 0.02` |
+| `rocm-smi` | every GPU back at the ~298 MB idle baseline |
+| `ps` | `sglang::schedul <defunct>` |
+
+So: **schedulers dead, HTTP frontend alive.** Nothing is logged -- no
+`Memory access fault`, no `Scheduler hit an exception`, no watchdog, no
+`crashed with exit code`. The empty KV pool rules out memory pressure, which is
+what distinguishes this from the fusion OOR trap below.
+
+Diagnostic, cheap, and the fastest way to tell a hang from slow progress:
+
+```bash
+rg -c 'rebalance start' <result_dir>/server.log     # vs any completion line
+rg 'Prefill batch|Decode batch' <result_dir>/server.log | tail -1   # how stale?
+rocm-smi --showmemuse | rg -o 'VRAM%\): [0-9]+' | sort -u           # 0 = dead
+```
+
+If VRAM is at baseline while `/metrics` still answers, stop waiting -- the run
+is dead and aiperf will never time out on its own. Kill by PID
+(`pgrep -f sglang.launch_server`, then the `sglang::` workers) and re-run;
+a wedged run also leaves 8888/8889 bound, which makes the *next* launch die with
+`[Errno 98] Address already in use`.
+
+### Sizing the mori symmetric heap -- compute it, don't guess
+
+The heap is charged **outside** `mem-fraction-static`, and its default 4 GiB
+overflows during decode graph capture. The requirement is a closed form from
+`flydsl_dispatch_combine_intranode_op.py:696-713`, and it depends only on **MTPR
+and hidden size** -- not on concurrency and not on mem-fraction:
+
+```
+mr = world_size * MTPR          # max_total_recv_tokens defaults to 0, which disables the cap (:343)
+comb_inp_tok = max(mr, MTPR*topk) * hidden * 2   # bf16   -> 896 MiB
+disp_out_tok = mr * hidden * 1                   # fp8    -> 448 MiB
+comb_out_tok = MTPR * hidden * 2                 # bf16   -> 112 MiB
+scales+weights+idx                                        ->  19 MiB
+                                          per instance    = 1.44 GiB
+```
+
+At `world_size=8, MTPR=8192, hidden=7168, topk=6`: **1.44 GiB per
+dispatch/combine instance**. 4 GiB holds 2.8 instances, which is why graph
+capture (one instance per captured batch size) fails on the default; 16 GiB
+holds 11 and was confirmed sufficient at c128 EP8 with `mem-fraction 0.85`;
+40 GiB holds 27.8 and just burns 24 GiB of KV pool. Scale linearly if you change
+`SGLANG_AMD_FLYDSL_MEGA_MOE_MTPR`.
+
+### First MegaMoE run after an aiter rebuild spends 15-30 min compiling
+
+`aiter/jit/flydsl_cache` regenerated by `setup.py`'s `run_aot()` does **not**
+contain the MegaMoE variants for a given `MTPR / hidden / topk / EP` combination,
+and the cache key is a sha256 of the kernel sources, so a rebuild invalidates
+everything. The symptom is easy to misread as a hang: the log stops after the
+NCCL init line, VRAM sits at the leftover baseline, yet schedulers are `R` with
+`stime` ~7x `utime` and the GPUs clock up to 2.4 GHz. It is the FlyDSL compiler.
+Wait it out; the next run with the same parameters hits the cache.
+
+### READ THIS BEFORE ANY AgentX RUN: aiter's fp4 prefill kernel cache is too small
+
+`aiter/ops/flydsl/kernels/mqa_logits/pa_mqa_logits_fp4_prefill.py:829` decorates
+`compile_pa_mqa_logits_fp4_prefill` with **`@lru_cache(maxsize=32)`**. Past 32
+distinct compile configurations the LRU evicts, the evicted compiled module is
+collected while the GPU still references it, and the next prefill dies:
+
+```
+Memory access fault by GPU node-N (Agent handle: 0x...) on address 0x... Reason: Unknown.
+```
+
+**AgentX is the workload that triggers it** -- variable-length trajectory replay
+produces far more than 32 distinct shapes. Fixed-length benchmarks (ISL/OSL
+8192/1024) and gsm8k stay under the ceiling and look perfectly healthy, so this
+reproduces *only* on the agentic arms.
+
+The fix is one line, `@lru_cache(maxsize=32)` -> `@cache`, and it is a **local
+patch that upstream does not carry** (still `lru_cache` at aiter `ffa945f93`).
+It lives in `/sgl-workspace/aiter` as an uncommitted edit alongside a
+`torch.cuda.Stream` -> `torch.Stream` compatibility fix in
+`csrc/cpp_itfs/torch_utils.py`. **Do not `git stash` them to update aiter
+without restoring them afterwards** -- that is exactly how this was
+(re)discovered on 2026-09-14, and the import block now conflicts with upstream's
+added `NamedTuple`, so `git stash pop` needs a manual resolution keeping both.
+Both fixes are saved next to this file as `aiter_fp4_prefill_cache_fix.patch`
+(`git apply -3` it into `/sgl-workspace/aiter` after any aiter update); the
+runner for the arm above is `agentx_dp8_c128_dspark.sh`.
+
+Evidence it is this and nothing else (all three at c128, tp8+dp8, no EP):
+
+| tree | aiter local fixes | outcome |
+|---|---|---|
+| sglang `ab201bd1ba` (PR #35619) | stashed | fault at warmup **+70 s**, node-7 |
+| sglang `7f1f8c706a` (mainline, no MegaMoE code) | stashed | fault at warmup **+55 s**, nodes 2/5/9/4 |
+| sglang `ab201bd1ba` (PR #35619) | **restored** | warmup **1,470 s**, profiling **3,600 s**, `errors=0` |
+
+The mainline control is what rules out the MegaMoE integration. Two other things
+it is **not**: the fusion OOR trap below (that one dies at 1,440-1,845 s at 99 %
+VRAM; this one dies at 55-70 s with `full token usage: 0.00`, i.e. an empty KV
+pool) and EP (the fault predates any `--ep-size`). The
+`not found tuned config ... M:8043, N:7168, K:21504` line that precedes the
+fault is a red herring: that shape is untuned in every version of
+`dsv4_a8w8_blockscale_bpreshuffle_tuned_gemm.csv`, upstream included.
+
 **Status (2026-08-30, 09:00 UTC): NEW MAIN IS +7.52 % AT c64 -- suggestive, n=1,
 needs one replicate.** The node was restarted since the notes below: `/tmp` is
 EMPTY (topk_v2 patch, all three launcher backups, `acc_driver.sh`, the gsm8k
@@ -49,11 +225,96 @@ untracked `*.hip` kernels) -- do not revert or stash it without asking.
 `DeepseekV4ForCausalLM` + `is_hip()` branch, which is exactly what the old manual
 `server_args.py:5891` patch did.
 
-| arm | tok/s/GPU | TTFT | ITL p90 | intvty p90 | cache |
+| arm | tok/s/GPU | TTFT | ITL p90 | intvty p90 | cache | GPU pool |
+|---|---|---|---|---|---|---|
+| `c64-chunk16384-newmain` (main `cdbfe90b4a`) | **20,131.6** | 4.90 s | 49.74 ms | 20.10 | 0.955 | 51 % |
+| `c64-chunk16384-newmain-rep` (**replicate**) | **20,753.1** | 4.65 s | 47.02 ms | 21.26 | 0.955 | 39 % |
+| `c64-chunk16384` (old `a1f9508dd4`) | 18,724.0 | 5.32 s | 54.51 ms | 18.35 | 0.954 | 42 % |
+| **c64 delta** (newmain vs old) | **+7.52 %** | -7.82 % | -8.75 % | +9.57 % | flat | |
+| `c128-chunk16384-newmain` | **28,043.6** | 8.40 s | 79.42 ms | 12.59 | 0.943 | **80 %** |
+| `c128-chunk16384` (old) | 25,968.4 | 10.63 s | 85.22 ms | 11.73 | 0.943 | 70 % |
+| **c128 delta** | **+7.99 %** | **-20.93 %** | -6.81 % | +7.30 % | flat | |
+
+`GPU pool` above is **max-of-max, not a level** -- treat it as decorative and see
+the CLOSED section below before drawing anything from it.
+
+**Replicated 2026-08-30 evening: the c64 gain holds.** The replicate landed at
+20,753.1 vs 20,131.6, **+3.09 % = INSIDE the 5.67 % spread = null**, which is what
+a reproducible number looks like. **c128 independently shows +7.99 %** with gates
+passing, ISL matched to 1.15 % and cache hit flat at 0.943 both sides. Two
+concurrencies, four runs, one consistent ~+7.5-8 % effect -- much stronger than the
+single n=1 arm this section originally carried.
+
+**c128 does NOT hit OOR on this image** (peak VRAM 98 %, full 3600 s, `errors=0`),
+contrary to a report from another node where c128 OORs even without fusion. The
+difference to chase there is the water line, not fusion.
+
+### CLOSED 2026-08-30: the "+10 pts GPU pool" was a measurement artefact
+
+This section used to read "OPEN: new main carries ~10 pts more GPU KV pool at the
+same load ... the most plausible reason the same config OORs on another node."
+**It is withdrawn.** Occupancy did not increase; the column does not mean what it
+looks like it means. No GPU time was spent -- everything below is re-derived from
+the raw exports already on disk.
+
+`GPU pool` (`kv.gpu_usage_pct`, `summary_table.py:55`) is **not an occupancy
+level**. `InferenceX/utils/agentic/aggregation/backends/sglang.py:78-84` reads
+`sglang:token_usage` with `preferred_keys=("max",...)`, `combine="max"`, and the
+raw export (`<arm>/aiperf_artifacts/server_metrics_export.json`) holds **one
+series per DP rank, each ~3,645 one-second timeslices**. The number printed is
+therefore the single largest sample out of 8 x 3,645 ~ 29,000: the unluckiest
+second of the unluckiest rank in a 3600 s run. Not instantaneous, not an average,
+and not comparable across arms.
+
+Re-derived from those exports (profiling phase; warmup is stored separately in
+`warmup_metrics`):
+
+| arm | mean occupancy | cross-rank instantaneous max, p50 | p90 | p99 | max (= `GPU pool`) |
 |---|---|---|---|---|---|
-| `c64-chunk16384-newmain` (main `cdbfe90b4a`) | **20,131.6** | 4.90 s | 49.74 ms | 20.10 | 0.955 |
-| `c64-chunk16384` (old `a1f9508dd4`) | 18,724.0 | 5.32 s | 54.51 ms | 18.35 | 0.954 |
-| delta | **+7.52 %** | -7.82 % | -8.75 % | +9.57 % | flat |
+| `c64-chunk16384` (old) | 0.1408 | 0.30 | 0.37 | 0.42 | **0.42** |
+| `c64-chunk16384-newmain` | 0.1403 | 0.28 | 0.41 | 0.49 | **0.51** |
+| `c64-chunk16384-newmain-rep` | 0.1390 | 0.27 | 0.31 | 0.35 | **0.39** |
+| `c128-chunk16384` (old) | 0.3147 | 0.53 | 0.60 | 0.67 | **0.70** |
+| `c128-chunk16384-newmain` | 0.3130 | 0.53 | 0.64 | 0.74 | **0.80** |
+
+**Mean occupancy is flat to 0.4-1.3 % and p50 is identical** (c64 0.145 / 0.141 /
+0.141; c128 0.328 / 0.328). The two new-main c64 arms read 0.51 and **0.39**,
+straddling the old HEAD's 0.42 -- a noise draw, not a version effect. Timeslice
+counts match (3642 / 3647 / 3642), so it is not sample-count bias either (a
+max-of-max does grow with sample count; check that before comparing).
+
+**The pool itself is identical across versions.** `server.log` `Memory pool end.
+avail mem` matches per rank on both HEADs (c64 41.80 / 41.81 / 41.86 / 41.93 GB;
+c128 41.52-41.58 GB), and `max_total_num_tokens` is 7,011,328/rank at c64 and
+6,980,608/rank at c128 on both. There is no allocation difference for a 10-pt gap
+to come out of. The wobble's mechanism is **DP rank load imbalance**: inside a
+single arm the per-rank mean occupancy spreads 2.4-4.1x (`c64-newmain`: 0.054 to
+0.252), so max-of-max just samples whichever rank got unlucky.
+
+**What survives, at c128 only: the tail is genuinely fatter** (n=1 each side).
+Mean and p50 flat, but time above 0.6 goes 8.5 % -> 17.1 %, and time above 0.7
+goes 0.00 % -> 4.20 % (~153 s, from literally never). That is a burstier batch
+shape, consistent with the +8 % throughput -- not a bigger resident working set.
+Replicate before quoting it.
+
+**Consequences.** "Only 20 pts of margin at c128" is withdrawn: c128 new main
+averages 31 % and the pool never fills. **The KV pool is not a credible cause of
+the other node's c128 OOR**, and it is unrelated to the fusion 99 % VRAM wall,
+which happens at token usage ~0.09 -- i.e. entirely outside the pool. Chase the
+VRAM water line there, not this column.
+
+**Do not read `GPU pool` as a level.** Use mean occupancy, the p99 of the
+cross-rank instantaneous max, or the fraction of seconds above 0.7 (the real
+"how close to the wall" number). Every historical arm can be recomputed from its
+`server_metrics_export.json` with no re-run.
+
+**Trap when comparing any other column across these two batches:**
+`gpu_total_tokens` reads 56,090,624 in the old arms (8 ranks summed) but
+7,011,328 in the new ones (single rank), while the raw series are 8 x 7,011,328
+in **both** -- so the two batches were post-processed by **different versions of
+the InferenceX aggregation code**. The `token_usage` path is unaffected
+(recomputing it with the current logic reproduces all five published values
+exactly), but other fields are not automatically apples-to-apples.
 
 Both certified, ISL matched to 1.36 %, duration 3628 s both sides, **cache hit
 flat** so the delta is not a prefix-cache artefact. +7.52 % is above the 5.67 %
@@ -63,7 +324,86 @@ non-result: **all four secondary metrics move the same way**, and ITL p90's
 **Attribution is "new main as a whole"** (spec v2 default + upstream topk_v2 +
 everything between the two commits), never spec v2 alone.
 
-### TRAP: `EP_SIZE=1`, not 8 -- EP8 OOMs and the launcher default lies
+### The real trap: on new main, any MoE-path change dies of HSA OOR mid-warmup
+
+**Corrected 2026-08-30 11:05.** This was first written as an EP8 trap. It is not:
+`--enforce-shared-experts-fusion` at `EP_SIZE=1` dies the same way, so the
+variable is *touching the MoE path*, not EP.
+
+| run | MoE path | avail after weights | free after startup | outcome |
+|---|---|---|---|---|
+| `c64-chunk16384-newmain` | plain | 143.22 GB | 41.53 GB | **ran 3600 s** |
+| c64 ep8 (`VOID-c64-ep8-oom-20260830`) | EP8 | -- | 41.53 GB | OOR, 388 MB free |
+| `c64-...-newmain-fusion` | fused shared expert | **146.60 GB** | **42.05 GB** | OOR, 478 MB free |
+| fusion probes @ mf 0.85 / 0.80 | fused shared expert | -- | +14.4 / +28.8 GB | OOR anyway, see below |
+
+**Why "fusion saves memory" and "fusion runs out of memory" are both true.**
+Fusion is not just a weight-format change: `deepseek_v2.py:607,609` widen the
+routing, `num_experts 384 -> 385` and **`top_k 6 -> 7`** (DSV4-Pro
+`num_experts_per_tok=6`, `n_shared_experts=1`). The shared expert stops being a
+side path and becomes a seventh routed expert, so per-token MoE work and
+activations grow **+16.7 %**. Meanwhile the static saving never reaches the
+runtime: `--mem-fraction-static 0.90` fills VRAM to 90 %, so the 3.38 GB freed
+from weights was immediately converted into a **bigger KV pool** (+218,880
+tokens) and free-after-startup moved only 41.53 -> 42.05 GB. **Static win, spent
+by the pool; dynamic demand, up.** Lowering `MEM_FRACTION_STATIC` is therefore
+the on-mechanism knob (an earlier note here said otherwise -- that was written
+before the routing width was checked).
+
+**MEASURED 2026-08-30, and the answer closes this line of work: the growth
+expands to fill whatever you leave free, so `MEM_FRACTION_STATIC` is not a fix.**
+Ladder of 300 s fusion probes (`probe_memfrac.sh`, VRAM sampled every 10 s):
+
+| mem-fraction | warmup steady | **peak** | survived | free at abort |
+|---|---|---|---|---|
+| 0.90 | 91 % | **99 %** | ~1440 s | 388 / 616 MB |
+| 0.85 | 88 % | **99 %** | 1500 s | 594 MB |
+| 0.80 | 89 % | **99 %** | 1845 s | 282 MB |
+
+Every arm ends at the same 99 % ceiling; 14.4 GB of extra headroom buys ~5 min,
+nothing more. A 3600 s arm needs "does not hit the wall", not "hits it later",
+so **do not spend the ~4.5 h on a fusion A/B at a reduced fraction** -- it will
+die mid-run. Prediction stated before the 0.80 run (crash ~1980 s if growth is
+unbounded) came in at 1845 s.
+
+`expandable_segments` is **not available**: `parallel_state.py:383` warns
+"expandable_segments not supported on this platform" (torch 2.9.1+rocm7.2,
+MI355X). Note the weak check that missed this -- `_set_allocator_settings(...)`
+accepts the string without implementing it, so verify in the server log, not in
+a Python one-liner.
+
+**The allocator is hoarding, but that is not the cause.** Pausing in place and
+calling `torch.cuda.empty_cache()` at 95 % VRAM (`empty_cache_probe.sh`, via
+`/pause_generation {"mode":"in_place"}` then
+`/continue_generation {"torch_empty_cache":true}`) freed **10.3-17.3 GB per
+rank** (reserved 255 -> 244 GB) -- and the run **crashed 42 s later anyway** at
+752 MB free. Torch re-consumed all of it. Worth knowing the endpoint exists; it
+is a diagnostic, not a mitigation.
+
+**Still not localised:** whether the failing allocation is inside torch or a raw
+HSA one (the abort text mentions threads/events, and torch normally frees its
+cache and retries before erroring -- but torch was near the device ceiling on its
+own, so it cannot be ruled out). Answering that needs per-rank
+`memory_allocated` vs `memory_reserved` over time, which means instrumenting the
+server. That, plus the 99 % ceiling, is what an upstream report should carry.
+
+**Both failures start with MORE headroom than the run that passes** -- fusion even
+*saves* ~3.4 GB of weight memory by folding the shared expert in -- and both eat
+~42 GB of runtime headroom during warmup, at `full token usage` ~0.09. This is
+runtime growth on the MoE path, not a static budget you can fix with
+`MEM_FRACTION_STATIC` alone. (An earlier note here linked this to new main
+"carrying ~9 pts more GPU pool at c64". That link is dead -- see "CLOSED
+2026-08-30: the '+10 pts GPU pool' was a measurement artefact": KV occupancy is
+flat between the two HEADs, and the pool sits at ~0.09 while VRAM is at 99 %.)
+
+Two different death shapes, both ending in an indefinite hang:
+- **EP8**: `scheduler_0` aborts, parent notices, SIGQUITs every rank; HTTP layer
+  survives, `/health` still 200.
+- **fusion**: ONE rank (DP1) aborts and the **parent never notices** -- no
+  `crashed with exit code` line. The surviving 7 ranks spin at **100 % GPU** in the
+  collective while aiperf sits at `errors=0`. A busy GPU is not a working one.
+
+### TRAP: `EP_SIZE=1`, not 8 -- the launcher default lies
 
 Every arm on file runs `ep_size=1`. `agentx_b200align.sh` defaults `EP_SIZE` to
 **8**, so the reproduce line's explicit `EP_SIZE=1` is load-bearing, not
@@ -80,8 +420,9 @@ capacity problem and conc is not the variable -- the startup budget was
 | `c256-chunk16384-2x` (ep1) | 64 | 36.67 GB | ran 2 h |
 | c64 ep8 | 16 | 41.53 GB | dead in 11 min |
 
-EP8 eats 41 GB of headroom at runtime while KV usage sits at 0.09. If you ever
-want the EP8 number, that unbounded growth is the thing to fix first.
+EP8 eats 41 GB of headroom at runtime while KV usage sits at 0.09 -- the same
+runtime growth the fusion arm hit, see the section above. `EP_SIZE=1` is still
+mandatory for comparability with every arm on file, independent of the crash.
 
 ### TRAP: a dead server keeps answering 200, and aiperf waits forever
 
@@ -1776,6 +2117,8 @@ is an outcome of concurrency, not a controlled variable
 | `c256-chunk16384-2x` | 256 | **30,745.5** | valid; **+13.15 % vs 8192, clears the >=10 % bar**; TTFT p50 21.5 s | 2x rerun |
 | `c128-chunk16384-topkv2` | 128 | 26,943.3 | valid; topk_v2 **+3.75 % = not resolvable** (all metrics under their noise floors) | topk_v2 test |
 | **`c64-chunk16384-newmain`** | 64 | **20,131.6** | sglang main `cdbfe90b4a`: **+7.52 %** vs 18,724.0, all secondaries same-sign, n=1 | "CONTINUE HERE" |
+| `c64-chunk16384-newmain-rep` | 64 | **20,753.1** | replicate: +3.09 % = null -> the c64 gain reproduces | "CONTINUE HERE" |
+| **`c128-chunk16384-newmain`** | 128 | **28,043.6** | **+7.99 %** vs 25,968.4; TTFT -20.9 %; no OOR, peak VRAM 98 % | "CONTINUE HERE" |
 | b200align **replicate** | 64 | **17,435.8** | same config, nothing changed: **-5.67 %** | same |
 | + topk_v2 (#36684) | 64 | 18,014.7 | -2.5 % vs run 1, +3.3 % vs replicate — unresolved | same |
 | + delayer slot guard | 64 | 18,037.6 | +0.13 % — inside noise; slots never tight | same |

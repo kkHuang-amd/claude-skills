@@ -76,7 +76,21 @@ def stats(d):
         succ=j['num_requests_successful'],
         total=j['num_requests_total'],
         errdrop=j['request_accounting']['records_error_dropped'],
-        cache=(j.get('server_metrics', {}).get('cache') or {}).get('gpu_cache_hit_rate'),
+        # OVERALL, not gpu_cache_hit_rate. Once the device KV pool saturates,
+        # hits demote to the CPU/hicache tier: the device-tier number craters
+        # while true cache effectiveness is unchanged. Measured on
+        # hicache-fp4-c256 -- gpu 0.937 -> 0.766 and cpu 0.014 -> 0.185 between
+        # c192 and c256, with overall FLAT at 0.951 vs 0.951. Reporting the
+        # device tier here printed "cache 0.765" and read as a cache collapse
+        # that did not happen. summary_table.py already had this right.
+        cache=((j.get('server_metrics', {}).get('cache') or {}).get('overall_cache_hit_rate')
+               or (j.get('server_metrics', {}).get('cache') or {}).get('gpu_cache_hit_rate')),
+        # Kept separately so a tier shift is visible rather than hidden in the
+        # overall figure. None whenever no CPU tier exists (hicache off).
+        cache_gpu=(j.get('server_metrics', {}).get('cache') or {}).get('gpu_cache_hit_rate'),
+        cache_cpu=(j.get('server_metrics', {}).get('cache') or {}).get('cpu_cache_hit_rate'),
+        kv_gpu=(j.get('server_metrics', {}).get('kv_cache') or {}).get('gpu_usage_pct'),
+        kv_cpu=(j.get('server_metrics', {}).get('kv_cache') or {}).get('cpu_usage_pct'),
         conc=j.get('conc'),
         errors=e, last=last, cov=cov)
 
@@ -95,6 +109,12 @@ def show(s):
           (s['tps'], s['succ'], s['total'], s['cache'] or -1))
     print('   ISL %9.0f  OSL %7.1f  TTFT %6.2fs  ITLp90 %5.2fms  intvtyp90 %5.2f' %
           (s['isl'], s['osl'], s['ttft'], s['itl90'], s['intv90']))
+    # Only when a CPU tier exists. A device tier far below overall means hits are
+    # demoting, and a CPU pool at ~100 % means HICACHE_RATIO is the constraint.
+    if s.get('cache_cpu') is not None:
+        print('   tiers: GPU hit %.3f  CPU hit %.3f   pools: GPU %.0f%% CPU %.1f%%%s' % (
+            s['cache_gpu'], s['cache_cpu'], (s['kv_gpu'] or 0) * 100, (s['kv_cpu'] or 0) * 100,
+            '  <!> CPU TIER FULL -- raise HICACHE_RATIO' if (s['kv_cpu'] or 0) > 0.98 else ''))
 
 def cmp(a, b):
     print('== DELTA %s vs %s' % (a['name'], b['name']))

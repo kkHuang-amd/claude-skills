@@ -60,6 +60,29 @@ ROWS = [
     # (-13.2 %) with cache hit unchanged; +5.5 % throughput is INSIDE the 5.67 %
     # replicate spread and is a null. See exchange/FINDINGS.md.
     ("MegaMoE+EPLB EP8 aligned, total_tokens", "/workspace/results/megamoe-eplb-c128-b200aligned-totaltokens", 8192),
+    # 2026-09-17 layer-aware HCA split-K=4 arms. All are the c128/c256
+    # b200aligned config with split-K as the only intended difference, so they
+    # pair with the two aligned rows above/below. The claim for these arms is the
+    # matched-bs step delta (-7.50 / -7.42 / -4.29 / -6.11 ms), NOT anything in
+    # this table: every throughput move here is inside the 5.67 % spread.
+    ("MegaMoE+EPLB split-K=4", "/workspace/results/megamoe-eplb-c128-hcasplit4", 8192),
+    ("MegaMoE+EPLB split-K=4 replicate", "/workspace/results/megamoe-eplb-c128-hcasplit4-rep2", 8192),
+    ("MegaMoE+EPLB split-K=4, total_tokens", "/workspace/results/megamoe-eplb-c128-hcasplit4-totaltokens", 8192),
+    ("MegaMoE+EPLB split-K=4", "/workspace/results/megamoe-eplb-c256-hcasplit4-totalreq", 8192),
+    ("MegaMoE+EPLB split-K=4, total_tokens", "/workspace/results/megamoe-eplb-c256-hcasplit4-totaltokens", 8192),
+    # 2026-09-18 MLA decode arms, both falsified, both kept for the record.
+    # bk16: SGLANG_MLA_FP8_BLOCK_K=16. No-op in production -- the Triton decode
+    # path runs bf16 (no kv_scales), where block_k was already 16; the 32 only
+    # ever applied to the quantised path, which production sends to aiter's asm
+    # reader. segplan: the #39172 length-aware split port. Correct (gsm8k 0.939
+    # vs 0.937) and free, but production's kv_len straggler ratio is 0.373
+    # against the 0.759 the microbench assumed, so there is no imbalance left
+    # for it to remove.
+    ("MegaMoE+EPLB split-K=4, block_k=16", "/workspace/results/megamoe-eplb-c128-hcasplit4-bk16", 8192),
+    ("MegaMoE+EPLB segment plan", "/workspace/results/megamoe-eplb-c128-segplan", 8192),
+    # INVALID except as the MLA ceiling: clamps kv_len to 128, so the model emits
+    # garbage and every column but the step time is meaningless.
+    ("MegaMoE+EPLB fake-kvlen [INVALID]", "/workspace/results/megamoe-eplb-c128-fakekvlen", 8192),
     # 2026-09-16: the c128 aligned row re-measured on the same rebuilt stack as the
     # c256 "rebuilt" row above.
     ("MegaMoE+EPLB EP8 aligned, rebuilt", "/workspace/results/megamoe-eplb-c128-20260916", 8192),

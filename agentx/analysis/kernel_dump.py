@@ -181,5 +181,10 @@ if __name__ == "__main__":
     main(d)
     if len(sys.argv) > 2 and sys.argv[2] == "nodump":
         sys.exit(0)
+    # bs 10 is the B200-comparison cell, but no capture is guaranteed to hold
+    # it -- the split-K steady trace has rank 7 at bs 11-12 only. Pass the bs.
+    want = 10
+    if len(sys.argv) > 2 and sys.argv[2].isdigit():
+        want = int(sys.argv[2])
     f7 = next(Path(d).glob("*TP-7-*.gz"))
-    kernel_dump(f7, 10)
+    kernel_dump(f7, want)

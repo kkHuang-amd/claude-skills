@@ -1,0 +1,358 @@
+diff --git a/python/sglang/srt/eplb/eplb_manager.py b/python/sglang/srt/eplb/eplb_manager.py
+index 8cae3b1947..b8c2a3b484 100644
+--- a/python/sglang/srt/eplb/eplb_manager.py
++++ b/python/sglang/srt/eplb/eplb_manager.py
+@@ -21,7 +21,12 @@ from sglang.srt.eplb.expert_location import (
+     get_global_expert_location_metadata,
+ )
+ from sglang.srt.eplb.expert_location_updater import ExpertLocationUpdater
+-from sglang.srt.runtime_context import get_exec, get_model, get_parallel
++from sglang.srt.runtime_context import (
++    get_exec,
++    get_model,
++    get_parallel,
++    get_server_args,
++)
+ 
+ if TYPE_CHECKING:
+     from sglang.srt.configs.model_config import ModelConfig
+@@ -45,6 +50,7 @@ class EPLBManager:
+         # constructed (model load, expert_backup_client, weight_updater), so
+         # they are read through getters at rebalance time, not captured here.
+         self._model_config = model_config
++        self._server_args = get_server_args()
+         self._ps = ps
+         self._get_model = get_model
+         self._get_expert_location_updater = get_expert_location_updater
+diff --git a/python/sglang/srt/eplb/expert_distribution.py b/python/sglang/srt/eplb/expert_distribution.py
+index 03f5fbac58..0580ca2c4c 100644
+--- a/python/sglang/srt/eplb/expert_distribution.py
++++ b/python/sglang/srt/eplb/expert_distribution.py
+@@ -49,6 +49,7 @@ from sglang.srt.runtime_context import get_device as get_device_namespace
+ from sglang.srt.runtime_context import (
+     get_exec,
+     get_schedule,
++    get_server_args,
+     logs_expert_balancedness_to_server_log,
+     reports_expert_balancedness,
+ )
+@@ -202,6 +203,7 @@ class _ExpertDistributionRecorderReal(ExpertDistributionRecorder):
+         self._current_forward_pass_id = Withable()
+         self._current_layer_idx = Withable()
+         self._current_debug_name = Withable()
++        self._server_args = get_server_args()
+         self._accumulator = _Accumulator.init_new(expert_location_metadata, rank)
+         self._single_pass_gatherers = {
+             k: _SinglePassGatherer.init_new(expert_location_metadata, rank)
+diff --git a/python/sglang/srt/layers/moe/mega_moe_flydsl.py b/python/sglang/srt/layers/moe/mega_moe_flydsl.py
+index a69afbc79f..b70d9a7363 100644
+--- a/python/sglang/srt/layers/moe/mega_moe_flydsl.py
++++ b/python/sglang/srt/layers/moe/mega_moe_flydsl.py
+@@ -53,75 +53,6 @@ def _mtpr() -> int:
+     return mtpr
+ 
+ 
+-def _sync_tokens(
+-    forward_batch: ForwardBatch | None,
+-    *,
+-    local_tokens: int,
+-    mtpr: int,
+-) -> int:
+-    if not envs.SGLANG_AITER_MEGA_RANK_SYNC.get():
+-        return local_tokens
+-
+-    if forward_batch is not None and (
+-        forward_batch.forward_mode.is_idle()
+-        or (
+-            (original_mode := getattr(forward_batch, "_original_forward_mode", None))
+-            is not None
+-            and original_mode.is_idle()
+-        )
+-    ):
+-        return local_tokens
+-
+-    if forward_batch is not None and forward_batch.is_extend_in_batch:
+-        sync_tokens = mtpr
+-    else:
+-        sync_tokens = (
+-            forward_batch.mega_moe_sync_tokens if forward_batch is not None else None
+-        )
+-    if sync_tokens is None:
+-        global_tokens = get_dp_global_num_tokens()
+-        sync_tokens = max(global_tokens) if global_tokens else local_tokens
+-
+-    sync_tokens = max(int(sync_tokens), local_tokens)
+-    if sync_tokens > mtpr:
+-        raise ValueError(f"Aiter MegaMoE sync_tokens={sync_tokens} exceeds MTPR={mtpr}")
+-    return sync_tokens
+-
+-
+-def _forward_with_sync_config(
+-    mega,
+-    x: torch.Tensor,
+-    topk_weights: torch.Tensor,
+-    topk_ids: torch.Tensor,
+-    *,
+-    config_tokens: int,
+-):
+-    required = (
+-        "_select_config",
+-        "quantize",
+-        "_run_fused_stage1",
+-        "_run_stage2",
+-    )
+-    missing = [name for name in required if not hasattr(mega, name)]
+-    if missing:
+-        raise RuntimeError(
+-            "Aiter MegaMoE config contract changed; missing " + ", ".join(missing)
+-        )
+-
+-    run_tokens = int(x.shape[0])
+-    config = mega._select_config(config_tokens)
+-    x_q, scales = mega.quantize(x)
+-    mega._run_fused_stage1(
+-        x_q,
+-        topk_weights,
+-        scales,
+-        topk_ids,
+-        stream=None,
+-        config=config.stage1,
+-    )
+-    return mega._run_stage2(run_tokens, None, False, config)
+-
+-
+ def _ep_rank_world():
+     from sglang.srt.distributed.parallel_state import get_moe_ep_group
+ 
+@@ -361,11 +292,6 @@ def _run_mega_routed(
+             topk_weights = hidden_states.new_zeros((1, topk), dtype=torch.float32)
+ 
+     selected_mtpr = _mtpr()
+-    sync_tokens = _sync_tokens(
+-        forward_batch,
+-        local_tokens=int(x_in.shape[0]),
+-        mtpr=selected_mtpr,
+-    )
+     x_in = x_in.contiguous()
+     topk_ids = topk_ids.contiguous()
+     topk_weights = topk_weights.contiguous()
+@@ -384,18 +310,7 @@ def _run_mega_routed(
+     )
+     _swap_layer_weights(mega, moe.experts)
+ 
+-    if envs.SGLANG_AITER_MEGA_RANK_SYNC.get():
+-        output = _forward_with_sync_config(
+-            mega,
+-            x_in,
+-            topk_weights,
+-            topk_ids,
+-            config_tokens=sync_tokens,
+-        )[:num_tokens]
+-    else:
+-        output = mega.forward(x_in, topk_weights, topk_ids, slice_output=False)[
+-            :num_tokens
+-        ]
++    output = mega.forward(x_in, topk_weights, topk_ids, slice_output=False)[:num_tokens]
+ 
+     from sglang.srt.models.deepseek_common.utils import _use_aiter
+ 
+diff --git a/python/sglang/srt/managers/scheduler_components/dp_attn.py b/python/sglang/srt/managers/scheduler_components/dp_attn.py
+index 697642b130..ba8a55d97b 100644
+--- a/python/sglang/srt/managers/scheduler_components/dp_attn.py
++++ b/python/sglang/srt/managers/scheduler_components/dp_attn.py
+@@ -268,18 +268,6 @@ def _update_gather_batch(
+     )
+ 
+ 
+-def _should_defer_decode_for_mega_rank_sync(
+-    local_batch: Optional[ScheduleBatch],
+-    mlp_sync_info: MLPSyncBatchInfo,
+-) -> bool:
+-    return bool(
+-        envs.SGLANG_AITER_MEGA_RANK_SYNC.get()
+-        and mlp_sync_info.is_extend_in_batch
+-        and local_batch is not None
+-        and local_batch.forward_mode.is_decode()
+-    )
+-
+-
+ def should_skip_scheduler_all_gather(dp_size: int) -> bool:
+     """Return whether scheduler metadata is already local and rank-invariant.
+ 
+@@ -510,11 +498,6 @@ def prepare_mlp_sync_batch_raw(
+                 mlp_sync_info.tp0_info_cpu[:, 4:6],
+             )
+         )
+-        if _should_defer_decode_for_mega_rank_sync(local_batch, mlp_sync_info):
+-            local_batch = get_idle_batch()
+-            mlp_sync_info.num_tokens = 0
+-            mlp_sync_info.num_tokens_for_logprob = 0
+-
+     # Decide whether to emit idle batch
+     if skip_all_gather:
+         # Skip idle batch when attn-dp=1 (and always under DWDP: ranks run independently)
+diff --git a/python/sglang/srt/model_executor/forward_batch_info.py b/python/sglang/srt/model_executor/forward_batch_info.py
+index 8546930a45..4c249c4126 100644
+--- a/python/sglang/srt/model_executor/forward_batch_info.py
++++ b/python/sglang/srt/model_executor/forward_batch_info.py
+@@ -535,9 +535,6 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
+     _original_num_tokens: Optional[int] = None
+     global_num_tokens_cpu: Optional[List[int]] = None
+     global_num_tokens_gpu: Optional[torch.Tensor] = None
+-    mega_moe_global_num_tokens_cpu: Optional[List[int]] = None
+-    mega_moe_global_max_tokens: Optional[int] = None
+-    mega_moe_sync_tokens: Optional[int] = None
+     # Has to be None when cuda graph is captured.
+     global_num_tokens_for_logprob_cpu: Optional[List[int]] = None
+     global_num_tokens_for_logprob_gpu: Optional[torch.Tensor] = None
+@@ -756,19 +753,6 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
+             dtype=torch.int64,
+             pin_memory=pin_memory,
+         ).to(device, non_blocking=True)
+-        if batch.mega_moe_global_num_tokens is not None:
+-            mega_moe_global_num_tokens = list(batch.mega_moe_global_num_tokens)
+-            if self.spec_info is not None:
+-                mega_moe_global_num_tokens = [
+-                    value * self.spec_info.num_tokens_per_req
+-                    for value in mega_moe_global_num_tokens
+-                ]
+-            self.mega_moe_global_num_tokens_cpu = mega_moe_global_num_tokens
+-            self.mega_moe_global_max_tokens = max(mega_moe_global_num_tokens)
+-            mega_moe_sync_tokens = batch.mega_moe_sync_tokens
+-            if mega_moe_sync_tokens is not None and self.spec_info is not None:
+-                mega_moe_sync_tokens *= self.spec_info.num_tokens_per_req
+-            self.mega_moe_sync_tokens = mega_moe_sync_tokens
+         self.can_run_decode_cuda_graph = batch.can_run_decode_cuda_graph
+ 
+     @classmethod
+@@ -1400,7 +1384,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
+             and self.forward_mode.is_idle()
+         )
+         if mega_moe_idle_materialize:
+-            global_num_tokens = [1]
++            global_num_tokens = [1] * len(global_num_tokens)
+         sync_group_size = len(global_num_tokens)
+         attn_tp_size = get_parallel().attn_tp_size
+ 
+diff --git a/test/registered/unit/layers/moe/test_aiter_megamoe_rank_sync.py b/test/registered/unit/layers/moe/test_aiter_megamoe_rank_sync.py
+index 89645fba58..7acf7b4db4 100644
+--- a/test/registered/unit/layers/moe/test_aiter_megamoe_rank_sync.py
++++ b/test/registered/unit/layers/moe/test_aiter_megamoe_rank_sync.py
+@@ -4,14 +4,9 @@ from types import SimpleNamespace
+ import pytest
+ import torch
+ 
+-from sglang.srt.layers.moe.mega_moe_flydsl import (
+-    _forward_with_sync_config,
+-    _should_overlap_shared_and_routed,
+-    _sync_tokens,
+-)
++from sglang.srt.layers.moe.mega_moe_flydsl import _should_overlap_shared_and_routed
+ from sglang.srt.managers.scheduler_components.dp_attn import (
+     ForwardMode,
+-    _should_defer_decode_for_mega_rank_sync,
+     _update_gather_batch,
+ )
+ from sglang.test.ci.ci_register import register_cpu_ci
+@@ -19,17 +14,6 @@ from sglang.test.ci.ci_register import register_cpu_ci
+ register_cpu_ci(est_time=1, suite="base-a-test-cpu")
+ 
+ 
+-def test_sync_tokens_uses_rank_global_config(monkeypatch):
+-    monkeypatch.setenv("SGLANG_AITER_MEGA_RANK_SYNC", "1")
+-    forward_batch = SimpleNamespace(
+-        mega_moe_sync_tokens=7659,
+-        forward_mode=ForwardMode.EXTEND,
+-        is_extend_in_batch=True,
+-    )
+-    assert _sync_tokens(forward_batch, local_tokens=32, mtpr=8192) == 8192
+-    assert _sync_tokens(forward_batch, local_tokens=7659, mtpr=8192) == 8192
+-
+-
+ def test_rank_sync_forces_overlap_off(monkeypatch):
+     monkeypatch.setenv("SGLANG_AITER_MEGA_RANK_SYNC", "1")
+     monkeypatch.setattr(
+@@ -43,55 +27,6 @@ def test_rank_sync_forces_overlap_off(monkeypatch):
+     assert _should_overlap_shared_and_routed(moe, 32)
+ 
+ 
+-def test_sync_tokens_gate_and_capacity(monkeypatch):
+-    forward_batch = SimpleNamespace(
+-        mega_moe_sync_tokens=8192,
+-        forward_mode=ForwardMode.DECODE,
+-        is_extend_in_batch=False,
+-    )
+-    monkeypatch.setenv("SGLANG_AITER_MEGA_RANK_SYNC", "0")
+-    assert _sync_tokens(forward_batch, local_tokens=32, mtpr=8192) == 32
+-
+-    monkeypatch.setenv("SGLANG_AITER_MEGA_RANK_SYNC", "1")
+-    forward_batch.mega_moe_sync_tokens = 8193
+-    with pytest.raises(ValueError, match="exceeds MTPR"):
+-        _sync_tokens(forward_batch, local_tokens=32, mtpr=8192)
+-
+-
+-def test_forward_uses_global_config_with_local_runtime_shape():
+-    calls = []
+-
+-    class Config:
+-        stage1 = object()
+-
+-    class FakeMega:
+-        def _select_config(self, tokens):
+-            calls.append(("select", tokens))
+-            return Config()
+-
+-        def quantize(self, x):
+-            return x, torch.ones((x.shape[0], 1), dtype=torch.uint8)
+-
+-        def _run_fused_stage1(self, x, weights, scales, ids, *, stream, config):
+-            calls.append(("stage1", x.shape[0], config, stream))
+-
+-        def _run_stage2(self, run_tokens, stream, slice_output, config):
+-            calls.append(("stage2", run_tokens, slice_output, stream))
+-            return torch.zeros((run_tokens, 4), dtype=torch.bfloat16)
+-
+-    output = _forward_with_sync_config(
+-        FakeMega(),
+-        torch.zeros((2, 4), dtype=torch.bfloat16),
+-        torch.zeros((2, 2), dtype=torch.float32),
+-        torch.zeros((2, 2), dtype=torch.int32),
+-        config_tokens=8192,
+-    )
+-    assert output.shape == (2, 4)
+-    assert calls[0] == ("select", 8192)
+-    assert calls[1][0:2] == ("stage1", 2)
+-    assert calls[2] == ("stage2", 2, False, None)
+-
+-
+ def test_mlp_sync_retains_full_vector_without_tp_gather():
+     batch = SimpleNamespace()
+     sync = SimpleNamespace(
+@@ -121,27 +56,5 @@ def test_mlp_sync_retains_full_vector_without_tp_gather():
+     assert batch.is_extend_in_batch
+ 
+ 
+-def test_idle_rank_keeps_single_materialized_row(monkeypatch):
+-    monkeypatch.setenv("SGLANG_AITER_MEGA_RANK_SYNC", "1")
+-    forward_batch = SimpleNamespace(
+-        mega_moe_sync_tokens=8192,
+-        forward_mode=ForwardMode.IDLE,
+-        is_extend_in_batch=True,
+-    )
+-    assert _sync_tokens(forward_batch, local_tokens=1, mtpr=8192) == 1
+-
+-    forward_batch.forward_mode = ForwardMode.EXTEND
+-    forward_batch._original_forward_mode = ForwardMode.IDLE
+-    assert _sync_tokens(forward_batch, local_tokens=1, mtpr=8192) == 1
+-
+-
+-def test_decode_is_deferred_when_any_rank_prefills(monkeypatch):
+-    monkeypatch.setenv("SGLANG_AITER_MEGA_RANK_SYNC", "1")
+-    sync = SimpleNamespace(is_extend_in_batch=True)
+-    assert _should_defer_decode_for_mega_rank_sync(
+-        SimpleNamespace(forward_mode=ForwardMode.DECODE), sync
+-    )
+-
+-
+ if __name__ == "__main__":
+     sys.exit(pytest.main([__file__, "-v"]))

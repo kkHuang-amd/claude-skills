@@ -1,0 +1,107 @@
+diff --git a/aiter/ops/flydsl/kernels/mixed_moe_gemm_2stage_common.py b/aiter/ops/flydsl/kernels/mixed_moe_gemm_2stage_common.py
+index a00c48639..622ad1a93 100644
+--- a/aiter/ops/flydsl/kernels/mixed_moe_gemm_2stage_common.py
++++ b/aiter/ops/flydsl/kernels/mixed_moe_gemm_2stage_common.py
+@@ -1535,7 +1535,8 @@ def compile_mixed_moe_gemm1_common(
+                     if const_expr(heterogeneous_b and use_async_copy):
+                         barrier(vmcnt=0)
+                     else:
+-                        rocdl.s_waitcnt(body_vmcnt_before_barrier)
++                        # Partial VMEM waits can leave LDS-DMA loads crossing the barrier.
++                        rocdl.s_waitcnt(0)
+                         barrier()
+                     rocdl.sched_barrier(0)
+ 
+@@ -1544,6 +1545,8 @@ def compile_mixed_moe_gemm1_common(
+                     )
+                     if const_expr(use_async_copy and next_k_dma_py < int(k_dim)):
+                         prefetch_x_to_lds(abs_k_dma, lds_write)
++                        # Keep scale loads after the LDS-DMA group.
++                        rocdl.sched_barrier(0)
+                     if const_expr(not use_async_copy):
+                         x_regs = load_x_tile(abs_k_dma)
+ 
+diff --git a/aiter/ops/flydsl/kernels/mqa_logits/pa_mqa_logits_fp4_prefill.py b/aiter/ops/flydsl/kernels/mqa_logits/pa_mqa_logits_fp4_prefill.py
+index de9389969..f6d8974d1 100644
+--- a/aiter/ops/flydsl/kernels/mqa_logits/pa_mqa_logits_fp4_prefill.py
++++ b/aiter/ops/flydsl/kernels/mqa_logits/pa_mqa_logits_fp4_prefill.py
+@@ -4,7 +4,7 @@
+ 
+ from __future__ import annotations
+ 
+-from functools import lru_cache
++from functools import cache
+ from typing import NamedTuple
+ 
+ import flydsl.compiler as flyc
+@@ -826,7 +826,7 @@ def build_pa_mqa_logits_fp4_prefill_module(
+ # ============================================================================
+ 
+ 
+-@lru_cache(maxsize=32)
++@cache
+ def compile_pa_mqa_logits_fp4_prefill(
+     *,
+     block_k: int = 256,
+diff --git a/csrc/ck_gemm_moe_2stages_codegen/gemm_moe_tune.py b/csrc/ck_gemm_moe_2stages_codegen/gemm_moe_tune.py
+index 1c71e1214..9b9ed3fb3 100644
+--- a/csrc/ck_gemm_moe_2stages_codegen/gemm_moe_tune.py
++++ b/csrc/ck_gemm_moe_2stages_codegen/gemm_moe_tune.py
+@@ -962,19 +962,22 @@ class FmoeTuner(TunerCommon):
+         #   a=a1_qt, w1=w1_qt_shuf, w1_scale=w1_scale_shuf, a1_scale=a1_scale_sort,
+         #   v2_output_layout=True, ...). Recipe mirrors
+         # mxfp4_v2_tune_utils.populate_baseline_v2_intermediate.
+-        d = _v2_gen(
+-            token,
+-            model_dim,
+-            inter_dim,
+-            expert,
+-            topk,
+-            blockM,
+-            adtype=adtype,
+-            b_dtype=b_dtype,
+-            activation=act_type,
+-            situ_beta=DEFAULT_SITUV2_BETA,
+-            situ_linear_beta=DEFAULT_SITUV2_LINEAR_BETA,
+-        )
++        # Generate on the GPU: the CPU fp4 packing of E x 2I x H weights takes
++        # tens of minutes per shape at E=385.
++        with torch.device(device):
++            d = _v2_gen(
++                token,
++                model_dim,
++                inter_dim,
++                expert,
++                topk,
++                blockM,
++                adtype=adtype,
++                b_dtype=b_dtype,
++                activation=act_type,
++                situ_beta=DEFAULT_SITUV2_BETA,
++                situ_linear_beta=DEFAULT_SITUV2_LINEAR_BETA,
++            )
+         v = _v2_build_inputs(d, token, model_dim, inter_dim, expert, topk, blockM)
+         # Precompute the sorted A-scale here so it is NOT timed in the run func.
+         a1_scale_sort = moe_mxfp4_sort(
+diff --git a/csrc/cpp_itfs/torch_utils.py b/csrc/cpp_itfs/torch_utils.py
+index 39b485fb1..489ca6467 100644
+--- a/csrc/cpp_itfs/torch_utils.py
++++ b/csrc/cpp_itfs/torch_utils.py
+@@ -54,8 +54,15 @@ def torch_to_c_types(*args):
+             c_args.append(ctypes.POINTER(ctypes.c_int)())
+         elif isinstance(arg, torch.Tensor):
+             c_args.append(ctypes.cast(arg.data_ptr(), ctypes.c_void_p))
+-        elif isinstance(arg, torch.cuda.Stream):
+-            c_args.append(ctypes.cast(arg.cuda_stream, ctypes.c_void_p))
++        elif isinstance(arg, torch.Stream):
++            handle = getattr(arg, "cuda_stream", None)
++            if handle is None:
++                handle = torch.cuda.Stream(
++                    stream_id=arg.stream_id,
++                    device_index=arg.device_index,
++                    device_type=arg.device_type,
++                ).cuda_stream
++            c_args.append(ctypes.cast(handle, ctypes.c_void_p))
+         else:
+             if type(arg) not in ctypes_map:
+                 raise ValueError(f"Unsupported type: {type(arg)}")

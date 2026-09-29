@@ -11,6 +11,10 @@ Remaining gap to ATOM = low-concurrency P90 (c1/c2/c8 -13/-14/-17%).
 chain PID 554036, ETA ~13:15 +08, progress `tail -3 /shared_nfs/kk/dsv41/agentx/series.txt`.
 Done so far: c8 PDI32 28,643.3 / P90 212.3 (vs PDI16 +0.3% / +6.5%; TTFT p50 0.45 -> 0.54 s, p90 1.42 -> 1.78 s;
 vs ATOM -2.1% / -11.5%).
+**Env reproducibility (2026-09-29):** scripts/setup_atomport_env.sh rebuilds this env in a fresh container
+(RUNBOOK "ATOM-port worktree"); a copy in /sgl-workspace/verify_ap is file-identical. QUEUED: server + GSM8K
+from that copy after the PDI sweep (scripts/verify_atomport_env_server.sh, PID 573852,
+/shared_nfs/kk/dsv41/atomport/verify_env/summary.txt).
 **Next:** finish PDI sweep -> if larger PDI keeps helping P90, try c8/c2 PDI 64; then capture an ATOM trace under
 AgentX-like load (c1/c8) and compare step-by-step with ours (the proxy host gap is only ~0.85 ms/step, so most of
 the AgentX c1 gap is NOT host gap).

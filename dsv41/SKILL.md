@@ -18,7 +18,8 @@ shared-expert MXFP4 requant ties-to-even fix; 026da361c0 DSpark draft block meta
 **Best config** = that commit + `--enforce-shared-experts-fusion --fp8-gemm-backend aiter` + SGLANG_OPT_HIP_OPUS_SPARSE_PREFILL=1
 + tuned FMoE CSV /sgl-workspace/aiter-5750/aiter/configs/model_configs/dsv41_tp2_sef_fp8fp4_tuned_fmoe.csv (untracked;
 backup patches/aiter_local_dsv41_tp2_sef_fp8fp4_tuned_fmoe.csv), scripts/agentx_colleague_run.sh, TP2 EP1, GPUs 4,5,
-aiter-5750 + pydeps-flydsl-0341 via PYTHONPATH. Launch: RUNBOOK.md "ATOM-port worktree".
+aiter-5750 + pydeps-flydsl-0341 via PYTHONPATH. Rebuild in a fresh container: setup_env.sh then
+scripts/setup_atomport_env.sh (RUNBOOK.md "ATOM-port worktree").
 **AgentX 2026-09-29** (TTT / P90, 0 faults): c1 10,306.1/292.8, c2 10,476.9/279.6, c4 15,680.7/267.0, c8 28,552.6/199.3,
 c16 51,219.5/137.8, c32 PDI16 90,876.4/102.0, c32 PDI4 93,855.8/68.7, c64 PDI16 90,671.3/78.8, c64 PDI4 117,189.7/39.7.
 vs rolao all-opts +3.8..+7.6% TTT, +3.1..+10.3% P90; vs ATOM behind at c1/c2/c8 (P90 -13/-14/-17%), ahead at c32/c64 PDI4.
@@ -65,7 +66,8 @@ dsv41/
 
 ## Scripts (in scripts/)
 
-- `launch_server.sh` TP4 server (PERF=1, DSPARK=1); `setup_env.sh` idempotent env setup (RUNBOOK).
+- `launch_server.sh` TP4 server (PERF=1, DSPARK=1); `setup_env.sh` idempotent env setup (RUNBOOK); `setup_atomport_env.sh`
+  idempotent ATOM-port best-config env (sglang rolao worktree, aiter-5750 + patch + tuned CSV, flydsl 0.3.4.1).
 - `agentx_colleague_run.sh` **current** AgentX launcher (shim for `agentx_colleague_mi355x_sglang.sh`); knobs `TAG CONC OPUS
   TP EP_SIZE GPUS PREFILL_DECODE_INTERVAL SRC EXTRA_ARGS SERVER_ONLY EVAL_ONLY`; out /shared_nfs/kk/dsv41/agentx/<TAG>/.
 - `agentx_series.sh` sequential AgentX points (`RUNS SCRIPT PREFIX`), progress agentx/series.txt.

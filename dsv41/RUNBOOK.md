@@ -75,12 +75,26 @@ Older local aiter edits: aiter_preexisting_local.diff (both in /shared_nfs/kk/ds
 
 ## ATOM-port worktree (current best config)
 
-- sglang: `/sgl-workspace/sglang-rolao-opt`, branch `atomport-mxfp8-producers` (= rolao `dsv41/opt-branch` @ 026da361c0).
-- aiter: worktree `/sgl-workspace/aiter-5750` (ROCm/aiter#5750 + #5561 + local edits, CK submodule inited) with flydsl 0.3.4.1
-  in `/sgl-workspace/pydeps-flydsl-0341`, both via PYTHONPATH (global aiter untouched).
-- Tuned FMoE CSV: copy `patches/aiter_local_dsv41_tp2_sef_fp8fp4_tuned_fmoe.csv` to
-  `/sgl-workspace/aiter-5750/aiter/configs/model_configs/dsv41_tp2_sef_fp8fp4_tuned_fmoe.csv`. aiter merges
-  `aiter/configs/model_configs/*tuned_fmoe*.csv` of the aiter that is IMPORTED; restart the server after changes.
+Fresh container: run section 1 (`setup_env.sh`), then
+
+```bash
+bash $D/scripts/setup_atomport_env.sh              # idempotent; VERIFY_ONLY=1 = check only; prints the LAUNCH line
+```
+
+It creates (all via PYTHONPATH; the image's editable sglang/aiter and global flydsl 0.3.2 stay untouched):
+- sglang `/sgl-workspace/sglang-rolao-opt`: worktree of sglang-dsv41 + remote `rolao` (RolaoDenthu/sglang), branch
+  `atomport-mxfp8-producers` @ `026da361c0` (= pushed `dsv41/opt-branch`).
+- aiter `/sgl-workspace/aiter-5750`: worktree of `/sgl-workspace/aiter` at ROCm/aiter PR #5750 head `1053c79bb`, CK submodule,
+  `patches/aiter_local_5750_worktree_0001.patch` (#5561 + MoE-tuner GPU data gen + 2 local fixes), tuned FMoE CSV
+  `patches/aiter_local_dsv41_tp2_sef_fp8fp4_tuned_fmoe.csv` -> `aiter/configs/model_configs/`. aiter merges the
+  `model_configs/*tuned_fmoe*.csv` of the aiter that is IMPORTED; restart the server after changes.
+- flydsl 0.3.4.1 (PyPI) in `/sgl-workspace/pydeps-flydsl-0341` (`pip --no-deps --target`).
+- AgentX deps (`/workspace/InferenceX`, aiperf venv) are only checked; build them with the agentx skill.
+
+Knobs are `AP_*` (the image exports `AITER_COMMIT`, so unprefixed names collide), e.g. build a second copy:
+`AP_SGL_DIR=... AP_BRANCH= AP_AITER_DIR=... AP_FLYDSL_DIR=...`. First server start JIT-builds the aiter-5750 modules.
+Verified 2026-09-29: a copy built this way is file-identical to the live env (except the uncommitted
+SGLANG_HIP_SPEC_EVENT_WAIT experiment in overlap_utils.py, which is intentionally not reproduced).
 
 ```bash
 cd /shared_nfs/kk/dsv41/agentx && PYTHONPATH=/sgl-workspace/pydeps-flydsl-0341:/sgl-workspace/aiter-5750:/sgl-workspace/mori \

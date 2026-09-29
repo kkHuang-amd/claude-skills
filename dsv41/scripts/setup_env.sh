@@ -4,7 +4,7 @@
 set -euo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 SRC=${SRC:-/sgl-workspace/sglang-dsv41}; AITER=${AITER:-/sgl-workspace/aiter}
-AITER_PIN=acf8fdf9307431ece8ee275971c41cb3d1a7020b; SGL_PIN=e2e824dc58
+AITER_PIN=b4d9154d125e09efbe098d986e40fea3549c1244   # v0.1.22.post1 = vLLM nightly-rocm100-3df4ae153 aiter; SGL_PIN=e2e824dc58
 SP=$(python3 -c 'import site;print(site.getsitepackages()[0])'); LOGD=/shared_nfs/kk/dsv41; mkdir -p "$LOGD"
 say(){ echo "[setup] $*"; }
 
@@ -14,8 +14,9 @@ git -C "$SRC" remote get-url upstream >/dev/null 2>&1 || git -C "$SRC" remote ad
 say "sglang HEAD=$(git -C "$SRC" rev-parse --short HEAD) (runbook pin $SGL_PIN)"
 
 # 2. aiter pin + patches (git apply is skipped when already applied)
-[ "$(git -C "$AITER" rev-parse HEAD)" = "$AITER_PIN" ] || { say "WARN aiter HEAD != $AITER_PIN"; }
-for p in "$HERE"/patches/aiter_*.patch; do
+[ "$(git -C "$AITER" rev-parse HEAD)" = "$AITER_PIN" ] || say "WARN aiter HEAD != $AITER_PIN: git -C $AITER fetch origin tag v0.1.22.post1 && git -C $AITER checkout v0.1.22.post1, then move aiter/jit/*.so + flydsl_cache away (JIT does not rebuild on source change)"
+# #5802 conflicts on v0.1.22.post1 and is unused at AITER_BF16_FP8_MOE_BOUND=0 -> only #5561
+for p in "$HERE"/patches/aiter_5561_*.patch; do
   if git -C "$AITER" apply --reverse --check "$p" 2>/dev/null; then say "aiter patch already applied: $(basename "$p")"
   else git -C "$AITER" apply "$p" && say "aiter patch applied: $(basename "$p")"; fi
 done
@@ -35,5 +36,6 @@ else
 fi
 
 # 4. model + datasets
-test -f /shared_nfs/models/deepseek-ai/DeepSeek-V4.1-Flash/config.json && say "model OK" || say "WARN model missing"
+M=/shared_nfs/models/deepseek-ai/DeepSeek-V4.1-Flash; [ -d "$M" ] || M=/shared_nfs/deepseek-ai/DeepSeek-V4.1-Flash
+test -f "$M/config.json" && say "model OK: $M" || say "WARN model missing"
 say "done"

@@ -1,0 +1,31 @@
+diff --git a/python/sglang/srt/managers/overlap_utils.py b/python/sglang/srt/managers/overlap_utils.py
+index e43920cd41..05853c0d93 100644
+--- a/python/sglang/srt/managers/overlap_utils.py
++++ b/python/sglang/srt/managers/overlap_utils.py
+@@ -66,6 +66,8 @@ def decide_needs_confidence_relay() -> bool:
+ 
+ _is_cuda = is_cuda()
+ _is_hip = is_hip()
++# HIP host-syncs the spec publish event (#26672); SGLANG_HIP_SPEC_EVENT_WAIT=1 uses the device-side wait instead.
++_hip_host_sync_publish = _is_hip and __import__("os").environ.get("SGLANG_HIP_SPEC_EVENT_WAIT", "0") != "1"
+ _is_npu = is_npu()
+ 
+ # Token-buf consume tracking: init to -1, assert non-negative on gather,
+@@ -475,7 +477,7 @@ class FutureMap:
+         if n == 0:
+             return
+         if self.publish_ready is not None:
+-            if _is_hip:
++            if _hip_host_sync_publish:
+                 self.publish_ready.synchronize()
+             else:
+                 self.publish_ready.wait()
+@@ -527,7 +529,7 @@ class FutureMap:
+                 # forward publish; a stale consume means a publish went missing.
+                 assert self._publish_fresh, "resolve without a fresh forward publish"
+                 self._publish_fresh = False
+-            if _is_hip:
++            if _hip_host_sync_publish:
+                 # Temporary workaround: Event.wait() regresses TPOT on AMD MI355.
+                 self.publish_ready.synchronize()
+             else:

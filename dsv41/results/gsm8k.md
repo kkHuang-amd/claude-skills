@@ -17,3 +17,31 @@
 | 2026-09-24 | vllm:vllm_nodspark (oai client) | 1319 | 5 | 0.000 | 1.000 | 300.874 s | /shared_nfs/kk/dsv41/gsm8k_oai_vllm_nodspark.log |
 | 2026-09-24 | vllm:vllm_nodspark2 (oai client) | 1319 | 5 | 0.901 | 0.000 | 86.468 s | /shared_nfs/kk/dsv41/gsm8k_oai_vllm_nodspark2.log |
 | 2026-09-24 | vllm:vllm_dspark_real (oai client) | 1319 | 5 | 0.904 | 0.000 | 56.211 s | /shared_nfs/kk/dsv41/gsm8k_oai_vllm_dspark_real.log |
+| 2026-09-24 | sglang:qr_int8 (oai client) | 1319 | 5 | 0.907 | 0.000 | 54.187 s | /shared_nfs/kk/dsv41/gsm8k_oai_qr_int8.log |
+| 2026-09-24 | sglang:opus_check (oai client) | 1319 | 5 | 0.902 | 0.001 | 56.578 s | /shared_nfs/kk/dsv41/gsm8k_oai_opus_check.log |
+| 2026-09-24 | sglang:opus_qr8_mixed (oai client) | 1319 | 5 | 0.904 | 0.000 | 72.992 s | /shared_nfs/kk/dsv41/gsm8k_oai_opus_qr8_mixed.log |
+| 2026-09-24 | sglang:opus_mixed_check (oai client) | 1319 | 5 | 0.911 | 0.000 | 72.837 s | /shared_nfs/kk/dsv41/gsm8k_oai_opus_mixed_check.log |
+| 2026-09-24 | aiter0122_opus_qr8_mixed | 1319 | 5 | 0.907 | 0.000 | 93.786 s | /shared_nfs/kk/dsv41/gsm8k_aiter0122_opus_qr8_mixed.log |
+| 2026-09-26 | rolao_allopts_tp2 | 1319 | 5 | 0.893 | 0.000 | 104.320 s | /shared_nfs/kk/dsv41/gsm8k_rolao_allopts_tp2.log |
+| 2026-09-27 | atomport_t2c_200 | 200 | 5 | 0.390 | 0.010 | 64.200 s | /shared_nfs/kk/dsv41/gsm8k_atomport_t2c_200.log |
+| 2026-09-27 | atomport_t2c_full | 1319 | 5 | 0.906 | 0.000 | 113.023 s | /shared_nfs/kk/dsv41/gsm8k_atomport_t2c_full.log |
+| 2026-09-27 | atomport_t2c_full | 1319 | 5 | 0.906 | 0.000 | 117.108 s | /shared_nfs/kk/dsv41/gsm8k_atomport_t2c_full.log |
+| 2026-09-27 | atomport_t2abc_full | 1319 | 5 | 0.904 | 0.000 | 56.563 s | /shared_nfs/kk/dsv41/gsm8k_atomport_t2abc_full.log |
+| 2026-09-27 | atomport_sef_full | 1319 | 5 | 0.893 | 0.001 | 54.373 s | /shared_nfs/kk/dsv41/gsm8k_atomport_sef_full.log |
+| 2026-09-27 | atomport_sef_full_r2 | 1319 | 5 | 0.892 | 0.001 | 53.854 s | /shared_nfs/kk/dsv41/gsm8k_atomport_sef_full_r2.log |
+| 2026-09-27 | atomport_sef_full_r3 | 1319 | 5 | 0.887 | 0.002 | 53.684 s | /shared_nfs/kk/dsv41/gsm8k_atomport_sef_full_r3.log |
+| 2026-09-27 | atomport_t2only_r1 | 1319 | 5 | 0.904 | 0.000 | 56.493 s | /shared_nfs/kk/dsv41/gsm8k_atomport_t2only_r1.log |
+| 2026-09-27 | atomport_t2only_r2 | 1319 | 5 | 0.905 | 0.000 | 55.504 s | /shared_nfs/kk/dsv41/gsm8k_atomport_t2only_r2.log |
+| 2026-09-28 | atomport_sef_rne_r1 | 1319 | 5 | 0.900 | 0.001 | 270.191 s | /shared_nfs/kk/dsv41/gsm8k_atomport_sef_rne_r1.log |
+| 2026-09-28 | atomport_sef_rne_r2 | 1319 | 5 | 0.906 | 0.000 | 268.519 s | /shared_nfs/kk/dsv41/gsm8k_atomport_sef_rne_r2.log |
+| 2026-09-28 | atomport_sef_rne_r3 | 1319 | 5 | 0.898 | 0.000 | 269.542 s | /shared_nfs/kk/dsv41/gsm8k_atomport_sef_rne_r3.log |
+| 2026-09-28 | atomport_sef_rne_eval_r1 | 1319 | 5 | 0.908 | 0.000 | 47.927 s | /shared_nfs/kk/dsv41/gsm8k_atomport_sef_rne_eval_r1.log |
+| 2026-09-28 | atomport_sef_rne_eval_r2 | 1319 | 5 | 0.908 | 0.001 | 46.095 s | /shared_nfs/kk/dsv41/gsm8k_atomport_sef_rne_eval_r2.log |
+| 2026-09-28 | atomport_sef_rne_eval_r3 | 1319 | 5 | 0.902 | 0.001 | 45.887 s | /shared_nfs/kk/dsv41/gsm8k_atomport_sef_rne_eval_r3.log |
+| 2026-09-28 | atomport_sef_tuned_eval_r1 | 1319 | 5 | 0.901 | 0.000 | 46.807 s | /shared_nfs/kk/dsv41/gsm8k_atomport_sef_tuned_eval_r1.log |
+| 2026-09-28 | atomport_sef_tuned_eval_r2 | 1319 | 5 | 0.904 | 0.002 | 44.780 s | /shared_nfs/kk/dsv41/gsm8k_atomport_sef_tuned_eval_r2.log |
+| 2026-09-28 | atomport_sef_tuned_eval_r3 | 1319 | 5 | 0.905 | 0.000 | 44.921 s | /shared_nfs/kk/dsv41/gsm8k_atomport_sef_tuned_eval_r3.log |
+| 2026-09-28 | draftraw_parity_gsm8k | 1319 | 5 | 0.896 | 0.000 | 269.687 s | /shared_nfs/kk/dsv41/gsm8k_draftraw_parity_gsm8k.log |
+| 2026-09-28 | atomport_draftraw_eval_r1 | 1319 | 5 | 0.903 | 0.000 | 46.367 s | /shared_nfs/kk/dsv41/gsm8k_atomport_draftraw_eval_r1.log |
+| 2026-09-28 | atomport_draftraw_eval_r2 | 1319 | 5 | 0.908 | 0.000 | 44.627 s | /shared_nfs/kk/dsv41/gsm8k_atomport_draftraw_eval_r2.log |
+| 2026-09-28 | atomport_draftraw_eval_r3 | 1319 | 5 | 0.901 | 0.000 | 44.621 s | /shared_nfs/kk/dsv41/gsm8k_atomport_draftraw_eval_r3.log |

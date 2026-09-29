@@ -1,0 +1,52 @@
+From 5c938c46788bb54f9d9e636f230afa2369aba8b2 Mon Sep 17 00:00:00 2001
+From: wunhuang <wunhuang@amd.com>
+Date: Thu, 24 Sep 2026 07:32:13 +0000
+Subject: [PATCH 2/2] [AMD] DSV4.1 OPUS prefill: also take MIXED batches
+
+mix_with_running turns running requests into length-1 extends, so the
+request-local workspace and CSR already cover them; admit ForwardMode.MIXED
+next to EXTEND and test a batch with length-1 rows.
+
+MI355X TP4 --enable-mixed-chunk, QR=INT8, random ids c32: TTFT 1574 -> 1520 ms,
+GSM8K 0.911 with SGLANG_DEBUG_DSV41_OPUS_PREFILL_CHECK=1 (no faults).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ .../srt/layers/attention/deepseek_v4_backend_hip_radix.py   | 3 ++-
+ .../kernels/ops/attention/dsv4/test_hip_opus_prefill.py     | 6 ++++++
+ 2 files changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/python/sglang/srt/layers/attention/deepseek_v4_backend_hip_radix.py b/python/sglang/srt/layers/attention/deepseek_v4_backend_hip_radix.py
+index 46cc4f5cde..6e5d58097e 100644
+--- a/python/sglang/srt/layers/attention/deepseek_v4_backend_hip_radix.py
++++ b/python/sglang/srt/layers/attention/deepseek_v4_backend_hip_radix.py
+@@ -2775,7 +2775,8 @@ class DeepseekV4HipRadixBackend(
+         num_tokens = q.shape[0]
+         packed = KVLayout.V4.bytes_per_token
+         return (
+-            forward_batch.forward_mode == ForwardMode.EXTEND
++            # MIXED rows of running requests are extends of length 1 (mix_with_running)
++            forward_batch.forward_mode in (ForwardMode.EXTEND, ForwardMode.MIXED)
+             and compress_ratio in (0, 1, 2)
+             and bool(self.forward_metadata.core_attn_metadata.low_ratios)
+             and num_tokens >= envs.SGLANG_OPT_DSV41_OPUS_PREFILL_MIN_TOKENS.get()
+diff --git a/test/registered/kernels/ops/attention/dsv4/test_hip_opus_prefill.py b/test/registered/kernels/ops/attention/dsv4/test_hip_opus_prefill.py
+index 373f801e70..15c5b5e11f 100644
+--- a/test/registered/kernels/ops/attention/dsv4/test_hip_opus_prefill.py
++++ b/test/registered/kernels/ops/attention/dsv4/test_hip_opus_prefill.py
+@@ -147,6 +147,12 @@ class TestOpusPrefill(CustomTestCase):
+     def test_ratio2(self):
+         self._run(2)
+ 
++    def test_mixed_batch_with_decode_rows(self):
++        """A MIXED batch: prefill requests plus running requests extending by one token."""
++        self.REQS = [(0, 1024), (2000, 1), (300, 700), (777, 1), (5000, 1500), (129, 1)]
++        for ratio in (0, 1, 2):
++            self._run(ratio)
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
+-- 
+2.34.1
+

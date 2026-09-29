@@ -1,0 +1,650 @@
+From 8de5d6cfe3b14cb8adce599b3bfcfa36edf2ca0d Mon Sep 17 00:00:00 2001
+From: wunhuang <wunhuang@amd.com>
+Date: Thu, 24 Sep 2026 07:06:29 +0000
+Subject: [PATCH 1/2] [AMD] DSV4.1: OPUS sparse prefill on gfx950 behind
+ SGLANG_OPT_DSV41_OPUS_PREFILL
+
+Extend batches attend through aiter's pa_sparse_prefill_opus instead of the
+pa_decode_sparse decode kernel. Per forward the reachable compressed and SWA
+rows are dequantized (exact fp8->bf16) into a request-local workspace and each
+token's top-k/SWA sets are rewritten as workspace rows; inverse RoPE is applied
+after, as on the existing >=1024-token path.
+
+Gated off by default; only plain EXTEND batches with >= 2048 tokens on the
+584 B packed layout (no CP, SWA replay, late-layer tail or capture) take it.
+
+MI355X TP4, ISL 4096/OSL 1024, random ids: c32 TTFT 2768 -> 2484 ms, c32 output
+throughput +3.5%, TPOT unchanged; GSM8K 0.902 (baseline 0.905-0.908).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ .../ops/attention/dsv4/opus_prefill_hip.py    | 287 ++++++++++++++++++
+ python/sglang/srt/environ.py                  |   9 +
+ .../deepseek_v4_backend_hip_radix.py          | 116 +++++++
+ .../attention/dsv4/test_hip_opus_prefill.py   | 152 ++++++++++
+ 4 files changed, 564 insertions(+)
+ create mode 100644 python/sglang/kernels/ops/attention/dsv4/opus_prefill_hip.py
+ create mode 100644 test/registered/kernels/ops/attention/dsv4/test_hip_opus_prefill.py
+
+diff --git a/python/sglang/kernels/ops/attention/dsv4/opus_prefill_hip.py b/python/sglang/kernels/ops/attention/dsv4/opus_prefill_hip.py
+new file mode 100644
+index 0000000000..3ba31c1cd4
+--- /dev/null
++++ b/python/sglang/kernels/ops/attention/dsv4/opus_prefill_hip.py
+@@ -0,0 +1,287 @@
++"""DeepSeek-V4.1 sparse-attention prefill on gfx950 through aiter's OPUS kernel.
++
++The served HIP path attends prefill with the decode kernel (``pa_decode_sparse``) straight
++off the packed fp8 pages. OPUS (``pa_sparse_prefill_opus``) is ~2.4x faster at >= 1k query
++tokens but reads bf16 rows, so per forward we dequantize the rows the batch can reach into a
++request-local bf16 workspace and re-express every token's index lists as workspace rows:
++
++  workspace = [ compressed rows of req 0 .. req B-1 | SWA rows of req 0 .. req B-1 ]
++  compressed rows of req b: positions j in [0, seq_len_b // R), slot req_to_token[b, j*R] // R
++  SWA rows of req b:        positions p in [lo_b, seq_len_b),  slot full_to_swa[req_to_token[b, p]]
++
++The fp8 -> bf16 dequant is exact, so OPUS sees the same keys the decode kernel does. The slot
++lists are layer-invariant and built once per forward; each layer re-runs only the gather.
++"""
++
++from __future__ import annotations
++
++import functools
++import itertools
++from typing import List, Optional, Tuple
++
++import torch
++import triton
++import triton.language as tl
++
++NOPE = tl.constexpr(448)
++HEAD = tl.constexpr(512)
++ROW_BYTES = tl.constexpr(576)  # NoPE fp8 + RoPE bf16, per slot, in the page's data region
++SCALE_BYTES = tl.constexpr(8)  # 7 E8M0 exponents (one per 64 NoPE values) + 1 pad, trailing region
++BYTES_PER_TOKEN = 584
++SWA_WINDOW = tl.constexpr(128)
++
++
++@functools.cache
++def get_opus():
++    try:
++        from aiter.ops.pa_sparse_prefill_opus import pa_sparse_prefill_opus
++    except ImportError:
++        return None
++    return pa_sparse_prefill_opus
++
++
++@triton.jit
++def _dequant_gather_kernel(
++    cache_u8,
++    cache_i16,
++    page_stride,
++    src_slots,
++    out,
++    PAGE: tl.constexpr,
++):
++    r = tl.program_id(0)
++    s = tl.load(src_slots + r).to(tl.int64)
++    lane = tl.arange(0, HEAD)
++    is_nope = lane < NOPE
++    page = s // PAGE
++    off = s % PAGE
++    base = page * page_stride
++    ok = s >= 0
++    byte = tl.load(cache_u8 + base + off * ROW_BYTES + lane, mask=ok & is_nope, other=0)
++    exp = tl.load(
++        cache_u8 + base + PAGE * ROW_BYTES + off * SCALE_BYTES + lane // 64,
++        mask=ok & is_nope,
++        other=127,
++    )
++    nope = byte.to(tl.float8e4nv, bitcast=True).to(tl.float32) * tl.exp2(
++        exp.to(tl.float32) - 127.0
++    )
++    rope_i16 = tl.load(
++        cache_i16 + (base + off * ROW_BYTES + NOPE) // 2 + (lane - NOPE),
++        mask=ok & (lane >= NOPE),
++        other=0,
++    )
++    rope = rope_i16.to(tl.bfloat16, bitcast=True).to(tl.float32)
++    val = tl.where(is_nope, nope, rope)
++    val = tl.where(ok, val, 0.0)
++    tl.store(out + r.to(tl.int64) * HEAD + lane, val.to(tl.bfloat16))
++
++
++def dequant_gather(
++    cache: torch.Tensor, src_slots: torch.Tensor, out: torch.Tensor
++) -> torch.Tensor:
++    """Rows ``src_slots`` of a packed fp8 page cache ([pages, PAGE, 1, 584] view) as bf16 [n, 512]."""
++    pages, page_size = cache.shape[0], cache.shape[1]
++    assert cache.shape[-1] == BYTES_PER_TOKEN, cache.shape
++    u8 = cache.view(torch.uint8)
++    assert u8.stride(0) % 2 == 0 and u8.stride(1) == BYTES_PER_TOKEN, u8.stride()
++    flat = torch.as_strided(u8, (pages * u8.stride(0),), (1,), u8.storage_offset())
++    n = src_slots.numel()
++    if n:
++        _dequant_gather_kernel[(n,)](
++            flat, flat.view(torch.int16), u8.stride(0), src_slots, out, PAGE=page_size
++        )
++    return out
++
++
++@triton.jit
++def _csr_fill_kernel(
++    raw,
++    raw_stride,
++    raw_lens,
++    pos,
++    req,
++    cbase,
++    sbase,
++    lo,
++    indptr,
++    idx,
++    K: tl.constexpr,
++    HAS_C: tl.constexpr,
++):
++    t = tl.program_id(0)
++    p = tl.load(pos + t).to(tl.int32)
++    b = tl.load(req + t)
++    start = tl.load(indptr + t)
++    c = 0
++    if HAS_C:
++        k = tl.arange(0, K)
++        r = tl.load(raw + t.to(tl.int64) * raw_stride + k)
++        valid = (r >= 0) & (k < tl.load(raw_lens + t))
++        rank = tl.cumsum(valid.to(tl.int32), axis=0) - 1
++        tl.store(idx + start + rank, tl.load(cbase + b) + r, mask=valid)
++        c = tl.sum(valid.to(tl.int32), axis=0)
++    i = tl.arange(0, SWA_WINDOW)
++    n_swa = tl.minimum(p + 1, SWA_WINDOW)
++    first = tl.load(sbase + b) + (p - n_swa + 1 - tl.load(lo + b))
++    tl.store(idx + start + c + i, first + i, mask=i < n_swa)
++
++
++class OpusPrefillRows:
++    """Layer-invariant workspace plan for one forward (built once, reused by every layer)."""
++
++    def __init__(
++        self,
++        *,
++        req_to_token: torch.Tensor,
++        full_to_swa: torch.Tensor,
++        req_pool_indices: torch.Tensor,
++        seq_lens_cpu: List[int],
++        extend_lens_cpu: List[int],
++        positions: torch.Tensor,
++    ):
++        dev = positions.device
++        self.seq_lens_cpu, self.extend_lens_cpu = seq_lens_cpu, extend_lens_cpu
++        self.req_pool_indices = req_pool_indices.to(torch.int64)
++        self.req_to_token, self.dev = req_to_token, dev
++        self.positions = positions
++        self.num_tokens = sum(extend_lens_cpu)
++        b = len(seq_lens_cpu)
++        self.req_of_token = torch.repeat_interleave(
++            torch.arange(b, device=dev, dtype=torch.int32),
++            torch.tensor(extend_lens_cpu, device=dev),
++        )
++        # SWA rows: positions [lo_b, L_b)
++        lo = [max(L - E - (int(SWA_WINDOW) - 1), 0) for L, E in zip(seq_lens_cpu, extend_lens_cpu)]
++        swa_counts = [L - l for L, l in zip(seq_lens_cpu, lo)]
++        self.swa_rows = sum(swa_counts)
++        self._swa_lo = lo
++        self._swa_counts = swa_counts
++        rows = self._rows_of(lo, swa_counts)  # (req_row, position) pairs
++        tok = req_to_token[rows[0], rows[1]].to(torch.int64)
++        self.swa_src = full_to_swa[tok].to(torch.int32)
++        self.lo = torch.tensor(lo, device=dev, dtype=torch.int32)
++        self.n_swa = torch.clamp(positions.to(torch.int32) + 1, max=int(SWA_WINDOW))
++        self.no_extend_idx = torch.empty(0, dtype=torch.int32, device=dev)
++        self.no_extend_indptr = torch.zeros(self.num_tokens + 1, dtype=torch.int32, device=dev)
++        self._comp = {}
++        self._sbase = {}
++
++    def _rows_of(self, starts: List[int], counts: List[int]):
++        counts_t = torch.tensor(counts, device=self.dev, dtype=torch.int64)
++        req_rows = torch.repeat_interleave(self.req_pool_indices, counts_t)
++        seg = torch.tensor(
++            [0, *itertools.accumulate(counts)][:-1], device=self.dev, dtype=torch.int64
++        )
++        j = torch.arange(int(sum(counts)), device=self.dev) - torch.repeat_interleave(
++            seg, counts_t
++        )
++        return req_rows, j + torch.repeat_interleave(
++            torch.tensor(starts, device=self.dev, dtype=torch.int64), counts_t
++        )
++
++    def compressed(self, ratio: int) -> Tuple[torch.Tensor, int, torch.Tensor]:
++        """(src slots, row count, per-request base) of the ratio-R compressed rows."""
++        if ratio not in self._comp:
++            lc = [L // ratio for L in self.seq_lens_cpu]
++            req_rows, j = self._rows_of([0] * len(lc), lc)
++            src = (self.req_to_token[req_rows, j * ratio].to(torch.int64) // ratio).to(
++                torch.int32
++            )
++            cbase = torch.tensor(
++                [0, *itertools.accumulate(lc)][:-1], device=self.dev, dtype=torch.int32
++            )
++            self._comp[ratio] = (src, sum(lc), cbase)
++        return self._comp[ratio]
++
++    def rows(self, ratio: int) -> int:
++        return (self.compressed(ratio)[1] if ratio else 0) + self.swa_rows
++
++    def swa_base(self, ratio: int) -> torch.Tensor:
++        """Per-request first SWA row, after the ratio's compressed rows."""
++        if ratio not in self._sbase:
++            c_rows = self.compressed(ratio)[1] if ratio else 0
++            starts = [0, *itertools.accumulate(self._swa_counts)][:-1]
++            self._sbase[ratio] = torch.tensor(
++                [c_rows + x for x in starts], device=self.dev, dtype=torch.int32
++            )
++        return self._sbase[ratio]
++
++
++def opus_sparse_prefill(
++    plan: OpusPrefillRows,
++    *,
++    q: torch.Tensor,
++    ratio: int,
++    swa_cache: torch.Tensor,
++    extra_cache: Optional[torch.Tensor],
++    raw_indices: Optional[torch.Tensor],
++    raw_lens: Optional[torch.Tensor],
++    attn_sink: torch.Tensor,
++    softmax_scale: float,
++    inv_rope=None,
++    check: bool = False,
++) -> torch.Tensor:
++    """q [T, H, 512] bf16 -> out [T, H, 512] bf16 for one layer."""
++    from sglang.srt.layers.attention.hip_flash_mla import _apply_inverse_rope
++
++    opus = get_opus()
++    T = q.shape[0]
++    dev = q.device
++    has_c = ratio > 0
++    if has_c:
++        c_src, c_rows, cbase = plan.compressed(ratio)
++    else:
++        c_src, c_rows, cbase = None, 0, torch.zeros_like(plan.lo)
++    ws = torch.empty((c_rows + plan.swa_rows, int(HEAD)), dtype=torch.bfloat16, device=dev)
++    if has_c:
++        dequant_gather(extra_cache, c_src, ws[:c_rows])
++    dequant_gather(swa_cache, plan.swa_src, ws[c_rows:])
++    sbase = plan.swa_base(ratio)
++    n_swa = plan.n_swa
++    if has_c:
++        k = torch.arange(raw_indices.shape[1], device=dev)
++        n_c = ((raw_indices >= 0) & (k < raw_lens.unsqueeze(1))).sum(1, dtype=torch.int32)
++        counts = n_c + n_swa
++    else:
++        counts = n_swa
++    indptr = torch.zeros(T + 1, dtype=torch.int32, device=dev)
++    torch.cumsum(counts, 0, out=indptr[1:])
++    # upper bound instead of reading indptr[-1]: avoids a host sync per layer; OPUS reads only via indptr
++    k_max = raw_indices.shape[1] if has_c else 0
++    idx = torch.empty(T * (k_max + int(SWA_WINDOW)), dtype=torch.int32, device=dev)
++    _csr_fill_kernel[(T,)](
++        raw_indices if has_c else idx,
++        raw_indices.stride(0) if has_c else 0,
++        raw_lens if has_c else counts,
++        plan.positions,
++        plan.req_of_token,
++        cbase,
++        sbase,
++        plan.lo,
++        indptr,
++        idx,
++        K=raw_indices.shape[1] if has_c else 512,
++        HAS_C=has_c,
++    )
++    if check:
++        used = idx[: int(indptr[-1])]
++        assert int(used.min()) >= 0 and int(used.max()) < ws.shape[0], (
++            int(used.min()),
++            int(used.max()),
++            ws.shape,
++        )
++    out = opus(
++        q.contiguous(),
++        ws,
++        idx,
++        indptr,
++        ws[:1],
++        plan.no_extend_idx,
++        plan.no_extend_indptr,
++        attn_sink.float(),
++        softmax_scale,
++    )
++    if inv_rope is not None:
++        _apply_inverse_rope(out, inv_rope)
++    return out
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+index ad8b7bc096..b52dd3dea4 100644
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -1544,6 +1544,15 @@ class Envs:
+     SGLANG_DSV41_TORCH_PREFILL_INDEXER = EnvBool(False)
+     SGLANG_FP8_PAGED_MQA_LOGITS_TORCH = EnvBool(False)
+     SGLANG_OPT_FLASHMLA_SPARSE_PREFILL = EnvBool(True)
++    # gfx950 DeepSeek-V4.1 extend: attend through aiter's OPUS sparse-prefill kernel over a
++    # request-local bf16 workspace instead of the pa_decode_sparse decode kernel.
++    SGLANG_OPT_DSV41_OPUS_PREFILL = EnvBool(False)
++    # Measured crossover on MI355X TP4: slower below ~2k query tokens (fixed gather cost).
++    SGLANG_OPT_DSV41_OPUS_PREFILL_MIN_TOKENS = EnvInt(2048)
++    # Arbitrary cap on bf16 workspace rows (1 KB each); larger batches keep the decode kernel.
++    SGLANG_OPT_DSV41_OPUS_PREFILL_MAX_WS_ROWS = EnvInt(524288)
++    # Host-sync bounds check of every OPUS row index (OPUS itself reads unchecked).
++    SGLANG_DEBUG_DSV41_OPUS_PREFILL_CHECK = EnvBool(False)
+ 
+     # cache, GEMM, and distributed
+     SGLANG_OPT_FP8_WO_A_GEMM = EnvBool(True)
+diff --git a/python/sglang/srt/layers/attention/deepseek_v4_backend_hip_radix.py b/python/sglang/srt/layers/attention/deepseek_v4_backend_hip_radix.py
+index 80929cca39..46cc4f5cde 100644
+--- a/python/sglang/srt/layers/attention/deepseek_v4_backend_hip_radix.py
++++ b/python/sglang/srt/layers/attention/deepseek_v4_backend_hip_radix.py
+@@ -42,6 +42,11 @@ from sglang.kernels.ops.attention.dsv4.decode_attention_sm100 import (
+     swapab_attention,
+ )
+ from sglang.kernels.ops.attention.dsv4.kv_layout import KVLayout
++from sglang.kernels.ops.attention.dsv4.opus_prefill_hip import (
++    OpusPrefillRows,
++    get_opus,
++    opus_sparse_prefill,
++)
+ from sglang.kernels.ops.attention.dsv4.metadata_kernel import (
+     init_compression_metadata as _init_compression_metadata_triton,
+ )
+@@ -869,6 +874,9 @@ class DeepseekV4HipRadixBackend(
+         # the model switches onto it after the last kv_source layer (enter_late_layer_tail)
+         self.tail_forward_metadata: Optional[DSV4Metadata] = None
+         self.encoder_replay = False
++        # built by the first eligible layer of a forward (layer ids restart), reused by the rest
++        self._opus_rows: Optional[OpusPrefillRows] = None
++        self._opus_last_layer_id = -1
+         self.topk = get_spec().speculative_eagle_topk or 0
+         assert self.topk in [0, 1], "MTP Topk > 1 not supported for DeepSeek V4"
+         self.mtp_enabled = self.topk > 0
+@@ -2753,6 +2761,101 @@ class DeepseekV4HipRadixBackend(
+             cache_k=swa_k,
+         )
+ 
++    def _opus_prefill_eligible(
++        self,
++        *,
++        q: torch.Tensor,
++        forward_batch: ForwardBatch,
++        compress_ratio: int,
++        swa_k_cache: torch.Tensor,
++        extra_k_cache: Optional[torch.Tensor],
++    ) -> bool:
++        if not envs.SGLANG_OPT_DSV41_OPUS_PREFILL.get():
++            return False
++        num_tokens = q.shape[0]
++        packed = KVLayout.V4.bytes_per_token
++        return (
++            forward_batch.forward_mode == ForwardMode.EXTEND
++            and compress_ratio in (0, 1, 2)
++            and bool(self.forward_metadata.core_attn_metadata.low_ratios)
++            and num_tokens >= envs.SGLANG_OPT_DSV41_OPUS_PREFILL_MIN_TOKENS.get()
++            and forward_batch.extend_seq_lens_cpu is not None
++            and num_tokens == sum(forward_batch.extend_seq_lens_cpu)
++            and num_tokens == forward_batch.positions.shape[0]
++            and q.dtype == torch.bfloat16
++            and q.shape[-1] == 512
++            and swa_k_cache.shape[-1] == packed
++            and (extra_k_cache is None or extra_k_cache.shape[-1] == packed)
++            and not is_cp_active(forward_batch)
++            and not self.enable_decoder_swa_bounded_replay
++            and not self.encoder_replay
++            and self.forward_metadata.late_layer_tail is None
++            and not torch.cuda.is_current_stream_capturing()
++            and is_gfx95_supported()
++            and get_opus() is not None
++        )
++
++    def _opus_prefill(
++        self,
++        *,
++        q: torch.Tensor,
++        layer: RadixAttention,
++        forward_batch: ForwardBatch,
++        compress_ratio: int,
++        swa_k_cache: torch.Tensor,
++        extra_k_cache: Optional[torch.Tensor],
++        extra_topk_lengths: Optional[torch.Tensor],
++        attn_sink: torch.Tensor,
++        inv_rope: Optional[Tuple[torch.Tensor, torch.Tensor]],
++    ) -> Optional[torch.Tensor]:
++        """OPUS sparse prefill for a plain V4.1 extend batch; None keeps the decode-kernel path."""
++        if not self._opus_prefill_eligible(
++            q=q,
++            forward_batch=forward_batch,
++            compress_ratio=compress_ratio,
++            swa_k_cache=swa_k_cache,
++            extra_k_cache=extra_k_cache,
++        ):
++            return None
++        num_tokens = q.shape[0]
++        raw = raw_lens = None
++        if compress_ratio:
++            raw = self.forward_metadata.core_attn_metadata.sparse_raw_indices(
++                compress_ratio
++            )
++            if raw is None or raw.shape[1] != 512 or extra_topk_lengths is None:
++                return None
++            raw = raw[:num_tokens]
++            raw_lens = extra_topk_lengths.reshape(-1)[:num_tokens].to(torch.int32)
++        if self._opus_rows is None:
++            logger.info("DSV4.1 extend attention: using aiter OPUS sparse prefill")
++        if self._opus_rows is None or layer.layer_id <= self._opus_last_layer_id:
++            self._opus_rows = OpusPrefillRows(
++                req_to_token=self.req_to_token,
++                full_to_swa=self.token_to_kv_pool.full_to_swa_index_mapping,
++                req_pool_indices=forward_batch.req_pool_indices,
++                seq_lens_cpu=[int(x) for x in forward_batch.seq_lens_cpu],
++                extend_lens_cpu=[int(x) for x in forward_batch.extend_seq_lens_cpu],
++                positions=forward_batch.positions,
++            )
++        self._opus_last_layer_id = layer.layer_id
++        plan = self._opus_rows
++        if plan.rows(compress_ratio) > envs.SGLANG_OPT_DSV41_OPUS_PREFILL_MAX_WS_ROWS.get():
++            return None
++        return opus_sparse_prefill(
++            plan,
++            q=q.reshape(num_tokens, q.shape[-2], q.shape[-1]),
++            ratio=compress_ratio,
++            swa_cache=swa_k_cache,
++            extra_cache=extra_k_cache,
++            raw_indices=raw,
++            raw_lens=raw_lens,
++            attn_sink=attn_sink,
++            softmax_scale=self.softmax_scale,
++            inv_rope=inv_rope,
++            check=envs.SGLANG_DEBUG_DSV41_OPUS_PREFILL_CHECK.get(),
++        )
++
+     def _forward_attention(
+         self,
+         q: torch.Tensor,
+@@ -2903,6 +3006,19 @@ class DeepseekV4HipRadixBackend(
+                     inv_rope=inv_rope,
+                 )
+             if backend == "aiter_sparse":
++                o = self._opus_prefill(
++                    q=q,
++                    layer=layer,
++                    forward_batch=forward_batch,
++                    compress_ratio=compress_ratio,
++                    swa_k_cache=swa_k_cache,
++                    extra_k_cache=extra_k_cache,
++                    extra_topk_lengths=extra_topk_lengths,
++                    attn_sink=attn_sink,
++                    inv_rope=inv_rope,
++                )
++                if o is not None:
++                    return o
+                 swa_page_indices, extra_indices = _fold_lengths_for_aiter_sparse(
+                     core_attn_metadata,
+                     compress_ratio,
+diff --git a/test/registered/kernels/ops/attention/dsv4/test_hip_opus_prefill.py b/test/registered/kernels/ops/attention/dsv4/test_hip_opus_prefill.py
+new file mode 100644
+index 0000000000..373f801e70
+--- /dev/null
++++ b/test/registered/kernels/ops/attention/dsv4/test_hip_opus_prefill.py
+@@ -0,0 +1,152 @@
++"""The OPUS sparse-prefill path must match the served aiter_sparse decode kernel on the packed fp8 KV:
++same keys (exact bf16 dequant into a request-local workspace), same top-k and SWA sets, per compress ratio."""
++
++import unittest
++
++import torch
++
++from sglang.srt.utils import is_gfx95_supported, is_hip
++from sglang.test.ci.ci_register import register_amd_ci
++from sglang.test.test_utils import CustomTestCase
++
++register_amd_ci(est_time=60, suite="stage-b-kernel-test-1-gpu-amd-mi35x")
++
++NOPE, ROPE, D = 448, 64, 512
++PAGE = 256
++BYTES = 584
++H = 16
++SCALE = D**-0.5
++TOPK, SWA = 512, 128
++
++
++def _pack_cache(slots, device, gen):
++    """Random keys in the packed fp8 page layout [num_blocks, PAGE, 1, 584] (see test_hip_flash_mla_aiter_sparse)."""
++    num_blocks = (slots + PAGE - 1) // PAGE
++    slots = num_blocks * PAGE
++    k = torch.randn(slots, D, generator=gen) * 0.5
++    nope = k[:, :NOPE].reshape(slots, NOPE // 64, 64)
++    amax = nope.abs().amax(-1, keepdim=True).clamp(min=1e-6)
++    exp = torch.ceil(torch.log2(amax / 448.0)).clamp(min=-127, max=127)
++    nope_fp8 = (nope / torch.pow(2.0, exp)).to(torch.float8_e4m3fn)
++    rope = k[:, NOPE:].to(torch.bfloat16)
++    raw = torch.zeros(num_blocks, PAGE * BYTES, dtype=torch.uint8)
++    data = raw[:, : PAGE * 576].view(num_blocks, PAGE, 576)
++    data[:, :, :NOPE] = nope_fp8.view(torch.uint8).reshape(num_blocks, PAGE, NOPE)
++    data[:, :, NOPE:] = rope.view(torch.uint8).reshape(num_blocks, PAGE, 2 * ROPE)
++    scales = raw[:, PAGE * 576 :].view(num_blocks, PAGE, 8)
++    scales[:, :, :7] = (exp.reshape(num_blocks, PAGE, 7) + 127).to(torch.uint8)
++    deq = torch.cat(
++        [(nope_fp8.float() * torch.pow(2.0, exp)).reshape(slots, NOPE), rope.float()], 1
++    )
++    return raw.view(num_blocks, PAGE, 1, BYTES).view(torch.float8_e4m3fn).to(device), deq
++
++
++def _case(ratio, reqs, dev, seed=0):
++    """reqs = [(prefix, extend)]; shuffled req_to_token, SWA mapping, compressed pool and per-token index sets
++    in both forms: global slots (served path) and request-local raw positions (OPUS path)."""
++    gen = torch.Generator().manual_seed(seed)
++    n_full = 32768
++    max_len = max(p + e for p, e in reqs)
++    perm = torch.randperm(n_full, generator=gen)
++    req_to_token = torch.zeros(len(reqs) + 1, max_len, dtype=torch.int32)
++    for b, (p, e) in enumerate(reqs):
++        req_to_token[b + 1, : p + e] = perm[b * max_len : b * max_len + p + e].to(torch.int32)
++    full_to_swa = torch.randperm(n_full, generator=gen).to(torch.int32)
++    swa_cache, swa_deq = _pack_cache(n_full, dev, gen)
++    c_cache, c_deq = _pack_cache(n_full // max(ratio, 1) + 1, dev, gen)
++    req_pool = torch.arange(1, len(reqs) + 1)
++    positions, swa_idx, raw, c_idx, raw_lens = [], [], [], [], []
++    for b, (p, e) in enumerate(reqs):
++        for pos in range(p, p + e):
++            positions.append(pos)
++            n_swa = min(pos + 1, SWA)
++            s = [int(full_to_swa[req_to_token[b + 1, pos - i]]) for i in range(n_swa)]
++            swa_idx.append(s + [-1] * (SWA - n_swa))
++            if ratio:
++                lc = (pos + 1) // ratio
++                n = min(lc, TOPK)
++                j = torch.sort(torch.randperm(lc, generator=gen)[:n]).values.tolist() if lc else []
++                raw.append(j + [-1] * (TOPK - n))
++                c_idx.append([int(req_to_token[b + 1, x * ratio]) // ratio for x in j] + [-1] * (TOPK - n))
++                raw_lens.append(max(n, 1))
++    t = lambda x: torch.tensor(x, dtype=torch.int32, device=dev)  # noqa: E731
++    T = len(positions)
++    return dict(
++        req_to_token=req_to_token.to(dev),
++        full_to_swa=full_to_swa.to(dev),
++        req_pool=req_pool.to(dev),
++        seq_lens=[p + e for p, e in reqs],
++        ext_lens=[e for _, e in reqs],
++        positions=torch.tensor(positions, dtype=torch.int64, device=dev),
++        swa_cache=swa_cache,
++        c_cache=c_cache if ratio else None,
++        swa_idx=t(swa_idx).view(T, 1, SWA),
++        raw=t(raw) if ratio else None,
++        c_idx=t(c_idx).view(T, 1, TOPK) if ratio else None,
++        raw_lens=t(raw_lens) if ratio else None,
++        q=(torch.randn(T, H, D, generator=gen) * 0.5).to(torch.bfloat16).to(dev),
++        sink=(torch.randn(H, generator=gen) * 0.5).to(dev),
++    )
++
++
++@unittest.skipIf(not (is_hip() and is_gfx95_supported()), "gfx950 only")
++class TestOpusPrefill(CustomTestCase):
++    REQS = [(0, 1024), (300, 700), (5000, 1500)]
++
++    def _run(self, ratio):
++        from sglang.kernels.ops.attention.dsv4.opus_prefill_hip import (
++            OpusPrefillRows,
++            opus_sparse_prefill,
++        )
++        from sglang.srt.layers.attention.hip_flash_mla import aiter_sparse_decode_fwd
++
++        c = _case(ratio, self.REQS, torch.device("cuda"))
++        ref, _ = aiter_sparse_decode_fwd(
++            c["q"].unsqueeze(1),
++            c["swa_cache"],
++            c["swa_idx"],
++            c["sink"],
++            SCALE,
++            extra_k_cache=c["c_cache"],
++            extra_indices_in_kvcache=c["c_idx"],
++        )
++        plan = OpusPrefillRows(
++            req_to_token=c["req_to_token"],
++            full_to_swa=c["full_to_swa"],
++            req_pool_indices=c["req_pool"],
++            seq_lens_cpu=c["seq_lens"],
++            extend_lens_cpu=c["ext_lens"],
++            positions=c["positions"],
++        )
++        out = opus_sparse_prefill(
++            plan,
++            q=c["q"],
++            ratio=ratio,
++            swa_cache=c["swa_cache"],
++            extra_cache=c["c_cache"],
++            raw_indices=c["raw"],
++            raw_lens=c["raw_lens"],
++            attn_sink=c["sink"],
++            softmax_scale=SCALE,
++            check=True,
++        )
++        ref = ref.squeeze(1).float()
++        diff = (out.float() - ref).abs()
++        cos = torch.nn.functional.cosine_similarity(out.float().flatten(), ref.flatten(), dim=0)
++        print(f"ratio={ratio} T={out.shape[0]} max_abs={diff.max():.4g} mean_abs={diff.mean():.4g} cos={cos:.8f}")
++        self.assertTrue(torch.isfinite(out).all())
++        self.assertLess(float(1 - cos), 5e-5)
++        self.assertLess(float(diff.max()), 5e-2)
++
++    def test_ratio0_swa_only(self):
++        self._run(0)
++
++    def test_ratio1(self):
++        self._run(1)
++
++    def test_ratio2(self):
++        self._run(2)
++
++
++if __name__ == "__main__":
++    unittest.main()
+-- 
+2.34.1
+

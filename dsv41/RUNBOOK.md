@@ -1,25 +1,15 @@
-# RUNBOOK — DeepSeek-V4.1-Flash on 4×MI355X with SGLang (PR #39857)
+# RUNBOOK — DeepSeek-V4.1-Flash on MI355X with SGLang
 
-Reproduces the environment validated on 2026-09-24. Results for this state: GSM8K 5-shot/1319 ≈ 0.90–0.91
-(DSpark off and on); PR-method bs1 decode 147.7 tok/s (DSpark off) / 621 tok/s (DSpark on).
-Everything below is automated by `scripts/`; commands assume `D=/workspace/claude-skills/dsv41`.
+TP4 baseline (2026-09-24): GSM8K 5-shot/1319 ≈ 0.90–0.91; PR-method bs1 147.7 tok/s (DSpark off) / 621 (on).
+Best config (TP2 AgentX): last section. `D=/workspace/claude-skills/dsv41`. Old detail: doc_backup_20260929/RUNBOOK.md.
 
 ## 0. Base container
 
-| Item | Value |
-|---|---|
-| Image family | SGLang ROCm dev image, `GPU_ARCH=gfx950-rocm720` (ROCm 7.2.0, Ubuntu 22.04, Python 3.10, `/opt/venv`) |
-| torch / triton | 2.9.1+rocm7.2.0 / 3.7.0 (`TRITON_COMMIT=42270451`) |
-| aiter | editable `/sgl-workspace/aiter` @ `acf8fdf9307431ece8ee275971c41cb3d1a7020b` |
-| flydsl | 0.3.2 |
-| Hardware | 8× MI355X (gfx950); each server uses 4 GPUs |
-| Upstream alternative | `lmsysorg/sglang:dev-dsv41-mi35x` (cookbook preview image, not what we ran) |
-
-The container's global env contains values that differ from the PR. `launch_server.sh` overrides them:
-`ROCM_QUICK_REDUCE_QUANTIZATION=INT8`→`NONE` and `SGLANG_USE_ROCM700A=1`→`0`. ROCM700A only affects
-DP-attention gathers, so it has no effect at TP4 without `--enable-dp-attention`.
-Container vars kept as-is: `HIP_FORCE_DEV_KERNARG=1 HSA_NO_SCRATCH_RECLAIM=1 NCCL_MIN_NCHANNELS=112
-SGLANG_SET_CPU_AFFINITY=1 AITER_USE_SYSTEM_TRITON=1 PYTHONPATH=/sgl-workspace/mori:/sgl-workspace/aiter`.
+SGLang ROCm dev image `GPU_ARCH=gfx950-rocm720` (ROCm 7.2.0, Python 3.10, `/opt/venv`), torch 2.9.1+rocm7.2.0, triton 3.7.0,
+editable aiter `/sgl-workspace/aiter` (pinned by `setup_env.sh`: v0.1.22.post1 `b4d9154d1` + #5561), 8× MI355X.
+`launch_server.sh` overrides container env `ROCM_QUICK_REDUCE_QUANTIZATION=INT8`→`NONE` and `SGLANG_USE_ROCM700A=1`→`0`
+(DP-attention only). Kept: `HIP_FORCE_DEV_KERNARG=1 HSA_NO_SCRATCH_RECLAIM=1 NCCL_MIN_NCHANNELS=112 SGLANG_SET_CPU_AFFINITY=1
+AITER_USE_SYSTEM_TRITON=1 PYTHONPATH=/sgl-workspace/mori:/sgl-workspace/aiter`.
 
 ## 1. Setup (idempotent)
 
@@ -27,76 +17,88 @@ SGLANG_SET_CPU_AFFINITY=1 AITER_USE_SYSTEM_TRITON=1 PYTHONPATH=/sgl-workspace/mo
 bash $D/scripts/setup_env.sh        # ~5 min first time (sgl-kernel build), seconds afterwards
 ```
 
-The script does the following:
-1. Clones `kevin-mii/sglang` branch `dsv41-amd-main` to `/sgl-workspace/sglang-dsv41` if it is missing, and adds
-   the `upstream` remote. Validated HEAD: `e2e824dc58`.
-2. Checks the aiter pin and applies `patches/aiter_5561_*` and `patches/aiter_5802_*`, skipping any that are
-   already applied. Both are unmerged upstream as of 2026-09-24. Neither changed throughput. #5561 is a race
-   fix, so keep it. #5802 is unused at `BOUND=0`.
-3. Rebuilds sgl-kernel (AOT) from the branch so `deepseek_v4_topk_transform_512` has `sort_output`.
-   It builds in a `/tmp` copy and never modifies the repo. It then **replaces `site-packages/sgl_kernel` with the
-   egg's copy**, because the egg is otherwise shadowed. The original is backed up to
-   `/shared_nfs/kk/dsv41/sgl_kernel_backup_orig`.
-4. Checks that the model exists at `/shared_nfs/models/deepseek-ai/DeepSeek-V4.1-Flash`.
+1. Clones `kevin-mii/sglang` `dsv41-amd-main` to `/sgl-workspace/sglang-dsv41` (+ `upstream` remote); validated `e2e824dc58`.
+2. Checks the aiter pin, applies `patches/aiter_5561_*` (race fix; #5802 conflicts and is unused at `BOUND=0`).
+3. Rebuilds sgl-kernel (AOT, `/tmp` copy; needs `sort_output`) and **replaces `site-packages/sgl_kernel`** with the
+   egg's copy (else shadowed); original -> `/shared_nfs/kk/dsv41/sgl_kernel_backup_orig`.
+4. Checks the model: `/shared_nfs/models/deepseek-ai/DeepSeek-V4.1-Flash` (fallback `/shared_nfs/deepseek-ai/...`).
 
-We run the branch through `PYTHONPATH` (inside `launch_server.sh`). The pip-installed editable sglang
-(`/sgl-workspace/sglang`, main) is left untouched.
+The branch runs via `PYTHONPATH`; installed editable sglang (`/sgl-workspace/sglang`, main) stays untouched.
 
-## 2. Launch
+## 2. Launch (TP4)
 
 ```bash
 cd /shared_nfs/kk/dsv41
 nohup bash $D/scripts/launch_server.sh > server.log 2>&1 &                                  # DSpark off, GPU0-3 :30000
 DSPARK=1 GPUS=4,5,6,7 PORT=30001 nohup bash $D/scripts/launch_server.sh > server_dspark.log 2>&1 &
-grep -E 'ready to roll|Traceback|Error' server.log | tail -3      # ready in ~5-15 min (weights 476 GB + graphs)
+grep -E 'ready to roll|Traceback|Error' server.log | tail -3      # ~5-15 min
 ```
 
-Load-bearing settings (details in SKILL.md):
-- `AITER_BF16_FP8_MOE_BOUND=0` is **not in the cookbook**. Without it, prefill graph capture crashes with
-  `Unsupported kernel config for moe heuristic dispatch`.
-- `SGLANG_USE_AITER=1`
-- `AITER_FLYDSL_FORCE_REDUCE=1` gives deterministic output.
-- `--disable-radix-cache` and `--cuda-graph-backend-prefill breakable`.
-- FP8 KV cache and page size 256 are set automatically.
+Perf settings (`PERF=1`) need local branch `opus-prefill`; recreate it in a fresh container:
+
+```bash
+git -C /sgl-workspace/sglang-dsv41 checkout -b opus-prefill e2e824dc58 && git -C /sgl-workspace/sglang-dsv41 am -k \
+  $D/patches/sglang_local_opus_prefill_*.patch $D/patches/sglang_local_kvstore_int64_0001.patch  # int64 = #41159, needed for long context
+PERF=1 nohup bash $D/scripts/launch_server.sh > server.log 2>&1 &
+```
+
+`PERF=1` = OPUS sparse prefill (`SGLANG_OPT_DSV41_OPUS_PREFILL=1`, TTFT -10%) + `QR=INT8` (TTFT -7%, not bit-deterministic)
++ `--enable-mixed-chunk` (DSpark off only; TTFT 2273 -> 1520 ms, TPOT +6%). c32 DSpark off: 2341 out tok/s, TTFT 1520 ms.
+Bit-reproducible: no `PERF=1` or `PERF=1 QR=NONE`. Never bench with `SGLANG_DEBUG_DSV41_OPUS_PREFILL_CHECK=1` (syncs).
 
 ## 3. Validate
 
 ```bash
-TAG=check PORT=30000 bash $D/scripts/run_gsm8k.sh          # expect Accuracy >= 0.89 (spread ±1pt run-to-run)
+TAG=check PORT=30000 bash $D/scripts/run_gsm8k.sh          # expect Accuracy >= 0.89 (±1pt run-to-run)
 TAG=check PORT=30000 bash $D/scripts/run_pr_style_c1.sh    # expect ~148 (off) / ~620 on :30001 (DSpark)
 TAG=check PORT=30000 bash $D/scripts/run_throughput.sh     # full sweep -> results/perf.md
-# or everything after launch: TAG=x PORT=.. SERVER_LOG=.. SERVER_PID=.. bash $D/scripts/pipeline_eval.sh
+# or after launch: TAG=x PORT=.. SERVER_LOG=.. SERVER_PID=.. bash $D/scripts/pipeline_eval.sh
 ```
 
-Compare against the PR only with `run_pr_style_c1.sh`. The PR metric excludes TTFT and takes the median of
-6 runs. The sweep's `Output token throughput` includes TTFT and reads roughly 5–20% lower.
+Compare with the PR only via `run_pr_style_c1.sh` (no TTFT, 6-run median; sweep reads ~5–20% lower).
 
 ## 4. Stop / clean up
 
 ```bash
 ps -eo pid,comm,args | awk '$2=="python3" && /sglang.launch_server/{print $1}' | xargs -r kill
-rocm-smi --showmeminfo vram | grep Used        # wait until ~0 before relaunching
+ps -eo pid,comm | awk '$2 ~ /^sglang::/{print $1}' | xargs -r kill     # renamed scheduler/detokenizer children
+rocm-smi --showmeminfo vram | grep Used        # wait until ~0 (GPU[7] = HIP device 5 here)
 ```
 
-Never use `pkill -f`/`pgrep -f` with a pattern that also appears in your own command line.
+Never `pkill -f`/`pgrep -f` a pattern that appears in your own command line.
 
-## 5. Revert to the pristine container
+## 5. Revert
+
+sgl-kernel: copy `/shared_nfs/kk/dsv41/sgl_kernel_backup_orig/sgl_kernel` back over `/opt/venv/lib/python3.10/site-packages/sgl_kernel`.
+Pre-upgrade aiter (acf8fdf93): stash@{0} + aiter_pre_upgrade_full.diff; JIT: /sgl-workspace/aiter_jit_backup_acf8fdf93.
+Older local aiter edits: aiter_preexisting_local.diff (both in /shared_nfs/kk/dsv41/).
+
+## ATOM-port worktree (current best config)
+
+- sglang: `/sgl-workspace/sglang-rolao-opt`, branch `atomport-mxfp8-producers` (= rolao `dsv41/opt-branch` @ 026da361c0).
+- aiter: worktree `/sgl-workspace/aiter-5750` (ROCm/aiter#5750 + #5561 + local edits, CK submodule inited) with flydsl 0.3.4.1
+  in `/sgl-workspace/pydeps-flydsl-0341`, both via PYTHONPATH (global aiter untouched).
+- Tuned FMoE CSV: copy `patches/aiter_local_dsv41_tp2_sef_fp8fp4_tuned_fmoe.csv` to
+  `/sgl-workspace/aiter-5750/aiter/configs/model_configs/dsv41_tp2_sef_fp8fp4_tuned_fmoe.csv`. aiter merges
+  `aiter/configs/model_configs/*tuned_fmoe*.csv` of the aiter that is IMPORTED; restart the server after changes.
 
 ```bash
-for p in $D/patches/aiter_*.patch; do git -C /sgl-workspace/aiter apply -R "$p"; done
-SP=/opt/venv/lib/python3.10/site-packages
-rm -rf $SP/sgl_kernel && cp -a /shared_nfs/kk/dsv41/sgl_kernel_backup_orig/sgl_kernel $SP/  # or ..._backup_0.4.7
+cd /shared_nfs/kk/dsv41/agentx && PYTHONPATH=/sgl-workspace/pydeps-flydsl-0341:/sgl-workspace/aiter-5750:/sgl-workspace/mori \
+  SRC=/sgl-workspace/sglang-rolao-opt/python SGLANG_OPT_HIP_OPUS_SPARSE_PREFILL=1 \
+  EXTRA_ARGS="--fp8-gemm-backend aiter --enforce-shared-experts-fusion" SERVER_ONLY=1 OPUS=0 TP=2 EP_SIZE=1 GPUS=4,5 \
+  CONC=1 PREFILL_DECODE_INTERVAL=16 TAG=<tag> \
+  setsid nohup bash /workspace/claude-skills/dsv41/scripts/agentx_colleague_run.sh > <tag>.nohup 2>&1 < /dev/null &
 ```
 
-Local aiter also carries two edits that predate this work: `pa_mqa_logits_fp4_prefill.py` `lru_cache→cache`
-(same as the Dockerfile sed) and `csrc/cpp_itfs/torch_utils.py`. They are saved in
-`/shared_nfs/kk/dsv41/aiter_preexisting_local.diff`.
+`EVAL_ONLY=true`: GSM8K, real acceptance; drop `SERVER_ONLY`: run AgentX; series:
+`scripts/agentx_series.sh RUNS="conc:pdi ..." SCRIPT=agentx_colleague_run.sh PREFIX=...`.
 
 ## Known failure signatures
 
 | Symptom | Cause / fix |
 |---|---|
-| `Unsupported kernel config for moe heuristic dispatch` at prefill graph capture | `AITER_BF16_FP8_MOE_BOUND` is unset. Use `0`. |
-| log: `deepseek_v4_topk_transform_512 predates sort_output` | Old sgl-kernel is loaded. Rerun setup step 3 (a perf-only fallback). |
-| New sgl-kernel built but schema still old | The egg is shadowed by `site-packages/sgl_kernel`. Replace that dir. |
-| Script works interactively but not under nohup | It uses `rg`. Scripts must use `grep -E`. |
+| `Unsupported kernel config for moe heuristic dispatch` | `AITER_BF16_FP8_MOE_BOUND` unset; use `0`. |
+| `deepseek_v4_topk_transform_512 predates sort_output` | Old sgl-kernel (perf-only fallback); rerun setup step 3. |
+| New sgl-kernel built, schema still old | Egg shadowed by `site-packages/sgl_kernel`; replace it. |
+| Works interactively, not under nohup | Script uses `rg`; use `grep -E`. |
+| "Write access to a read-only page" at long context | Missing #41159 (`sglang_local_kvstore_int64_0001.patch`). |

@@ -2,6 +2,7 @@
 # Serving throughput sweep matching the PR table: ISL 4096 / OSL 1024, fixed lengths,
 # concurrency 1/8/32, two datasets: random-ids ("random tokens") and random (ShareGPT text, "real text").
 #   BACKEND=sglang|sglang-oai|vllm (use sglang-oai vs vllm for cross-engine: same /v1/completions client)
+#   RANGE=1 (fixed lengths, lock-step waves) | <1 for variable ISL/OSL (desynchronized arrivals)
 #   TAG=<name> PORT=30000 CONCS="1 8 32" DATASETS="random-ids random" PROMPTS_PER_CONC=4
 # Logs/JSONL -> /shared_nfs/kk/dsv41/perf_<TAG>/ ; rows appended to results/perf.md
 # PR reference (4xMI350X, output tok/s, DSpark off -> on): random bs1 155.73->641.88;
@@ -18,7 +19,7 @@ for ds in ${DATASETS:-random-ids random}; do for c in ${CONCS:-1 8 32}; do
   n=$(( c * K )); [ $n -lt 8 ] && n=8
   log=$OUT/${ds}_c${c}.log
   python3 -m sglang.bench_serving --backend "${BACKEND:-sglang}" --port "$PORT" --dataset-name "$ds" --dataset-path "$SHAREGPT" \
-    --random-input-len 4096 --random-output-len 1024 --random-range-ratio 1 \
+    --random-input-len 4096 --random-output-len 1024 --random-range-ratio "${RANGE:-1}" \
     --num-prompts $n --max-concurrency $c --output-file "$OUT/${ds}_c${c}.jsonl" > "$log" 2>&1
   tp=$(grep -oE 'Output token throughput \(tok/s\):\s+[0-9.]+' "$log" | grep -oE '[0-9.]+$')
   tpot=$(grep -oE 'Mean TPOT \(ms\):\s+[0-9.]+' "$log" | grep -oE '[0-9.]+$')

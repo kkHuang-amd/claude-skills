@@ -13,7 +13,7 @@ set -euo pipefail
 OUT=/shared_nfs/kk/dsv41/vllm; mkdir -p "$OUT"; TAG=${TAG:-$(date +%m%d_%H%M)}
 # never clobber a previous run: a reused TAG gets a time suffix
 [ -e "$OUT/server_${TAG}.log" ] && TAG=${TAG}_$(date +%H%M%S)
-MODEL=${MODEL:-/shared_nfs/models/deepseek-ai/DeepSeek-V4.1-Flash}
+MODEL=${MODEL:-$( [ -d /shared_nfs/models/deepseek-ai/DeepSeek-V4.1-Flash ] && echo /shared_nfs/models/deepseek-ai/DeepSeek-V4.1-Flash || echo /shared_nfs/deepseek-ai/DeepSeek-V4.1-Flash)}
 { date; pip list 2>/dev/null | grep -iE '^(vllm|torch|triton|amd-aiter|aiter|flydsl|amdsmi) '; cat /opt/rocm/.info/version 2>/dev/null; } > "$OUT/versions.txt" || true   # ROCm10 image has no .info/version
 export HIP_VISIBLE_DEVICES=${GPUS:-4,5,6,7}
 export VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 AITER_TRITON_LOG_LEVEL=ERROR

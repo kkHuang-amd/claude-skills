@@ -19,6 +19,7 @@ ap.add_argument("--osl", type=int, default=1024)
 ap.add_argument("--conc", type=int, default=1)
 ap.add_argument("--repeat", type=int, default=3)
 ap.add_argument("--tag", default="x")
+ap.add_argument("--temperature", type=float, default=0.0)  # AgentX sends none -> server default 1.0
 ap.add_argument("--profile-dir", default="")
 ap.add_argument("--profile-steps", type=int, default=40)
 ap.add_argument("--out", default="/shared_nfs/kk/dsv41/atomport/proxy.tsv")
@@ -30,7 +31,7 @@ def one(seed, res):
     rng = random.Random(seed)
     ids = [rng.randint(1000, 100000) for _ in range(a.ctx)]
     body = {"input_ids": ids, "stream": True,
-            "sampling_params": {"max_new_tokens": a.osl, "ignore_eos": True, "temperature": 0}}
+            "sampling_params": {"max_new_tokens": a.osl, "ignore_eos": True, "temperature": a.temperature}}
     t0 = time.perf_counter(); stamps = []; ntok = []
     with requests.post(URL + "/generate", json=body, stream=True, timeout=3600) as r:
         for line in r.iter_lines():
@@ -67,7 +68,7 @@ for rep in range(a.repeat):
                 itl_all += [(st[i] - st[i - 1]) / dn] * dn
     itl_all.sort()
     p90 = itl_all[int(0.9 * (len(itl_all) - 1))]
-    line = (f"{a.tag}\tctx={a.ctx}\tconc={a.conc}\trep={rep}\tdecode_tps_per_req={statistics.mean(tps):.1f}"
+    line = (f"{a.tag}\tctx={a.ctx}\tconc={a.conc}\ttemp={a.temperature}\trep={rep}\tdecode_tps_per_req={statistics.mean(tps):.1f}"
             f"\tp90_interactivity={1/p90:.1f}\tttft_s={statistics.mean(ttft):.2f}")
     print(line, flush=True)
     with open(a.out, "a") as f:

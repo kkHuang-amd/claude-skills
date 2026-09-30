@@ -4,20 +4,150 @@ Full pre-condensation history: /shared_nfs/kk/dsv41/doc_backup_20260929/ATOM_POR
 
 ## CONTINUE HERE
 
+**c1/c2 GAP ROOT CAUSE FOUND (2026-09-29 11:40):** AgentX (aiperf agentx-mvp) sends no temperature -> SGLang
+default 1.0 -> DSpark takes the SAMPLING path even under SGLANG_SIMULATE_ACC_LEN (draft temperature sampling,
+SoftmaxTemp over draft rows, AcceptSampling; fold disabled) and then overwrites correct_len with the simulated
+value, so the sampling work is thrown away. ATOM with --spec-decode-acceptance-length: draft always greedy,
+verify = target argmax + rejection_synthetic_sample_kernel (atom/model_ops/rejection_sampler.py:214), no softmax.
+Proof, same c1 server (gap_temp_probe_c1, PID 597393, GPUs 4,5), proxy ctx 2k x3 x2: temp 0 -> 391-409 tok/s,
+proxy P90 334-347; temp 1.0 -> 340-347 tok/s, P90 291-296 (-13%; matches AgentX c1 P90 292.8). AgentX c1 server
+log: step ~10.45 ms flat over ctx 0-512k (10.42 @<64k, 10.59 @>512k) -> context length is NOT the cause; TTFT =
+12.8% of request time. Per-request intvty barely depends on ISL; only OSL<64 requests are slow (n=11).
+ATOM's real (non-synthetic) stochastic verify is also cheaper: sample target token per position + exact prefix
+match vs a greedy draft (lossless), no draft probs.
+**Next:** (a) measurement parity: under SIMULATE_ACC take the greedy draft + greedy/fold accept regardless of
+temperature (like ATOM synthetic); expect c1 P90 ~335. (b) real-traffic win: port ATOM-style stochastic verify
+(greedy draft + sampled-target prefix match), in-graph. (c) prefill share: ATOM chunk 16384 vs our 4096
+(InferenceX PR #3451 applies ATOM's fixed 16384 to the vLLM recipe). ATOM-on-node run (step 2) still to plan;
+no docker in this container -> in-place install.
+**DONE 2026-09-29 12:50 -- AgentX c1 temp 0 (aiperf --extra-inputs temperature:0, best config, PDI16):**
+TTT 11,170.2 / P90 330.7 (p50 371.7), 282 ok -- vs default-temp run 10,306.1 / 292.8: +8.4% / +12.9%; vs ATOM public
+10,820.2 / 337: +3.2% / -1.9% (inside the 5% criterion). Server step now 9.15 ms @64-256k -> 9.48 ms @>512k (+0.33 ms
+= the remaining context slope); TTFT share 14.4%. Dir gap_temp0_agentx_c1_pdi16. => c1 gap = sampling path.
+Next: implement (a) in code (SIMULATE_ACC -> greedy draft + fold accept, no client change), run the workflow, then
+c2; then (b) ATOM-style stochastic verify for real traffic; long-context slope and chunk 16384 are secondary.
+
+**(a) IMPLEMENTED, uncommitted (2026-09-29 13:10):** SGLANG_SIMULATE_ACC_GREEDY (EnvBool True, environ.py) ->
+dspark_worker_v2 sets sampling_info=None per step when SIMULATE_ACC_LEN>0 and no grammar (greedy draft +
+AcceptGreedy; our draft fold is "greedy only", so temp 1.0 used to add an eager Markov sampling pass + SoftmaxTemp
++ AcceptSampling). Inert without SIMULATE (GSM8K/EVAL_ONLY path unchanged). Proxy c1 ctx2k, same server:
+temp 1.0 now 392-399 tok/s / P90 335-344 = temp 0 (384-399 / 334-338); before 340-347 / 291-296. Output-id
+parity is not testable under SIMULATE (temp0 vs temp0 already diverges at token 3: unverified drafts committed).
+**ATOM evidence (source @4685e3cf, not runtime-confirmed):** chat default temperature 1.0 (protocol.py:23
+DEFAULT_TEMPERATURE, no generation_config in the V4.1 dir). Draft ALWAYS greedy (deepseek_v4_dspark.py:1398
+_DSparkInner.forward_head markov argmax; V4.1 reuses it, deepseek_v41/dspark.py:549). Verify with temp>0 STILL
+samples: model_runner.py:3250 sample_verification_tokens (every target row) + bonus sampler with temperature,
+then rejection_sampler.py:214 synthetic branch uses target argmax and ignores target_token_ids. So ATOM is not
+fully greedy: it skips draft sampling / draft softmax / ratio rejection, but pays target-row sampling. Our
+SIMULATE_ACC_GREEDY skips that too -> slightly more favourable than ATOM (bs1: ~6 rows x 129k vocab sampling).
+Strict parity option: keep a temperature-sampled bonus/target draw under SIMULATE (measure its cost).
+**ATOM PATH CONFIRMED AT RUNTIME (2026-09-29 13:50):** image pulled w/o docker (scripts/atom_image_fetch.py, 35
+layers 16.9 GB -> /shared_nfs/kk/atom_image/rootfs 43 GB, 328 s), run by chroot (scripts/atom_chroot_run.sh; ATOM
+4685e3cf7, aiter e2d019f15, torch 2.10+rocm7.2.4) -- recipe TP2 server boots in ~4 min on GPUs 4,5, log shows
+"Forced speculative acceptance ON: mean acceptance length 3.5100". Probe (scripts/atom_pathprobe/, counters in
+/shared_nfs/kk/atom_run/probe_c1.jsonl), c1 ctx2k OSL1024 x3 (scripts/atom_proxy_bench.py): default temperature ->
+every verify step = rejection_synthetic + sample_verification_tokens, Sampler.forward all_greedy=False; temp 0 ->
+synthetic, no target sampling, all_greedy=True. Draft sample_next only called at graph capture (135), replayed
+graph shared by temp 0 and 1.0; no temperature reference in the draft graph/proposer -> draft greedy. ATOM decode
+tok/s: default temp 357-368, temp 0 363-370 (~1%: target sampling is cheap). ATOM proxy ~364 vs ours ~395 (proxy).
+=> STRICT VERSION implemented: draft + accept greedy, bonus temperature-sampled from ALL verify rows (same work as
+ATOM sample_verification_tokens + bonus), fallback to the full sampling path for grammar / penalties / top-p /
+top-k / min-p (dspark_verify.sample_simulated_bonus; worker passes simulate_bonus_sampling_info). Unit test
+test/registered/spec/dspark/test_dspark_simulated_bonus.py 2/2 on GPU 6. Pre-existing quirk fixed on this path:
+simulate bonus used the REAL correct_len row, now the simulated one.
+Proxy (strict, same server): temp 0 392-401 tok/s / P90 333-337; temp 1.0 379-390 / 324-333 (-2.6%; ATOM -1%).
+**simbonus c1 DONE (15:02):** TTT 10,969.6 / P90 317.5 (p50 361.7), 279 ok, 0 tracebacks; vs BEST 10,306.1 / 292.8
++6.4% / +8.4%; vs ATOM public 10,820.2 / 337 +1.4% / -5.8% (just outside 5%). Server step 9.39-9.76 ms vs 9.15-9.48
+in the temp-0 run -> our bonus sampling costs ~0.3 ms/step (~3%) vs ATOM ~1%: sample_simulated_bonus = float
+softmax + exponential_ + div + argmax over 6x129k; candidate: fused Gumbel-max on logits (no softmax) in one kernel.
+**simbonus c2 DONE (16:07):** TTT 11,253.3 / P90 292.6 (p50 358.7), 434 ok; vs BEST 10,476.9 / 279.6 +7.4% / +4.6%;
+vs ATOM 11,266.6 / 324 -0.1% / -9.7%. c2 is mostly bs=1 (server decode lines bs1 3473 vs bs2 437; bs1 median 366.8,
+bs2 619.9 tok/s, both up vs BEST 336.0 / 576.0) -> c2 P90 loss vs c1 (317.5) is likely the other lane's new-turn
+prefill interrupting decode (chunk 4096 vs ATOM 16384) -- unverified, next to attribute per request.
+**(1) DONE 16:40:** fused bonus sampling = kernels/ops/speculative/dspark/simulated_bonus.py (2-stage Gumbel-max:
+[rows x 32 vocab splits] partial max, then per-request select at correct_len; seed do_not_specialize -- a
+specialized seed recompiled every call, 1.09 ms). UT 3/3 (+bf16 full-vocab case). Microbench vs torch version:
+bs1-8 109-144 -> 29-30 us, bs64 515 -> 127 us. Proxy c1 same server: temp 1.0 384-401 vs temp 0 390-396 (~0-1%,
+ATOM ~1%).
+**(2) DONE:** scripts/agentx_prefill_overlap.py on simbonus_c2: 61/433 requests overlap the other lane's prefill;
+overlap>10% (n=43) intvty median 280 vs 362 without overlap; bottom decile 29/44 overlapped; corr -0.65;
+no-overlap subset P90 307. ATOM also pauses decode during prefill (scheduler.py:1985 mixed batch TODO; recipe
+PDI 0), but uses chunk 16384 vs our 4096 -> next experiment: --chunked-prefill-size 16384 at c2 (and c1).
+**(3) DONE:** GSM8K (scripts/run_gsm8k.sh = few_shot_gsm8k, the established metric) 0.899. NOTE: EVAL_ONLY without
+SERVER_ONLY runs InferenceX run_eval (lm-eval chat multiturn) -> 0.970, NOT comparable; artifacts moved to agentx/misc/.
+**PUSHED 5ec406bb76** on rolao/dsv41/opt-branch, rebased on teammate e5d7c72c33 (1am9trash: HIP+simulate -> greedy
+accept only; draft still samples, bonus argmax). Ours adds greedy draft + temperature-sampled bonus; compatible.
+SGLANG_SIMULATE_ACC_GREEDY=0 == e5d7c72 behaviour alone (use for A/B of the draft-side cost).
+**Step span (c1 ctx2k, TP0, 5ec406):** temp 0 1136 kernels/step, span 8.410 ms, host gap 1.382; temp 1.0 1138, 8.343,
+1.396 -> bonus sampling ~free on GPU. Profiling a never-seen sampling path hung once (JIT under profiler?); warm
+up with an unprofiled temp-1.0 request first.
+**f5ec406 c1 DONE (18:48):** TTT 11,141.9 / P90 321.5 (p50 365.9), 281 ok -> vs ATOM +3.0% / -4.6% (c1 now inside the
+5% criterion); vs unfused strict +1.6% / +1.3%. Server step 9.34-9.70 ms (temp-0 client run 9.15-9.48; ~0.15 ms left,
+could be noise). TTFT share 12.9%.
+**f5ec406 c2 DONE (19:53):** TTT 11,123.3 / P90 288.5 (p50 361.6), 427 ok; vs ATOM -1.3% / -11.0%; vs unfused strict
+-1.2% / -1.4% (noise). Overlap attribution unchanged: 60/426 overlap, overlap>10% (n=43) median 269 vs 365 no-overlap,
+bottom decile 28/43 overlapped, no-overlap subset P90 310. chunk16k run started 19:53 (server_args chunked_prefill_size=16384 confirmed).
+**f5ec406 chunk16k c2 DONE (20:59):** TTT 11,550.4 / P90 309.3 (p50 366.5), 452 ok -> vs chunk 4096 +3.8% / +7.2%;
+TTFT p50/p90 0.52/1.19 -> 0.42/0.96 s; vs ATOM 11,266.6 / 324 +2.5% / -4.5% (c2 now inside 5%). Overlap: bottom decile
+22/46 overlapped (was 28/43), median overlap 0. KV pool 29.20M -> 28.85M tokens (-1.2%). Queue done, GPUs free.
+**Status:** c1 (+3.0% / -4.6%) and c2 chunk16k (+2.5% / -4.5%) both meet the 5% P90 / TTT>=ATOM criteria.
+**SWEEP DONE (sw5ec406_c16k, 21:10-02:35 +08; rows "SWEEP" in results/agentx.md), TTT / P90 vs ATOM:**
+c1 11,087.2 / 333.4 (+2.5% / -1.1%), c2 11,494.7 / 293.2 (+2.0% / -9.5%), c8 29,157.1 / 209.7 (-0.4% / -12.6%),
+c16 53,469.1 / 135.7 (-1.0% / +6.1%). c32 PDI4 mem0.85: HIP OOM after 20 min (FAIL). c64 PDI4 mem0.85: NCCL
+watchdog BROADCAST(numel 16) timeout at 18:23:51 UTC under a 42-request / 6M-token prefill queue (FAIL, cause not
+yet known; OOM-adjacent?). c2 same config as the 309.3 run gave 293.2 -> single-run P90 spread ~5%: c2/c8 need
+repeats before concluding. chunk 16384 is not safe at c>=32 with mem 0.85 (predicted ~10 GB headroom).
+**Next (proposal):** (1) c32/c64: chunk 4096 (previous best 93,855.8/68.7, 117,189.7/39.7) or chunk 16384 with mem
+0.80; (2) c2/c8 x2 repeats to size the noise; (3) c8 P90 -12.6% = biggest gap -> prefill-overlap attribution.
+**c64 NCCL timeout = memory (2026-09-30 07:20, from sw5ec406_c16k_c64_pdi4/server.log):** both ranks' main thread
+stuck at the SAME line, fp4_indexer_hip.py:276 prepare_fp4_prefill_workspace `torch.empty(guarded_page_table)`
+(called per chunked-prefill step from deepseek_v4_backend_hip_radix._refresh_fp4_prefill_workspace, breakable prefill
+graph replay), BROADCAST seq 37727 stuck from 18:23:51 +08. KV pool NOT full (full token usage 0.12-0.14, queue 42,
+pending 6M tokens, 16384-token chunks back-to-back). Free device mem after graph capture 10.97 GB; during serving
+"free device mem 0.22 GiB" warnings. => allocator at the OOM edge (release-cached-blocks / hipFree syncs while an RCCL
+collective is in flight) -- same root as c32 OOM (270.49 GiB allocated + 11.42 GiB reserved-unused,
+0 free, 512 MiB alloc in a breakable-graph eager piece). Headroom outside mem-fraction is the constraint, not KV.
+Proposed (1): c32/c64 PDI4 chunk 16384 mem 0.80 vs chunk 4096 mem 0.85 re-baselined on 5ec406 (old 4096 numbers are 026da361).
+**(1) RUNNING (started 07:25 +08, wrapper PID 730744, /shared_nfs/kk/dsv41/agentx/run_c32c64_chunk_0930.sh):**
+A = sw5ec406_c16k_m080_c{32,64}_pdi4 (chunk 16384, mem 0.80; confirmed in server_args; post-capture free 25.96 GB
+vs 10.97 at 0.85), then B = sw5ec406_c4k_c{32,64}_pdi4 (chunk 4096, mem 0.85 re-baseline on 5ec406). VRAM every 30 s ->
+vram_c32c64_0930.log. ETA ~11:55 +08. Decision: A both OK and TTT >= B-1% and P90 not worse -> 16384 at c32/c64,
+else per-concurrency chunk (16384 at c<=16, 4096 at c>=32). (2) c2/c8 repeats: ON HOLD by user until (1) is read.
+**(3) DONE c8 prefill-overlap (sw5ec406_c16k_c8_pdi16; script extended: in-flight load, agent_depth split, wall-time
+share by in-flight count; also fixed a bin bug that dropped overlap_frac>1.01):** in-flight during decode p50 2.55,
+p90 4.36, max 7.56; wall share by in-flight count 0:0.17 1:0.33 2:0.26 3:0.14 4:0.07 5:0.02, >8: 0.00 -> subagents
+did NOT push beyond 8 in this run; c8 is mostly 1-3 in flight. Prefill is the driver: 592/1346 requests have >10% of
+their decode window overlapping another prefill (med 255.5 vs 311.3 no-overlap); bottom decile 130/135 overlapped
+(median overlap 0.586); corr(intvty, inflight) 0.005 -> load itself is not the cause. No-overlap subset P90 262.4 vs
+all 209.7 (ATOM 240). Prefill-busy wall share 16.8% (c2: 7.3%). depth>0 (subagents) p10 199.7 vs depth 0 237.9.
+Mechanism: PDI 16 = 16 decode steps (~0.16 s) per prefill chunk; a full 16384 chunk takes ~0.81 s median (p10 tput
+5.1k tok/s -> ~3.2 s at long ctx) -> other lanes get ~5-16% decode duty during a big prefill. Only 249 full chunks
+(most prefills are radix hits, new-tok p50 1971; 7.9M new tokens total) -> the tail comes from a few big uncached prefills.
+Candidates (not run): time-based interleave (guarantee decode N ms per prefill chunk instead of N steps), PDI 32 at c8
+(earlier +6.5% P90, TTFT +20%), mixed chunk; ATOM c8 run on chroot to measure ATOM's decode duty during prefill (user: not now).
+Note 16:44-16:57: agent shell tool hung (no new process could start); machine fine (252/3023 GB used, no
+OOM/hung-task in dmesg); resolved by itself. chroot bind mounts under atom_image/rootfs unmounted 09-30 07:02 (atom_chroot_run.sh remounts on use).
+
 **Status (2026-09-29):** best config pushed = rolao/dsv41/opt-branch **026da361c0** (T2 + requant fix + draft
 metadata in graph) + `--enforce-shared-experts-fusion` + local tuned FMoE CSV. Best sweep done (below).
 Remaining gap to ATOM = low-concurrency P90 (c1/c2/c8 -13/-14/-17%).
-**RUNNING (started 2026-09-29 07:49 +08):** PDI sweep RUNS "8:32 8:4 2:32 2:4 1:4", PREFIX atomport_best_pdi,
-chain PID 554036, ETA ~13:15 +08, progress `tail -3 /shared_nfs/kk/dsv41/agentx/series.txt`.
+**RUNNING:** PDI sweep PREFIX atomport_best_pdi, reduced by user to c8 PDI32/4 + c2 PDI32 (c2 PDI4, c1 PDI4
+cancelled). c2 PDI32 = PID 575737 (orphaned point subshell; series loop killed, so no END line in series.txt),
+ETA ~11:10 +08; result in /shared_nfs/kk/dsv41/agentx/atomport_best_pdi_c2_pdi32/.
 Done so far: c8 PDI32 28,643.3 / P90 212.3 (vs PDI16 +0.3% / +6.5%; TTFT p50 0.45 -> 0.54 s, p90 1.42 -> 1.78 s;
-vs ATOM -2.1% / -11.5%).
+vs ATOM -2.1% / -11.5%); c8 PDI4 28,586.2 / 200.0 (+0.1% / +0.4%; TTFT p50 0.39 s, p90 1.17 s); c2 PDI32 10,421.0 / 282.0
+(-0.5% / +0.9% = noise). PDI sweep DONE: larger PDI helps P90 only at c8; c2 unaffected.
 **Env reproducibility (2026-09-29):** scripts/setup_atomport_env.sh rebuilds this env in a fresh container
-(RUNBOOK "ATOM-port worktree"); a copy in /sgl-workspace/verify_ap is file-identical. QUEUED: server + GSM8K
-from that copy after the PDI sweep (scripts/verify_atomport_env_server.sh, PID 573852,
-/shared_nfs/kk/dsv41/atomport/verify_env/summary.txt).
-**Next:** finish PDI sweep -> if larger PDI keeps helping P90, try c8/c2 PDI 64; then capture an ATOM trace under
-AgentX-like load (c1/c8) and compare step-by-step with ours (the proxy host gap is only ~0.85 ms/step, so most of
-the AgentX c1 gap is NOT host gap).
+(RUNBOOK "ATOM-port worktree"); a copy in /sgl-workspace/verify_ap is file-identical. Server from that copy (EVAL_ONLY CONC=32, GPUs 4,5): ready in
+380 s incl. first JIT build, aiter imported from the copy, 0 untuned 385/129 warnings, GSM8K 0.895 (1 run; live env
+0.901-0.908) -> reproducible (scripts/verify_atomport_env_server.sh, /shared_nfs/kk/dsv41/atomport/verify_env/summary.txt).
+**Next (new session, user 2026-09-29):** attribute the c1/c2 gap to ATOM (P90 292.8 vs 337, 279.6 vs 324; TTT
+-4.8% / -7.0%). Known: PDI is irrelevant at c1/c2; proxy c1 (ctx 2k) P90 ~336 but AgentX c1 P90 292.8 -> the loss is
+AgentX-specific (long/growing contexts, radix hits, prefill of new turns, real traffic mix), not the fixed per-step
+cost; proxy host gap only ~0.85 ms/step. Plan: (1) from our AgentX c1 server log/metrics, decode step time vs context
+length and TTFT/prefill share; proxy at AgentX-like contexts; (2) run ATOM c1/c2 AgentX on this node (image
+rocm/atom-dev nightly, see NOTES 2026-09-27 and the sglang-prefill-coalescer skill for the in-place gotchas) with
+the same trace + GPU-only profile, compare per step; (3) port the largest measured difference.
 **Files:** tree `/sgl-workspace/sglang-rolao-opt` (branch atomport-mxfp8-producers, tracks rolao/dsv41/opt-branch;
 worktree also holds the uncommitted SGLANG_HIP_SPEC_EVENT_WAIT experiment in managers/overlap_utils.py -- do not ship),
 aiter `/sgl-workspace/aiter-5750` (+ untracked `aiter/configs/model_configs/dsv41_tp2_sef_fp8fp4_tuned_fmoe.csv`,

@@ -96,7 +96,8 @@ It creates (all via PYTHONPATH; the image's editable sglang/aiter and global fly
 Knobs are `AP_*` (the image exports `AITER_COMMIT`, so unprefixed names collide), e.g. build a second copy:
 `AP_SGL_DIR=... AP_BRANCH= AP_AITER_DIR=... AP_FLYDSL_DIR=...`. First server start JIT-builds the aiter-5750 modules.
 Verified 2026-09-29: a copy built this way is file-identical to the live env (except the uncommitted
-SGLANG_HIP_SPEC_EVENT_WAIT experiment in overlap_utils.py, which is intentionally not reproduced).
+SGLANG_HIP_SPEC_EVENT_WAIT experiment in overlap_utils.py, which is intentionally not reproduced); a server from that copy
+was ready in 380 s (first JIT build included) and scored GSM8K 0.895 (scripts/verify_atomport_env_server.sh).
 
 ```bash
 cd /shared_nfs/kk/dsv41/agentx && PYTHONPATH=/sgl-workspace/pydeps-flydsl-0341:/sgl-workspace/aiter-5750:/sgl-workspace/mori \

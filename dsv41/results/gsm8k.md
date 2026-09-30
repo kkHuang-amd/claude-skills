@@ -45,3 +45,5 @@
 | 2026-09-28 | atomport_draftraw_eval_r1 | 1319 | 5 | 0.903 | 0.000 | 46.367 s | /shared_nfs/kk/dsv41/gsm8k_atomport_draftraw_eval_r1.log |
 | 2026-09-28 | atomport_draftraw_eval_r2 | 1319 | 5 | 0.908 | 0.000 | 44.627 s | /shared_nfs/kk/dsv41/gsm8k_atomport_draftraw_eval_r2.log |
 | 2026-09-28 | atomport_draftraw_eval_r3 | 1319 | 5 | 0.901 | 0.000 | 44.621 s | /shared_nfs/kk/dsv41/gsm8k_atomport_draftraw_eval_r3.log |
+| 2026-09-29 | verify_atomport_env | 1319 | 5 | 0.895 | 0.000 | 46.538 s | /shared_nfs/kk/dsv41/gsm8k_verify_atomport_env.log |
+| 2026-09-29 | simbonus_fused | 1319 | 5 | 0.899 | 0.000 | 46.335 s | /shared_nfs/kk/dsv41/gsm8k_simbonus_fused.log |

@@ -84,6 +84,8 @@ bash $D/scripts/setup_atomport_env.sh              # idempotent; VERIFY_ONLY=1 =
 It creates (all via PYTHONPATH; the image's editable sglang/aiter and global flydsl 0.3.2 stay untouched):
 - sglang `/sgl-workspace/sglang-rolao-opt`: worktree of sglang-dsv41 + remote `rolao` (RolaoDenthu/sglang), branch
   `atomport-mxfp8-producers` @ `026da361c0` (= pushed `dsv41/opt-branch`).
+- sglang patch `patches/sglang_local_engram_host_devptr_0001.patch` applied to that worktree (engram host table must use the
+  device VA; without it TP2 faults at prefill graph capture on nodes where `scripts/hostreg_devptr_check.py` says same=False).
 - aiter `/sgl-workspace/aiter-5750`: worktree of `/sgl-workspace/aiter` at ROCm/aiter PR #5750 head `1053c79bb`, CK submodule,
   `patches/aiter_local_5750_worktree_0001.patch` (#5561 + MoE-tuner GPU data gen + 2 local fixes), tuned FMoE CSV
   `patches/aiter_local_dsv41_tp2_sef_fp8fp4_tuned_fmoe.csv` -> `aiter/configs/model_configs/`. aiter merges the
@@ -116,3 +118,4 @@ cd /shared_nfs/kk/dsv41/agentx && PYTHONPATH=/sgl-workspace/pydeps-flydsl-0341:/
 | New sgl-kernel built, schema still old | Egg shadowed by `site-packages/sgl_kernel`; replace it. |
 | Works interactively, not under nohup | Script uses `rg`; use `grep -E`. |
 | "Write access to a read-only page" at long context | Missing #41159 (`sglang_local_kvstore_int64_0001.patch`). |
+| TP2 `Memory access fault` at prefill graph capture (4096), both ranks, dmesg PERMISSION_FAULTS on unmapped VA | Engram host VA passed to engram_gather; apply `sglang_local_engram_host_devptr_0001.patch`. Check node: `scripts/hostreg_devptr_check.py`. |

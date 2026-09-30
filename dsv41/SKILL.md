@@ -25,11 +25,18 @@ c16 51,219.5/137.8, c32 PDI16 90,876.4/102.0, c32 PDI4 93,855.8/68.7, c64 PDI16 
 vs rolao all-opts +3.8..+7.6% TTT, +3.1..+10.3% P90; vs ATOM behind at c1/c2/c8 (P90 -13/-14/-17%), ahead at c32/c64 PDI4.
 Table: results/agentx.md. GSM8K ~0.90 (0.901-0.908, CONC=32 eval server).
 **RUNNING:** PDI sweep c8/c2 at PDI 32 and 4 + c1 PDI 4 (ATOM_PORT.md). c8 PDI32: 28,643.3/212.3 (P90 +6.5% vs PDI16).
+**Engram host-table GPU fault (2026-09-29, fixed locally, NOT in 026da361c0):** apply
+`patches/sglang_local_engram_host_devptr_0001.patch` (`git apply`; setup_atomport_env.sh does it). Needed on any node where
+`scripts/hostreg_devptr_check.py` prints `same=False` (crsuse2-m2m-176, -227). Not yet committed/pushed to rolao.
 **PR pass criteria:** GSM8K 5-shot 1319 TP4/EP4 ≈ 90.45% (DSpark off) / 90.22% (on).
 
 ## History (closed)
 
 Details: /shared_nfs/kk/dsv41/doc_backup_20260929/SKILL.md (CONTINUE HERE history), NOTES.md.
+- 09-29 TP2 best config faults deterministically at prefill graph capture (4096) on a 2nd node: engram `_HostTable`
+  cudaHostRegister's an mmap but engram_gather got the HOST VA; on ROCm dev VA != host VA on some nodes. Fix: use
+  hipHostGetDevicePointer (patches/sglang_local_engram_host_devptr_0001.patch), GSM8K 0.901. The 09-24 TP2
+  "MoE" fault was very likely the same bug. Report: /shared_nfs/kk/dsv41/atomport/verify_env/report_crsuse2-m2m-176.md.
 - 09-24 fresh-container TP4 repro (opus-prefill 048ffae315): PERF=1 c1/c8/c32 145/927/2344 tok/s, DSpark on (SIM_AL=3.51)
   366/1679/3333. Never bench two servers at once (inflated TTFT, c8 -11% tok/s).
 - 09-24 aiter -> v0.1.22.post1 (b4d9154d1) + #5561 + local edits (#5802 dropped); TP4 GSM8K 0.907, 145/924/2350 tok/s.
@@ -75,6 +82,7 @@ dsv41/
 - `run_gsm8k.sh` -> results/gsm8k.md; `run_gsm8k_openai.sh` engine-neutral GSM8K (never with simulated acceptance);
   `run_pr_style_c1.sh` PR bs1 method -> results/perf_prstyle.md; `run_throughput.sh` -> results/perf.md;
   `pipeline_eval.sh` wait + gsm8k + throughput; `vllm_launch.sh` vLLM server (inside vLLM container).
+- `hostreg_devptr_check.py` node check for the engram host-table fault (host VA vs device VA after cudaHostRegister).
 - ATOM-port A/B: `atomport_proxy_bench.py` (decode proxy), `atomport_draft_raw_{ab,ab2,parity}.sh` (in-graph draft
   metadata), `greedy_parity_dump.py`, `shared_expert_requant_check.py`, `test_{ffn_norm,shared_act,wo_a}_mxfp8.py`.
 - Profiling: `profile_prefill.sh`, `trace_summary.py`, `trace_comms.py`, `atomport_{trace_breakdown,step_spans,step_sequence}.py`,
@@ -100,6 +108,8 @@ Known PR issues: intermittent RCCL graph-capture abort; AITER tolerances unvalid
 
 ## Gotchas
 
+- Never pass `cudaHostRegister`'ed host pointers to kernels: use hipHostGetDevicePointer. Check a node with
+  `WHICH=devptr|hostptr python3 scripts/hostreg_devptr_check.py` (hostptr faults iff `same=False`).
 - Weights 510 GB (experts 296 + ENGRAM 203). TP2 needs `SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE=1`; use engram `per_rank`
   (`shared` = 0% huge pages, ~10x slower lookups).
 - `AITER_BF16_FP8_MOE_BOUND=0` (missing in cookbook), else `Unsupported kernel config for moe heuristic dispatch`.

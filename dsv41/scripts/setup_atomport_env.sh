@@ -3,6 +3,7 @@
 # Run AFTER scripts/setup_env.sh (which provides /sgl-workspace/sglang-dsv41, the aiter pin and the sgl-kernel rebuild).
 # Creates / checks:
 #   AP_SGL_DIR     worktree of AP_SGL_BASE at AP_SGL_COMMIT (RolaoDenthu/sglang dsv41/opt-branch), branch AP_BRANCH ('' = detached)
+#               + patches/sglang_local_engram_host_devptr_0001.patch (engram host table device VA; GPU fault on some nodes)
 #   AP_AITER_DIR   worktree of AP_AITER_BASE at AP_AITER_COMMIT (ROCm/aiter PR #5750 head) + CK submodule
 #               + patches/aiter_local_5750_worktree_0001.patch (#5561 LDS-DMA drain, MoE-tuner GPU data gen, 2 local fixes)
 #               + tuned FMoE CSV patches/aiter_local_dsv41_tp2_sef_fp8fp4_tuned_fmoe.csv -> aiter/configs/model_configs/
@@ -21,6 +22,7 @@ AP_AITER_COMMIT=${AP_AITER_COMMIT:-1053c79bb0bac2b7aecaf2da35c10c69a928bcc5}
 AP_FLYDSL_DIR=${AP_FLYDSL_DIR:-/sgl-workspace/pydeps-flydsl-0341}
 AP_FLYDSL_VER=0.3.4.1
 AP_AITER_PATCH=$D/patches/aiter_local_5750_worktree_0001.patch
+AP_SGL_PATCH=$D/patches/sglang_local_engram_host_devptr_0001.patch
 AP_FMOE_CSV=$D/patches/aiter_local_dsv41_tp2_sef_fp8fp4_tuned_fmoe.csv
 AP_MODEL=/shared_nfs/deepseek-ai/DeepSeek-V4.1-Flash
 [ -d /shared_nfs/models/deepseek-ai/DeepSeek-V4.1-Flash ] && AP_MODEL=/shared_nfs/models/deepseek-ai/DeepSeek-V4.1-Flash
@@ -34,7 +36,7 @@ act(){ if [ "$V" = 1 ]; then echo "TODO $*"; return 1; fi; echo "DO   $*"; }
 [ -d "$AP_AITER_BASE/.git" ] || die "missing $AP_AITER_BASE (image aiter checkout)"
 [ -d /sgl-workspace/mori ] || die "missing /sgl-workspace/mori (image component, used via PYTHONPATH)"
 [ -f "$AP_MODEL/config.json" ] && ok "model $AP_MODEL" || die "model not found under /shared_nfs/{models/,}deepseek-ai/DeepSeek-V4.1-Flash"
-[ -f "$AP_AITER_PATCH" ] && [ -f "$AP_FMOE_CSV" ] || die "missing $AP_AITER_PATCH or $AP_FMOE_CSV"
+[ -f "$AP_AITER_PATCH" ] && [ -f "$AP_FMOE_CSV" ] && [ -f "$AP_SGL_PATCH" ] || die "missing $AP_AITER_PATCH, $AP_FMOE_CSV or $AP_SGL_PATCH"
 
 # 1. sglang worktree (rolao opt-branch)
 if ! git -C "$AP_SGL_BASE" remote | grep -qx rolao; then
@@ -53,6 +55,12 @@ elif act "git worktree add $AP_SGL_DIR ${AP_SGL_COMMIT:0:10} ${AP_BRANCH:-(detac
     git -C "$AP_SGL_BASE" worktree add -q "$AP_SGL_DIR" "$AP_BRANCH" && git -C "$AP_SGL_DIR" reset -q --hard "$AP_SGL_COMMIT"
   else git -C "$AP_SGL_BASE" worktree add -q -b "$AP_BRANCH" "$AP_SGL_DIR" "$AP_SGL_COMMIT"; fi
   [ "$(git -C "$AP_SGL_DIR" rev-parse HEAD)" = "$AP_SGL_COMMIT" ] && ok "sglang $AP_SGL_DIR @ ${AP_SGL_COMMIT:0:10}" || die "sglang worktree"
+fi
+if [ -e "$AP_SGL_DIR/.git" ]; then
+  if git -C "$AP_SGL_DIR" apply --reverse --check "$AP_SGL_PATCH" 2>/dev/null; then ok "sglang engram devptr patch applied"
+  elif git -C "$AP_SGL_DIR" apply --check "$AP_SGL_PATCH" 2>/dev/null; then
+    act "apply $(basename "$AP_SGL_PATCH")" && git -C "$AP_SGL_DIR" apply "$AP_SGL_PATCH" && ok "sglang engram devptr patch applied"
+  else die "sglang engram devptr patch neither applied nor applicable (tree has other edits?)"; fi
 fi
 
 # 2. aiter worktree (PR #5750 head + local patch + tuned CSV)

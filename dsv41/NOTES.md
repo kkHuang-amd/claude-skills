@@ -1,5 +1,22 @@
 # DSV4.1 notes (newest first)
 
+## 2026-09-30 hostreg_devptr_check on crsuse2-m2m-227 (amdgpu 6.14.14)
+
+`scripts/hostreg_devptr_check.py`, GPU0: host 0x789b1d400000 dev 0x789add200000 **same=False**; devptr read ok (1024/1024),
+pinned control ok, hostptr -> `HIP error: an illegal memory access` (reproduces the engram fault). So this node also
+needs `patches/sglang_local_engram_host_devptr_0001.patch`. Logs: /shared_nfs/kk/dsv41/hostreg_check/{devptr,pinned,hostptr}.log.
+Node has no sglang-dsv41 / sglang-rolao-opt worktree, so the patch was not re-applied/validated end-to-end here.
+
+## 2026-09-29 Engram host-table GPU fault (crsuse2-m2m-176)
+
+TP2 best config faulted deterministically at prefill graph capture num_tokens=4096 (both ranks, after FlyDSL MoE log
+line -> first suspected MoE). `AMD_SERIALIZE_KERNEL=3` put it in engram_gather (engram.py:805 `_owned_rows`).
+`_HostTable` cudaHostRegister's an mmap; `EngramEmbedding` passed `self.weight.data_ptr()` (host VA) to the Triton kernel.
+On this driver the registered memory's device VA != host VA -> unmapped VA fault. Fix: `_host_device_pointer()`
+(hipHostGetDevicePointer) -> `_HostTable.dev_ptr`, used by both engram_gather calls. GSM8K 0.901, 0 faults.
+Assumption in the patch: scale pointer = dev_ptr + weight.numel() (scale follows uint8 weight in the host buffer).
+Full report: /shared_nfs/kk/dsv41/atomport/verify_env/report_crsuse2-m2m-176.md (+ notes_*.md).
+
 ## 2026-09-27 ATOM gap survey (image rocm/atom-dev:nightly_202609250902)
 
 Image label org.opencontainers.image.revision = ATOM 4685e3cf (2026-09-25, #2400); aiter = nightly copy in

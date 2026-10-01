@@ -54,6 +54,9 @@ Full pre-condensation history: /shared_nfs/kk/dsv41/doc_backup_20260929/ATOM_POR
   AgentX c8 P90 gap (-12%), matching the hypothesis that the c8 tail is the high-in-flight periods. ctx 8192 rows of
   tag bsweep1001 are INVALID (first-swept ctx, warmup: reps differ 2-3x on both engines). Rerun 8k + 64k bs 3,5,7 as
   tag bsweep1001b was running at 09:13 (logs /tmp/bsw2_{sglang,atom}.log, aggregator /tmp/agg.py).
+  bsweep1001b DONE (warm, reps agree): 8k now matches 64k/128k (bs4 -12.6%, bs6 -12.6%, bs8 +11.7%); 64k bs3 -8.3%,
+  bs5 -13.7%, bs7 +13.8%. => gap at bs 3-6 (-8..-14%); ATOM has a cliff between bs6 and bs7 (300 -> 213 tok/s,
+  i.e. bs*6 verify tokens 36 -> 42), ours declines smoothly. Context length does not matter (8k = 64k = 128k).
   NEXT: GPU-only profile both engines at ctx 64k bs 4 and 6 (same client, warm), per-kernel/per-step breakdown;
   first suspects are anything whose cost scales with bs*6 tokens (MoE M-buckets / tuned CSV rows at M=24..36,
   attention decode split, sampling). Servers still up: SGLang PID 1054569 (8888), ATOM PID 1054570 (8000).

@@ -47,3 +47,12 @@
 | 2026-09-28 | atomport_draftraw_eval_r3 | 1319 | 5 | 0.901 | 0.000 | 44.621 s | /shared_nfs/kk/dsv41/gsm8k_atomport_draftraw_eval_r3.log |
 | 2026-09-29 | verify_atomport_env | 1319 | 5 | 0.895 | 0.000 | 46.538 s | /shared_nfs/kk/dsv41/gsm8k_verify_atomport_env.log |
 | 2026-09-29 | simbonus_fused | 1319 | 5 | 0.899 | 0.000 | 46.335 s | /shared_nfs/kk/dsv41/gsm8k_simbonus_fused.log |
+| 2026-09-30 | rf_fuse_r1 | 1319 | 5 | 0.897 | 0.001 | 41.621 s | /shared_nfs/kk/dsv41/gsm8k_rf_fuse_r1.log |
+| 2026-09-30 | rf_fuse_r2 | 1319 | 5 | 0.901 | 0.000 | 40.258 s | /shared_nfs/kk/dsv41/gsm8k_rf_fuse_r2.log |
+| 2026-09-30 | rf_fuse_r3 | 1319 | 5 | 0.900 | 0.001 | 40.642 s | /shared_nfs/kk/dsv41/gsm8k_rf_fuse_r3.log |
+| 2026-09-30 | ms_r1 | 1319 | 5 | 0.904 | 0.001 | 41.192 s | /shared_nfs/kk/dsv41/gsm8k_ms_r1.log |
+| 2026-09-30 | ms_r2 | 1319 | 5 | 0.907 | 0.000 | 40.204 s | /shared_nfs/kk/dsv41/gsm8k_ms_r2.log |
+| 2026-09-30 | ms_r3 | 1319 | 5 | 0.901 | 0.001 | 40.345 s | /shared_nfs/kk/dsv41/gsm8k_ms_r3.log |
+| 2026-09-30 | orig41_r1 | 1319 | 5 | 0.901 | 0.000 | 53.781 s | /shared_nfs/kk/dsv41/gsm8k_orig41_r1.log |
+| 2026-09-30 | orig41_r2 | 1319 | 5 | 0.896 | 0.000 | 51.766 s | /shared_nfs/kk/dsv41/gsm8k_orig41_r2.log |
+| 2026-09-30 | orig41_r3 | 1319 | 5 | 0.901 | 0.001 | 51.856 s | /shared_nfs/kk/dsv41/gsm8k_orig41_r3.log |

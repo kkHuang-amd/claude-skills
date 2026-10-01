@@ -4,6 +4,117 @@ Full pre-condensation history: /shared_nfs/kk/dsv41/doc_backup_20260929/ATOM_POR
 
 ## CONTINUE HERE
 
+**CURRENT STATE (2026-09-30 19:50, read this first):**
+- Code: sglang `/sgl-workspace/sglang-rolao-opt` branch atomport-mxfp8-producers = rolao/dsv41/opt-branch **a5e40eca5e**
+  (+ uncommitted EVENT_WAIT experiment in managers/overlap_utils.py, do not ship). aiter `/sgl-workspace/aiter-5750`
+  branch dsv41-atomport-5750-local 56862fa70 (= PR #5750 head 1053c79bb + #5561 + fp4 prefill cache + torch.Stream +
+  tuner datagen + tuned SEF CSV). flydsl /sgl-workspace/pydeps-flydsl-0341. Repro below still valid (SRC=sglang-rolao-opt).
+- Best numbers: results/agentx.md "CURRENT BEST" table (5ec406) + router fusion + sort MP rows: c1 11,371.9 / 349.5,
+  c2 11,819.8 / 324.6 (both >= ATOM). Per-concurrency chunk: 16384 at c<=32 (c32 mem 0.80), 4096 at c64 (mem 0.85).
+- Done today: chunk A/B c32/c64; c8 prefill-overlap attribution; A router fusion (-0.41 ms/step) + D sort multi-phase
+  (-0.13 ms/step) pushed as bc8bae5146 / a5e40eca5e; aiter PR ROCm/aiter#5967 (tuned rows + tuner) on
+  kkHuang-amd/aiter dsv41-atomport-main; min-aiter-scope study -> AITER_MIN_SCOPE.md.
+- Not re-measured on a5e40eca5e: c8..c64 with A+D, and teammate 5562928323 (wo_a M-bucketed tiles) in any AgentX run.
+- **C IN PROGRESS (user picked C first, 2026-09-30 20:10):**
+  (1) RUNNING c8 baseline on a5e40eca5e, chunk 16384, mem 0.70: TAG c8_a5e_c16k_pdi16 (GPUs 4,5, port 8888, PID 967791;
+  first launch lost a venv race, log *.venvrace.nohup) and (2) c8_a5e_c16k_pdi32 (GPUs 6,7, port 8889, PID 964438).
+  SRC = new clean worktree /sgl-workspace/sglang-c8-base (detached a5e40eca5e; /sgl-workspace/sglang-router-fuse is gone).
+  Do NOT launch two agentx runs at once when /workspace/agentx-runtime/venv is missing (both try to create it).
+  (3) CODE, uncommitted, worktree /sgl-workspace/sglang-pdi-time branch pdi-time-interleave: cost-scaled PDI =
+  SGLANG_PREFILL_DECODE_STEPS_PER_KTOK (0 = off) + SGLANG_PREFILL_DECODE_PREFIX_KTOK_SCALE (128): defer prefill for
+  max(PDI, ceil(k * sum(ext * (1 + pre/(scale*1000))) / 1000)) steps. Token-based, NOT wall-clock: a time-based
+  decision differs per TP rank -> collective mismatch. Off under DP attention. UT test_scheduler_prefill_decode_interval.py 7/7.
+  RESULTS 21:15: (1) PDI16 TTT 29,378.4 / P90 209.3 (p50 305.9, TTFT p50/p90 0.41/1.16, 1358 ok) = vs ATOM +0.4% /
+  -12.8% -> A+D did NOT move c8 P90 (5ec406: 209.7); no-overlap subset P90 271.0 (was 262.4), bottom decile 131/136
+  overlapped. (2) PDI32 29,302.1 / 216.2 (TTFT 0.47/1.28, 1351 ok) = +3.3% P90 vs PDI16 (inside noise), -9.9% vs ATOM.
+  => fixed PDI is not enough; prefill interruption still the driver.
+  CALIBRATION 21:45 (calib_prefill_cost/probe.log, 16384 new tokens, 3 reps, spread <2%): prefix 0/32/128/256/512k
+  -> 627/653/719/816/996 ms (ratio 1.00/1.04/1.15/1.30/1.59) => PREFIX_KTOK_SCALE ~870 (default 128 was 6-7x too
+  steep); a full chunk is 0.63-1.0 s (the earlier "~3.2 s at long ctx" estimate is wrong). 38.3 ms/ktok at prefix 0,
+  decode step ~10-11 ms -> k = 3.5 * d/(1-d) steps/ktok for decode duty d. PDI16 alone gives d ~14-20% on a full chunk.
+  **C RESULT 2026-10-01 08:45 -- cost-scaled PDI is a NULL result, do not ship as a c8 P90 fix.**
+  Knob verified working (temp PDICOST log, now removed): full 16384 chunk -> 30-32 steps (k1.75) / 59-64 (k3.5) vs 16.
+  c8_pdicost_k175_s870: TTT 29,384.8 / P90 213.4 / p50 302.4 / TTFT 0.40/1.17 / 1359 ok / no-overlap P90 268.8.
+  c8_pdicost_k350_s870: TTT 29,349.6 / P90 215.4 / p50 301.5 / TTFT 0.42/1.28 / 1354 ok (one 13.6 s intvty outlier).
+  Baseline c8 3-run mean 29,385 / 210.9 (runs 209.3/210.0/213.3) -> both k inside run-to-run noise, far from the
+  228 pass bar. agentx_prefill_overlap: bottom decile is still ~95% overlapped, and the in-flight 4.5-8.5 bucket
+  (~130 req) has intvty median ~208 for all three runs (no-overlap subset in that bucket ~240), so P90 tracks the
+  high-concurrency periods, and deferring prefill harder does not move it. Hypothesis, not verified: the tail is
+  decode step cost at batch 5-8 (step time / DSpark accept), not the number of prefill interruptions.
+  Worktree sglang-pdi-time left uncommitted (code + UT), not committed. GPUs 4-7 free. Next = user decision.
+  **C STEP 1 IN PROGRESS (08:55): decode-only bs sweep SGLang vs ATOM** (user: AL is simulated 3.51 on both, so the
+  gap must be step cost or scheduling). Client scripts/decode_bs_sweep.py (warm prefix cache, then bs concurrent
+  decode; ctx 8192,65536 x bs 1,2,4,6,8, OSL 2048, temp = server default). Servers: SGLang c8-base a5e40eca5e SERVER_ONLY
+  GPUs 4,5 port 8888 PID 1054569 (tag bsweep_sgl_c8); ATOM rootfs MODE=server CONC=8 GPUs 6,7 port 8000 PID 1054570
+  (log /shared_nfs/kk/atom_run/bsweep_atom_c8.log). Rows -> /shared_nfs/kk/dsv41/atomport/decode_bs_sweep.tsv.
+  Decision: step gap at bs 5-8 -> GPU profile both at those bs; no gap -> look at ATOM scheduling.
+  RESULT (09:10, ctx 64k and 128k agree, 2 reps each, spread <=0.3 s): per-request decode tok/s ours vs ATOM:
+  bs1 +10%, bs2 ~0 (-3/+3), bs4 -10/-12%, bs6 -12%, bs8 +7/+10% (ATOM drops sharply 6->8: 294 -> 218).
+  P90-interactivity proxy follows the same pattern (bs4-6 -10..-14%). => REAL step-cost gap at bs 4-6, same size as the
+  AgentX c8 P90 gap (-12%), matching the hypothesis that the c8 tail is the high-in-flight periods. ctx 8192 rows of
+  tag bsweep1001 are INVALID (first-swept ctx, warmup: reps differ 2-3x on both engines). Rerun 8k + 64k bs 3,5,7 as
+  tag bsweep1001b was running at 09:13 (logs /tmp/bsw2_{sglang,atom}.log, aggregator /tmp/agg.py).
+  NEXT: GPU-only profile both engines at ctx 64k bs 4 and 6 (same client, warm), per-kernel/per-step breakdown;
+  first suspects are anything whose cost scales with bs*6 tokens (MoE M-buckets / tuned CSV rows at M=24..36,
+  attention decode split, sampling). Servers still up: SGLang PID 1054569 (8888), ATOM PID 1054570 (8000).
+  **C RUN LOG (launched 2026-10-01 07:25):** both lanes below, lane PIDs 1026775 (k175, 8888) / 1026776 (k350, 8889) (relaunched 07:33; first try crashed on self.tp_rank in temp log, dirs *.tprankcrash);
+  kill: `kill -- -<pid>` then free GPUs 4-7. Overnight nohups moved to lane_888{8,9}.night0930.nohup. TEMP log
+  `PDICOST ext= pre_max= steps=` (tp_rank 0, marker TMP_PDICOST_LOG) added in scheduler._prefill_cost_decode_steps --
+  REMOVE before commit. Verify: `rg -c PDICOST <tag>/server.log`, full 16384 @ prefix 0 -> steps 29 (k1.75) / 58 (k3.5).
+  **C NEXT -- START HERE IN THE NEW SESSION (user 2026-10-01 07:15).** Copy-paste launch (both lanes, ~70 min; per-port
+  aiperf venvs already fixed in agentx_colleague_run.sh, so parallel launch is safe):
+  ```bash
+  cd /shared_nfs/kk/dsv41/agentx && export PYTHONPATH=/sgl-workspace/pydeps-flydsl-0341:/sgl-workspace/aiter-5750:/sgl-workspace/mori \
+    SRC=/sgl-workspace/sglang-pdi-time/python SGLANG_OPT_HIP_OPUS_SPARSE_PREFILL=1 SGLANG_PREFILL_DECODE_PREFIX_KTOK_SCALE=870 \
+    EXTRA_ARGS="--fp8-gemm-backend aiter --enforce-shared-experts-fusion" OPUS=0 TP=2 EP_SIZE=1 DURATION=3600
+  S=/workspace/claude-skills/dsv41/scripts/agentx_lane.sh
+  SGLANG_PREFILL_DECODE_STEPS_PER_KTOK=1.75 GPUS=4,5 PORT=8888 POINTS="c8_pdicost_k175_s870:8:16:16384:0.70" setsid nohup bash $S > lane_8888.nohup 2>&1 < /dev/null &
+  SGLANG_PREFILL_DECODE_STEPS_PER_KTOK=3.5  GPUS=6,7 PORT=8889 POINTS="c8_pdicost_k350_s870:8:16:16384:0.70" setsid nohup bash $S > lane_8889.nohup 2>&1 < /dev/null &
+  ```
+  Verify the knob took effect (outcome, not just the env): add a temporary log or count decode steps between Prefill
+  batch lines in server.log for big chunks (expect ~16 at k=0; ~57 / ~115 for a full 16384 chunk at prefix 0).
+  Baseline to beat: c8 3-run mean 29,385 / P90 210.9 (night0930_c8, night0930_c8_r2, c8_a5e_c16k_pdi16). Compare with
+  scripts/agentx_prefill_overlap.py (no-overlap P90 ~271) and TTFT p50/p90 (0.41/1.16). If a k wins: GSM8K x3, then
+  c16/c32 no-regression check, then commit on pdi-time-interleave (no push without asking).
+  Details of the (postponed) plan:
+  c8_pdicost_k175_s870 (k 1.75, d~1/3; GPUs 4,5, port 8888) and c8_pdicost_k350_s870 (k 3.5, d~1/2; GPUs 6,7, port 8889),
+  both PDI16 floor, chunk 16384, SRC /sgl-workspace/sglang-pdi-time/python, env SGLANG_PREFILL_DECODE_STEPS_PER_KTOK=<k>
+  SGLANG_PREFILL_DECODE_PREFIX_KTOK_SCALE=870 on top of the repro command (CONC=8 PORT=<p> GPUS=<g>). Delete the stale
+  c8_pdicost_* dirs/nohups first. Pass: P90 >= 228 (ATOM 240 -5%) with TTT >= ATOM. Scheduling-only change -> GSM8K
+  after k is chosen. Also consider changing the env default scale 128 -> 870 in environ.py.
+  (4) (done, see above) calibrate with scripts/prefill_cost_probe.py --port <p> on a finished server (prefix 0..512k x
+  16384 new) -> scale = L_k/(ratio-1), k from target decode duty; then GSM8K x3 + c8 AgentX with the knob; ATOM
+  prefill comparison skipped (user).
+- **OVERNIGHT SWEEP DONE (all 8 points 0 errors, GPUs free; table = results/agentx.md CURRENT BEST 2026-10-01):**
+  vs ATOM TTT / P90: c1 +5.1% / +2.8%, c2 +3.8% / -2.6% (r2 -4.2%), c8 +0.5% / -12.5% (3 runs mean -12.1%),
+  c16 +0.2% / +5.1%, c32 +6.3% / +5.3%, c64 +15.2% / +73.6%. Pass criteria all met EXCEPT c8 P90 -> C is the only gap.
+  c2 vs 09-30 rf_c16k_c2_pdi16 (324.6): 315.7 / 310.3 is tail noise, not a regression (p50 and no-overlap P90 flat,
+  see results/agentx.md note 2); c2 3-run mean P90 316.9 = -2.2% vs ATOM.
+  Launch details (kept for reference): latest code a5e40eca5e
+  (= rolao/dsv41/opt-branch head after fetch) from /sgl-workspace/sglang-c8-base, best config per concurrency, two TP2
+  lanes via scripts/agentx_lane.sh. Lane A GPUs 4,5 port 8888 PID 989613: c64 (PDI4, chunk 4096, mem 0.85) -> c16
+  (PDI16, 16384, 0.80) -> c2 -> c2_r2 (PDI16, 16384, 0.70). Lane B GPUs 6,7 port 8889 PID 989614: c8 -> c1 -> c8_r2
+  (PDI16, 16384, 0.70), then c32 (PDI4, 16384, 0.80) via requeue wrapper PID 996215 (first c32 died in 1 s: venv race).
+  Tags night0930_c*; progress lane_{8888,8889}.txt in /shared_nfs/kk/dsv41/agentx. ETA lane A ~02:30, lane B ~03:45 +08.
+  VENV TRAP: benchmark_lib.sh resets AIPERF_DEPS_READY=0 and rm -rf's $AIPERF_VENV on EVERY run -> parallel lanes
+  delete each other's aiperf. Fixed in agentx_colleague_run.sh: AIPERF_VENV=$AIPERF_RUNTIME_DIR/venv_p$PORT (applies
+  from each lane's 2nd point; the running c64/c8 share the old venv, nothing deletes it now).
+  Summary per point: TTT = throughput.per_gpu.total_tput_tps, P90 = latency.intvty.p90, TTFT p50/p90, ok count;
+  ATOM refs from results/agentx.md. Covers B (c2 x2, c8 x3 incl. c8_a5e_c16k_pdi16) + CURRENT BEST refresh.
+- REMAINING WORK (user to prioritize in the new session):
+  B. c2 / c8 x2 repeats on the final build (P90 noise ~5%/run).
+  C. c8 P90 (-12.6% vs ATOM on 5ec406): prefill interrupts decode (PDI 16 = 16 decode steps per 16384 chunk);
+     options PDI 32 at c8 or a time-based prefill/decode interleave. PAUSED by user.
+  E. ATOM-style real-sampling verify (greedy draft + sampled target prefix match) for real traffic.
+  F. Long-context step-time slope (9.4 ms @64k -> 9.7 ms @>512k).
+  G. Move servers to the aiter main-based branch (#5967, without #5561) after GSM8K x3 + one AgentX point.
+  H. Housekeeping: claude-skills local commit 33f5621 + later doc edits not pushed; upstream the aiter opus
+     moe_sorting auto-policy fix; SGLang compact_attention_hip.py imports aiter _qkpv_fp8 (deleted upstream, #4919),
+     only reached for 528/288 KV dims.
+  Also: re-run c8/c16/c32/c64 on a5e40eca5e to refresh the CURRENT BEST table with A+D.
+
+**History (condensed log below):**
+
 **c1/c2 GAP ROOT CAUSE FOUND (2026-09-29 11:40):** AgentX (aiperf agentx-mvp) sends no temperature -> SGLang
 default 1.0 -> DSpark takes the SAMPLING path even under SGLANG_SIMULATE_ACC_LEN (draft temperature sampling,
 SoftmaxTemp over draft rows, AcceptSampling; fold disabled) and then overwrites correct_len with the simulated
@@ -108,6 +219,57 @@ pending 6M tokens, 16384-token chunks back-to-back). Free device mem after graph
 collective is in flight) -- same root as c32 OOM (270.49 GiB allocated + 11.42 GiB reserved-unused,
 0 free, 512 MiB alloc in a breakable-graph eager piece). Headroom outside mem-fraction is the constraint, not KV.
 Proposed (1): c32/c64 PDI4 chunk 16384 mem 0.80 vs chunk 4096 mem 0.85 re-baselined on 5ec406 (old 4096 numbers are 026da361).
+**aiter on main (2026-09-30 08:45):** #5750 is squash-merged upstream (e2d019f15). Our local aiter changes (= patches/
+aiter_local_5750_worktree_0001.patch + tuned FMoE CSV) are now ONE commit 7f44ace62 on top of ROCm/aiter main c8325e00c,
+pushed to FEATURE BRANCH kkHuang-amd/aiter dsv41-atomport-main (fork main stays = upstream; worktree
+/sgl-workspace/aiter-mainport, local branch dsv41-atomport-main). 08:55 user trim -> branch head 7fddd8880 = main +
+MoE-tuner GPU datagen + the 23 tuned rows MERGED into dsv41_fp4_tuned_fmoe.csv / shapes into dsv41_fp4_untuned_fmoe.csv
+(no separate CSV). DROPPED on the branch (still in the live aiter-5750 env): torch_utils torch.Stream, fp4 prefill
+lru_cache->cache, #5561 flydsl stage1 full vmcnt drain (our afp8_wfp4 stage1 path; heterogeneous_b drain in main
+only covers FHMoE shared_expert_id). Moving the servers to this branch needs GSM8K x3 + one AgentX point first.
+Live servers still use /sgl-workspace/aiter-5750 (PR head 1053c79bb + same diff); switching them to aiter-mainport is
+untested (needs JIT rebuild + GSM8K + one AgentX point). Fork branch dsv41-atomport-5750-local is superseded.
+**sglang #40204 (small-M MXFP4 MoE, Qwen) review 09:20:** not applicable as-is (guard hidden 4096 / per-rank inter 256 /
+10-11 slots / bf16 act; ours hidden 5120, inter 1152/rank, 7 slots, fp8 act on FlyDSL a8w4; not in our tree). Its premise
+is weaker for us: its aiter baseline ~0.3 TB/s (1.7 MB experts), our tuned a8w4 at random routing ~3.0 TB/s at M=1,
+~5.1-5.7 TB/s at M=4-32 (9.4 MB experts; 37% -> ~70% of 8 TB/s). The PR itself says inter 512 already crosses to FlyDSL at
+~20 tok. Transferable idea = the MoE OVERHEAD at small M: c1 step has moe1+moe2 1.42 ms but sorting/gating/router/
+append_shared/quant-sort 1.32 ms (0.49+0.27+0.22+0.17+0.17). Candidates: sort-free small-M dispatch (skip moe_sorting +
+mx_quant_moe_sort, ~0.5-0.66 ms/step), one-launch router+topk+shared-append (cf. #41133, ~0.4 ms). Est. 5-10% c1 step.
+**ROUTER FUSION (2026-09-30 09:50, uncommitted, worktree /sgl-workspace/sglang-router-fuse branch
+router-gate-shared-append @5ec406):** with --enforce-shared-experts-fusion each decode layer ran _router_gemv_split_k 4.4 +
+_reduce_partials 4.3 + aiter topk_gating_opt 7.2 + _fused_append_shared_experts 3.9 us (prof_5ec406); without SEF the
+fused gate was gemv 4.6 + _router_gate 4.8. Cause: select_experts dropped the partials whenever num_fused_shared_experts>0
+(non per-rank). Fix: rocm_router_gate(num_shared=S) also writes the shared columns (id 384+s, weight 1.0; the existing
+"router emitted shared" branch then applies fused_shared_experts_scaling_factor exactly like the append);
+_post_process_topk_ids skips the append when topk_ids already has top_k columns (generalizes the JIT-grouped-topk check),
+capture/EPLB recorder get the routed columns only; partials kept for aiter SEF when EPLB remap is off.
+Parity: bitwise vs aiter gate + fused_append (M 1/6/64) and select_experts partials vs non-partials (scaling None/0.5),
+test_aiter_moe_hip.py 5/5 on GPU 6; new path calls 0 reduce / 0 append. Microbench (hot cache, graph): 11.2 -> 6.35 us/layer
+at M=6 (-4.9); in-model expected ~-10 us/layer (trace numbers) -> 0.2-0.4 ms/step. pre-commit fully clean: also added
+register_amd_ci(est_time=10, suite="stage-b-test-1-gpu-small-amd") to test_dspark_simulated_bonus.py (missing since 5ec406;
+3/3 on GPU 6) + ruff format of that file, in the same worktree.
+**D = MoE sort dispatch policy (13:30, same worktree, uncommitted):** aiter opus moe_sorting auto policy picks ONESHOT
+below ~24 tokens: 11.6 / 12.5 / 15.7 us at M 1/6/16 (E385 topk7 BM32) vs MULTI-PHASE (policy 2) 6.7 / 7.0 / 6.9 us; at
+M>=64 both equal (7.0 ... 64.2 us at 16384); E129 topk4 (draft) 6.4-7.9 -> 5.8-6.0. Outputs bitwise identical for every
+M 1..16384 (sorted ids/weights/expert tiles/num_valid, moe_buf zeroed). Fix: SGLANG_AITER_MOE_SORTING_DISPATCH_POLICY
+(EnvInt, default 2) passed as fused_moe(moe_sorting_dispatch_policy=...) in moe_runner/aiter.py. Expect ~-5.5 us/layer
+at c1 (~0.22 ms/step). Unit test TestAiterMoeSortingDispatchPolicy (policy 0 vs 2 bitwise), file 6/6 on GPU 6.
+Upstream candidate: fix the auto heuristic in aiter moe_sorting_opus.h. A custom single-launch sort+quant kernel was
+considered and dropped (bit-exact MX quant re-implementation risk; the policy switch gets most of the sort win).
+**RUNNING (13:07 +08, PID 816672, scripts/router_fuse_ab.sh, summary /shared_nfs/kk/dsv41/atomport/router_fuse/summary.txt):**
+SIM c1 proxy x3 + GPU-only profile for base (5ec406) / fuse (policy 0) / fuse+sortMP (policy 2), step spans of all
+three; then GSM8K 1319 x3 (fuse+sortMP, EVAL_ONLY CONC=32); then AgentX c1, c2 (PREFIX rf_c16k, PDI16, chunk 16384).
+ETA ~16:00 +08. **Step-span results (13:30):** kernels/step base 1138 / fuse 1057 / fuse+sortMP 1098 (MP = 2 kernels);
+span median 8.502 / 7.865 / 8.020 ms -- the TOTAL span is NOT usable here: MoE GEMM time varies per server
+(moe1 955 / 841 / 1002, moe2 526 / 426 / 552 us/step; temp-1.0 proxy tokens -> different routed-expert counts).
+Per-kernel deltas (scripts: /tmp/kdiff.py logic): A = -259 topk_gating -168 reduce_partials -166 append +186 _router_gate
+= **-0.41 ms/step**; D = opus sort 484 -> 358 us/step = **-0.13 ms/step** (in-model 12.3 -> 2 x ~4.5 us per layer).
+GSM8K fuse+sortMP 0.897 / 0.901 / 0.900 (baseline ~0.899). **AgentX c1 A+D: 11,371.9 / P90 349.5 (vs 5ec406 +2.6% / +4.8%; vs ATOM +5.1% / +3.7%).** **AgentX c2 A+D: 11,819.8 / P90 324.6 (vs 5ec406 +2.8% / +10.7%, vs its 309.3 twin +4.9%; vs ATOM +4.9% / +0.2%).** Run DONE 15:36, GPUs free. C (c8 prefill vs decode) PAUSED by user 15:45; nothing running.
+**PUSHED 15:50:** rolao/dsv41/opt-branch 5562928323..a5e40eca5e = bc8bae5146 (A router fusion + D sort MP + tests) + a5e40eca5e (register_amd_ci for test_dspark_simulated_bonus.py), rebased onto teammate 5562928323 (wo_a M-bucketed tiles, not in our AgentX runs; 9/9 UT + pre-commit on the rebased tree). Worktree /sgl-workspace/sglang-router-fuse is now at the pushed head.
+First attempt aborted 13:05 (the fuse server may have imported the D edit mid-start). DO NOT edit
+/sgl-workspace/sglang-router-fuse/python until it finishes.
+**(1) c32 A DONE: 97,158.2 / P90 69.5, 0 errors (vs ATOM +6.8% / +4.7%, vs old 4096 +3.5% / +1.2%); c64 A DONE: 121,940.9 / P90 31.5 (vs ATOM +19.1% / +36.4%; vs old 4096 +4.1% / -20.7%: P90 trade-off); free mem touched 0.00 GiB once. B c32 DONE 92,657.2 / 66.0 -> A wins at c32 (+4.9% / +5.3%). B c64 DONE 116,273.6 / 39.3 (A +4.9% TTT but -19.8% P90). DECISION: per-concurrency chunk = 16384 at c<=32 (c32 mem 0.80), 4096 at c64 (mem 0.85). Series done 12:36, GPUs free.**
 **(1) RUNNING (started 07:25 +08, wrapper PID 730744, /shared_nfs/kk/dsv41/agentx/run_c32c64_chunk_0930.sh):**
 A = sw5ec406_c16k_m080_c{32,64}_pdi4 (chunk 16384, mem 0.80; confirmed in server_args; post-capture free 25.96 GB
 vs 10.97 at 0.85), then B = sw5ec406_c4k_c{32,64}_pdi4 (chunk 4096, mem 0.85 re-baseline on 5ec406). VRAM every 30 s ->

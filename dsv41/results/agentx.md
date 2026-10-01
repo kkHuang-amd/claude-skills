@@ -1,5 +1,31 @@
 # AgentX (InferenceX inferencex-agentx-mvp trace replay) -- DSV4.1-Flash
 
+## CURRENT BEST per concurrency (2026-10-01, overnight sweep night0930_c*)
+rolao/dsv41/opt-branch a5e40eca5e (router fusion + sort multi-phase + teammate wo_a M-bucketed tiles) +
+`--enforce-shared-experts-fusion` + tuned FMoE CSV, TP2 EP1 on MI355X, two TP2 lanes in parallel (GPUs 4,5 / 6,7),
+max-running-requests = 2 x conc (cap 64). TTT = tok/s/GPU, P90 = P90 interactivity (tok/s/user). 0 errors everywhere.
+
+| 併發 | PDI | chunk | mem-fraction | 我們 TTT / P90 | ATOM TTT / P90 | 我們 vs ATOM |
+|---|---|---|---|---|---|---|
+| 1 | 16 | 16384 | 0.70 | 11,375.4 / 346.4 | 10,820.2 / 337 | +5.1% / +2.8% |
+| 2 ² | 16 | 16384 | 0.70 | 11,692.9 / 315.7 | 11,266.6 / 324 | +3.8% / −2.6% |
+| 4 ¹ | 16 | 4096 | 0.70 | 15,680.7 / 267.0 | 沒有這一點 | 沒有這一點 |
+| 8 ³ | 16 | 16384 | 0.70 | 29,417.4 / 210.0 | 29,261.3 / 240 | +0.5% / −12.5% |
+| 16 | 16 | 16384 | 0.80 | 54,080.7 / 134.5 | 53,993.3 / 128 | +0.2% / +5.1% |
+| 32 | 4 | 16384 | 0.80 | 96,768.1 / 69.9 | 91,002.2 / 66.4 | +6.3% / +5.3% |
+| 64 | 4 | 4096 | 0.85 | 117,918.7 / 40.1 | 102,389.5 / 23.1 | +15.2% / +73.6% |
+
+(1) c4 is 026da361c0 (chunk 4096), not re-run. (2) c2 runs with the same settings: rf_c16k_c2_pdi16 (09-30, A+D on
+5ec406, before the rebase onto 5562928323) 11,819.8 / 324.6, night0930_c2 315.7, night0930_c2_r2 11,639.7 / 310.3;
+3-run mean P90 316.9 (-2.2% vs ATOM). Not a regression: p50 384.4 / 383.3 / 384.7 and no-overlap-subset P90 331.9 /
+330.7 / 329.1 are flat; the spread is only in the 52-65 requests that overlap another lane's prefill (P90 tail noise
+~5%). Same for c1: rf_c16k_c1_pdi16 349.5 vs 346.4, no-overlap P90 370.5 vs 370.4. (3) repeats night0930_c8_r2 29,360.0 / 213.3 and c8_a5e_c16k_pdi16 29,378.4 / 209.3; mean P90
+210.9 (-12.1%); c8 PDI 32 on the same build 29,302.1 / 216.2 (c8_a5e_c16k_pdi32). TTFT p50/p90 (s): c1 0.72/1.11,
+c2 0.43/0.99, c8 0.41/1.16, c16 0.48/1.73, c32 0.68/2.43, c64 2.25/16.02. Dirs /shared_nfs/kk/dsv41/agentx/night0930_c*.
+Previous table (5ec406, 2026-09-30): c1 11,087.2/333.4, c2 11,494.7/293.2, c8 29,157.1/209.7, c16 53,469.1/135.7,
+c32 97,158.2/69.5, c64 116,273.6/39.3 (dirs sw5ec406_c16k_c{1,2,8}_pdi16, sw5ec406_c16k_c16_pdi16,
+sw5ec406_c16k_m080_c32_pdi4, sw5ec406_c4k_c64_pdi4).
+
 ## vLLM MI355X reference (public InferenceX table, pasted by user 2026-09-24)
 FP4, TP2, 2 physical GPUs, no DP. Consistency: Total-tokens-per-$1 == TTT x 2400 on every row
 (= 3600 s / $1.50 per GPU-hour => TTT is total (input+output) tok/s per GPU). conc 128 TTT halves vs conc 64 --
@@ -66,6 +92,12 @@ not pursued). 3600 s per point, conc 4 / 16 / 64, run sequentially on GPU 0,1.
 | 2026-09-29 | SWEEP rolao 5ec406bb76 + fusion + tuned FMoE + CHUNKED_PREFILL_SIZE=16384 | 2 (EP1) | 16 (PDI 16, mem 0.80) | 53,469.1 | 135.7 | 3600 s OK, 2520 ok; vs ATOM -1.0% / +6.1%; vs BEST +4.4% / -1.5% | /shared_nfs/kk/dsv41/agentx/sw5ec406_c16k_c16_pdi16 |
 | 2026-09-29 | SWEEP rolao 5ec406bb76 + fusion + tuned FMoE + CHUNKED_PREFILL_SIZE=16384 | 2 (EP1) | 32 (PDI 4, mem 0.85) | FAIL | FAIL | HIP OOM after ~20 min (0 bytes free, 512 MiB alloc); partial 710/1064 -- not a result | /shared_nfs/kk/dsv41/agentx/sw5ec406_c16k_c32_pdi4 |
 | 2026-09-29 | SWEEP rolao 5ec406bb76 + fusion + tuned FMoE + CHUNKED_PREFILL_SIZE=16384 | 2 (EP1) | 64 (PDI 4, mem 0.85) | FAIL | FAIL | NCCL watchdog: BROADCAST numel 16 timed out 600 s at 18:23:51 (queue 42, pending 6M tokens); partial 489/1196 -- not a result | /shared_nfs/kk/dsv41/agentx/sw5ec406_c16k_c64_pdi4 |
+| 2026-09-30 | SWEEP rolao 5ec406bb76 + fusion + tuned FMoE + CHUNKED_PREFILL_SIZE=16384 | 2 (EP1) | 32 (PDI 4, mem 0.80) | 97,158.2 | 69.5 | 3610 s OK, 4187 ok, 0 errors; TTFT p50/p90 0.60/2.05 s; vs ATOM +6.8% / +4.7%; vs chunk4096 026da361 +3.5% / +1.2% | /shared_nfs/kk/dsv41/agentx/sw5ec406_c16k_m080_c32_pdi4 |
+| 2026-09-30 | SWEEP rolao 5ec406bb76 + fusion + tuned FMoE + CHUNKED_PREFILL_SIZE=16384 | 2 (EP1) | 64 (PDI 4, mem 0.80) | 121,940.9 | 31.5 | 3627 s OK, 7009 ok; TTFT p50/p90 1.00/4.74 s; free device mem hit 0.00 GiB at 09:22 +08 but survived; vs ATOM +19.1% / +36.4%; vs chunk4096 026da361 +4.1% / -20.7% | /shared_nfs/kk/dsv41/agentx/sw5ec406_c16k_m080_c64_pdi4 |
+| 2026-09-30 | SWEEP rolao 5ec406bb76 + fusion + tuned FMoE, CHUNKED_PREFILL_SIZE=4096 (re-baseline) | 2 (EP1) | 32 (PDI 4, mem 0.85) | 92,657.2 | 66.0 | 3600 s OK, 4087 ok, 0 errors; TTFT p50/p90 0.77/3.43 s; chunk 16384+mem0.80 is +4.9% / +5.3% over this -> c32 uses 16384 | /shared_nfs/kk/dsv41/agentx/sw5ec406_c4k_c32_pdi4 |
+| 2026-09-30 | SWEEP rolao 5ec406bb76 + fusion + tuned FMoE, CHUNKED_PREFILL_SIZE=4096 (re-baseline) | 2 (EP1) | 64 (PDI 4, mem 0.85) | 116,273.6 | 39.3 | 3600 s OK, 6616 ok, 0 errors; TTFT p50/p90 2.33/16.17 s; vs ATOM +13.6% / +70.1%; chunk 16384+mem0.80 is +4.9% / -19.8% vs this -> c64 keeps 4096 | /shared_nfs/kk/dsv41/agentx/sw5ec406_c4k_c64_pdi4 |
+| 2026-09-30 | ROUTER FUSION + sort MP (router-gate-shared-append worktree on 5ec406) + fusion + tuned FMoE, chunk 16384 | 2 (EP1) | 1 (PDI 16) | 11,371.9 | 349.5 | 3600 s OK, 285 ok, 0 errors; p50 383.9; TTFT p50/p90 0.67/1.21 s; vs 5ec406 sweep +2.6% / +4.8%; vs ATOM +5.1% / +3.7% | /shared_nfs/kk/dsv41/agentx/rf_c16k_c1_pdi16 |
+| 2026-09-30 | ROUTER FUSION + sort MP (router-gate-shared-append worktree on 5ec406) + fusion + tuned FMoE, chunk 16384 | 2 (EP1) | 2 (PDI 16) | 11,819.8 | 324.6 | 3600 s OK, 455 ok, 0 errors; p50 384.4; TTFT p50/p90 0.47/1.12 s; vs 5ec406 sweep +2.8% / +10.7% (vs its 309.3 twin +4.9%); vs ATOM +4.9% / +0.2% | /shared_nfs/kk/dsv41/agentx/rf_c16k_c2_pdi16 |
 | 2026-09-29 | BEST config, PDI 32 | 2 (EP1) | 8 (PDI 32) | 28,643.3 | 212.3 | 3600 s OK, 0 faults; vs PDI16 +0.3% / +6.5% (TTFT p50 0.45 -> 0.54 s, p90 1.42 -> 1.78 s); vs ATOM -2.1% / -11.5% | /shared_nfs/kk/dsv41/agentx/atomport_best_pdi_c8_pdi32 |
 | 2026-09-29 | BEST config, PDI 4 | 2 (EP1) | 8 (PDI 4) | 28,586.2 | 200.0 | 3600 s OK, 0 faults; vs PDI16 +0.1% / +0.4% (TTFT p50 0.45 -> 0.39 s, p90 1.42 -> 1.17 s); vs ATOM -2.3% / -16.6% | /shared_nfs/kk/dsv41/agentx/atomport_best_pdi_c8_pdi4 |
 | 2026-09-29 | BEST config, PDI 32 | 2 (EP1) | 2 (PDI 32) | 10,421.0 | 282.0 | 3600 s OK, 0 faults; vs PDI16 -0.5% / +0.9% (TTFT p50 0.50 -> 0.47 s, p90 1.11 -> 1.07 s); vs ATOM -7.5% / -13.0% | /shared_nfs/kk/dsv41/agentx/atomport_best_pdi_c2_pdi32 |

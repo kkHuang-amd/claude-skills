@@ -9,6 +9,9 @@ source /workspace/claude-skills/agentx/agentx_env.sh
 export AIPERF_PYTHON_VERSION=${AIPERF_PYTHON_VERSION:-3.11}
 [ -x "$AIPERF_VENV/bin/aiperf" ] && export AIPERF_DEPS_READY=1
 export TP=${TP:-2} EP_SIZE=${EP_SIZE:-1} CONC=${CONC:-4} DURATION=${DURATION:-3600} PORT=${PORT:-8888}
+# benchmark_lib.sh resets AIPERF_DEPS_READY and rm -rf's the venv on every run; per-port venvs keep parallel lanes
+# from deleting each other's live aiperf install.
+export AIPERF_VENV=$AIPERF_RUNTIME_DIR/venv_p$PORT
 export MODEL="deepseek-ai/DeepSeek-V4.1-Flash" MODEL_PREFIX="dsv41flash"
 export MODEL_PATH=${MODEL_PATH:-$( [ -d /shared_nfs/models/deepseek-ai/DeepSeek-V4.1-Flash ] && echo /shared_nfs/models/deepseek-ai/DeepSeek-V4.1-Flash || echo /shared_nfs/deepseek-ai/DeepSeek-V4.1-Flash)}
 export IS_AGENTIC=1 KV_OFFLOADING=none TOTAL_CPU_DRAM_GB=0 EVAL_ONLY=${EVAL_ONLY:-false} SPEC_DECODING=mtp DP_ATTENTION=false

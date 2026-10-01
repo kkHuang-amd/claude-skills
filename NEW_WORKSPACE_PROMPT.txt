@@ -119,6 +119,26 @@ answer the question. Most exploration should stop at 2 or 3.
   - When this thread gets large, I will start a fresh chat pointing at the doc.
     The doc is the source of truth; the chat is scratch.
 
+### Multiple nodes edit the skills repo -- avoid split state
+
+/workspace/claude-skills is a per-node git checkout; nodes sync ONLY via git.
+The danger is not merge conflicts but an agent acting on another node's stale
+state. So:
+
+  - One task = one doc, with an owner line at the top
+    (`Owner node: <hostname>`). Only the owner edits that doc's CONTINUE HERE.
+    New work on another node gets its own doc (e.g. <project>/<task>.md).
+    Touch shared indexes (SKILL.md) rarely, in a separate small commit.
+  - Node-local runtime state (PIDs, GPU ids, ports, /tmp paths, "server is
+    up", "GPUs free") must carry the hostname, or stay out of shared docs.
+    Never act on a PID/GPU/port claim from a doc owned by another node --
+    re-check on this node first (`hostname`, rocm-smi, ps).
+  - Shared result tables are append-only; every row carries node + date.
+    Never edit another node's numbers; append a correcting row/note instead.
+  - Git rhythm: `git pull --rebase` at session start and before every commit;
+    small commits, push often; never force-push. If two nodes must edit the
+    same doc for a long time, use per-node branches and let me merge.
+
 ## 4. Environment -- detect, do not assume
 
 Do not assume CUDA/NVIDIA. Detect first, cheaply, in one batched message:
@@ -137,6 +157,13 @@ Then state what you found in one or two lines and proceed.
     skipped part of the task, say which part and why.
   - Do not commit, push, or touch anything outside the working directory
     without asking me first.
+  - Commit messages must NOT contain a "Co-authored-by:" trailer (or any
+    other AI/tool attribution). Check `git log -1 --format=%B` before every
+    push. If the tool environment injects the trailer on `git commit` (even
+    with --amend / --no-verify), build the commit with plumbing instead:
+        T=$(git write-tree); C=$(git commit-tree "$T" -p HEAD -F msg.txt)
+        git update-ref refs/heads/<branch> "$C"
+  - Never force-push; `git fetch` before every push.
   - Long-running servers/benchmarks: launch in the background, filter the log,
     and tell me the PID and how to kill it.
 
@@ -152,7 +179,7 @@ above), then wait for my actual task.
 
 WHEN TO USE
   First message of any new workspace / container / fresh chat, before the
-  real task. Paste block is 5,241 chars (~1.3k tokens); pays for itself on the
+  real task. Paste block is ~8,000 chars (~2k tokens); pays for itself on the
   first avoided log dump (one ServerArgs line was measured at 16,980
   chars, ~4.2k tokens).
 

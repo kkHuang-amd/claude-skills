@@ -1,5 +1,7 @@
 # Porting ATOM V4.1 optimizations into SGLang (rolao opt-branch)
 
+Owner node: mi355-4 (all PIDs / GPU ids / ports / "server up" below refer to mi355-4).
+
 Full pre-condensation history: /shared_nfs/kk/dsv41/doc_backup_20260929/ATOM_PORT.md.
 
 ## CONTINUE HERE

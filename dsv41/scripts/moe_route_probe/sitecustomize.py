@@ -93,7 +93,31 @@ def _wrap_atom_api(mod):
     mod.delivered_text = delivered_text
 
 
-_WRAPPERS = {"aiter.fused_moe": _wrap, "atom.entrypoints.openai.api_server": _wrap_atom_api}
+_PDS_DONE = set()
+
+
+def _wrap_pa_decode_sparse(mod):
+    # Records one call signature per decode size (q rows <= 64); graph capture runs this once per batch size.
+    orig = mod.pa_decode_sparse
+
+    def pa_decode_sparse(*a, **k):
+        try:
+            n = int(a[0].shape[0])
+            key = (n, k.get("extra_cache") is not None, k.get("kv_splits"))
+            if n <= 64 and key not in _PDS_DONE:
+                _PDS_DONE.add(key)
+                sig = {"n": n, "pos": [_desc(x) for x in a], "kw": {kk: _desc(v) for kk, v in k.items()}}
+                with open(f"{_OUT}.pds.{os.getpid()}.jsonl", "a") as f:
+                    f.write(json.dumps(sig) + "\n")
+        except Exception:
+            pass
+        return orig(*a, **k)
+
+    mod.pa_decode_sparse = pa_decode_sparse
+
+
+_WRAPPERS = {"aiter.fused_moe": _wrap, "atom.entrypoints.openai.api_server": _wrap_atom_api,
+             "aiter.ops.triton.attention.pa_decode_sparse": _wrap_pa_decode_sparse}
 
 
 class _Loader(importlib.abc.Loader):

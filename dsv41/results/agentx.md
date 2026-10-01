@@ -1,5 +1,22 @@
 # AgentX (InferenceX inferencex-agentx-mvp trace replay) -- DSV4.1-Flash
 
+## NEW BEST candidate: + aiter sparse decode #5833 + #6042 (2026-10-01, s6042_c*, 1 run each, 0 errors)
+Same as the table below (a5e40eca5e, same PDI / chunk / mem per point) but PYTHONPATH aiter =
+/sgl-workspace/aiter-5750-sparse6042 (aiter-5750 + pa_decode_sparse.py and gfx950 sparse_mla.py from #5833+#6042;
+not committed anywhere yet). Baseline = night0930 (c2 = mean of 2 runs, c8 = mean of 3 runs).
+
+| conc | s6042 TTT / P90 | baseline TTT / P90 | vs baseline | vs ATOM TTT / P90 |
+|---|---|---|---|---|
+| 1 | 11,521.6 / 367.5 | 11,375.4 / 346.4 | +1.3% / +6.1% | +6.5% / +9.1% |
+| 2 | 11,802.3 / 334.5 | 11,666.3 / 313.0 | +1.2% / +6.9% | +4.8% / +3.2% |
+| 8 | 29,529.9 / 225.8 | 29,385.3 / 210.9 | +0.5% / +7.1% | +0.9% / −5.9% |
+| 16 | 54,303.0 / 142.8 | 54,080.7 / 134.5 | +0.4% / +6.2% | +0.6% / +11.6% |
+| 32 | 98,624.1 / 71.5 | 96,768.1 / 69.9 | +1.9% / +2.3% | +8.4% / +7.7% |
+| 64 | 119,969.9 / 40.8 | 117,918.7 / 40.1 | +1.7% / +1.7% | +17.2% / +76.6% |
+
+c64 TTFT p50/p90 2.25/16.02 -> 1.79/14.17 s. Pass criteria: all met except c8 P90 (−5.9% vs ATOM, bar −5%); the c8
+gap is attributed to ATOM's synthetic-acceptance routing collapse (ATOM_PORT.md STEP 4).
+
 ## CURRENT BEST per concurrency (2026-10-01, overnight sweep night0930_c*)
 rolao/dsv41/opt-branch a5e40eca5e (router fusion + sort multi-phase + teammate wo_a M-bucketed tiles) +
 `--enforce-shared-experts-fusion` + tuned FMoE CSV, TP2 EP1 on MI355X, two TP2 lanes in parallel (GPUs 4,5 / 6,7),

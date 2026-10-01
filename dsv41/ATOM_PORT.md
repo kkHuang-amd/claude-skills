@@ -149,6 +149,52 @@ Full pre-condensation history: /shared_nfs/kk/dsv41/doc_backup_20260929/ATOM_POR
   ~7-9 experts (MoE weight traffic ~5-10x lower than real routing). Real traffic would not have this. Not a kernel,
   scheduling, or PDI problem on our side. Caveats: measured in eager mode (routing is graph-independent; ATOM's
   graph-mode moe1 times 19 us flat corroborate); mechanism inside ATOM still unknown.
+  **STEP 5 (2026-10-01 17:30) -- sparse-attn residual (+0.5 ms bs1->bs6) vs aiter #5833 + #6042.**
+  Our decode attention = aiter pa_decode_sparse (sglang hip_flash_mla.aiter_sparse_decode_fwd, skip_reduce). Probe
+  signatures (sitecustomize pa_decode_sparse wrapper, key (n, has_extra, kv_splits)): q [n,32,512]; main SWA cache
+  [971,256,584] (145 MB) 128 idx/query; most layers ALSO extra compressed cache [103650,128,584] page pitch 74880
+  (~7.8 GB -> 64-bit gathers) with 512 idx/query. Trace: _sparse_mla 38 launches/step, 20.1/21.5/27.8/40.8 us at
+  bs1/2/4/6 (ATOM _paged_decode_split 10.1 -> 18.1 us). aiter-5750 has neither #5833 nor #6042 (UNI_TILE path).
+  Worktrees: /sgl-workspace/aiter-5833 (e7d2453f2 = #5833 on main), /sgl-workspace/aiter-5833-6042 (+ cherry-pick of
+  #6042 042a28918 -> f5aa1272a, clean). Bench scripts/pa_decode_sparse_bench.py (CUDA graph, same inputs, --ref
+  output check), HIP 6, triton 3.7.0. Two-loop (--extra), us at n=6/24/36:
+    aiter-5750 25.4/38.0/51.6 | #5833 22.5/28.6/40.1 | #5833+#6042 21.7/24.6/34.1 (max diff vs 5750 <= 1e-3)
+  SWA-only call (2 layers): 5750 15.7-16.7, #5833 (+/-#6042) 18.7-19.6 (+3 us, negligible); #6042 no effect there.
+  Est. per step (38 calls): -0.51 ms at bs4, -0.67 ms at bs6; per-call growth n6->36 +26 -> +12 us.
+  E2E A/B RUNNING: /sgl-workspace/aiter-5750-sparse6042 = cp -a of aiter-5750 + the 2 files from aiter-5833-6042
+  (pa_decode_sparse.py, _gluon_kernels/gfx950/attention/sparse_mla.py); server base (aiter-5750) GPUs 4,5:8888
+  wrapper 1159355, s6042 GPUs 6,7:8889 wrapper 1160579; decode_bs_sweep ctx 64k bs 1,2,4,6,8 x2.
+  E2E RESULT (18:00), tok/s per request base -> s6042 (step ms): bs1 406.5 -> 417.2 (+2.6%, 8.63 -> 8.41),
+  bs2 348.6 -> 371.2 (+6.5%), bs4 293.6 -> 304.1 (+3.6%, 11.96 -> 11.54), bs6 252.1 -> 263.0 (+4.3%, 13.92 -> 13.35),
+  bs8 237.4 -> 250.3 (+5.4%, 14.79 -> 14.02). Saves 0.2-0.8 ms/step; bs1->bs6 growth 5.29 -> 4.94 ms (-0.35 of the
+  ~0.5 ms residual). Caveat: A and B on different GPU pairs (4,5 vs 6,7) -- swap once to rule out pair bias.
+  NEXT: GSM8K x3 (EVAL_ONLY) on aiter-5750-sparse6042, swap-pair confirm, AgentX c8 (+c1/c2/c16) with it; if good,
+  carry #5833+#6042 into the aiter branch the servers use (untracked copy today, nothing committed). Servers stopped.
+  **AGENTX RUNNING (17:15)** with aiter-5750-sparse6042 (else = night0930 baseline config, SRC sglang-c8-base
+  a5e40eca5e): lane A GPUs 4,5:8888 PID 1165745 s6042_c8 -> s6042_c2 (PDI16, 16384, 0.70); lane B GPUs 6,7:8889
+  PID 1165746 s6042_c16 (0.80) -> s6042_c1 (0.70). ETA ~19:40. Progress lane_{8888,8889}.txt. Baselines: c8 3-run
+  29,385 / 210.9; c2 3-run P90 316.9; c1/c16 from results/agentx.md CURRENT BEST (night0930_c1 / _c16).
+  RESULT c8/c16 (18:25, 1 run each, 0 errors): s6042_c8 TTT 29,529.9 / P90 225.8 / p50 313.6 / TTFT 0.38/1.08 /
+  1373 ok / no-overlap P90 278.6 -> vs 3-run base +0.5% TTT, +7.1% P90 (base runs 209.3-213.3), vs ATOM 240 -5.9%
+  (pass bar 228 not quite). s6042_c16 TTT 54,303.0 / P90 142.8 / p50 244.8 / 2535 ok -> vs night0930_c16 +0.4% /
+  +6.2%. c2/c1 (19:30): s6042_c1 11,521.6 / 367.5 (p50 395.3, 287 ok) vs night0930_c1 11,375.4 / 346.4 -> +1.3% /
+  +6.1%; s6042_c2 11,802.3 / 334.5 (p50 393.9, 424 ok) vs night0930_c2 mean 11,666 / 313.0 -> +1.2% / +6.9%.
+  => sparse kernel (#5833+#6042) improves P90 +6-7% at c1/c2/c8/c16, TTT +0.4-1.3%, no regression. vs ATOM P90
+  (337/324/240): c1 +9.1%, c2 +3.2%, c8 -5.9%. Next: GSM8K x3, c8 repeat, carry into the server aiter branch.
+  **c32/c64 DONE (23:36, 0 errors):** s6042_c32 98,624.1 / 71.5 (+1.9% / +2.3% vs night0930_c32); s6042_c64
+  119,969.9 / 40.8 (+1.7% / +1.7%). Full table c1..c64: results/agentx.md 'NEW BEST candidate'. (launch details:) same s6042 setup (aiter-5750-sparse6042,
+  SRC sglang-c8-base a5e40eca5e). Lane A GPUs 4,5:8888 PID 1249425 s6042_c64 (PDI4, chunk 4096, mem 0.85); lane B
+  GPUs 6,7:8889 PID 1249613 s6042_c32 (PDI4, chunk 16384, mem 0.80) = night0930_c64 / night0930_c32 configs.
+  Progress: lane_{8888,8889}.txt (old lane files -> lane_*.s6042_c1to16.*). Readout (writes nothing):
+    cd /shared_nfs/kk/dsv41/agentx && python3 /tmp/sum.py s6042_c32 night0930_c32 s6042_c64 night0930_c64
+    (/tmp/sum.py prints TTT=throughput.per_gpu.total_tput_tps, P90=latency.intvty.p90, p50, TTFT, ok; if /tmp was
+    wiped: d['request_metrics']['throughput']['per_gpu']['total_tput_tps'], ...['latency']['intvty']['p90'])
+  ATOM refs (results/agentx.md): c32 / c64 TTT are what CURRENT BEST beat by +6.3% / +15.2%.
+  **PR branch pushed (19:55):** HaiShaw/sglang perf/v41-mxfp8-quant-fusion = upstream 3b2ad1c6ae + da03368107
+  (cherry-pick of wunhuang's d7bc47a, author kept; conflicts in environ.py (kept both env blocks) and
+  gfx95_batched_gemm_bf16_fp8_grid.py (kept upstream _tile_config M-buckets + our emit_fp8 scale args)). Smoke
+  /tmp/mxfp8_gemm_smoke.py: emit_fp8 dequant == bf16 fp8-grid output, all tile buckets x split_k OK. Worktree
+  /sgl-workspace/sglang-mxfp8-pr (branch v41-mxfp8-quant-fusion-pr). PR itself not opened yet.
   NEXT (user to decide): write up for benchmark owners / ATOM (evidence: route tables, per-layer convergence,
   microbench); optionally find the mechanism (dump ATOM verify input_ids/positions). Servers stopped, GPUs 4-7 free.
   (old) NEXT: GPU-only profile both engines at ctx 64k bs 4 and 6 (same client, warm), per-kernel/per-step breakdown;

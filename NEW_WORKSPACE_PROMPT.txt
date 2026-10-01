@@ -164,6 +164,15 @@ Then state what you found in one or two lines and proceed.
         T=$(git write-tree); C=$(git commit-tree "$T" -p HEAD -F msg.txt)
         git update-ref refs/heads/<branch> "$C"
   - Never force-push; `git fetch` before every push.
+  - PR title/description: short, plain, reads like a human wrote it.
+      Title: [AMD][V4.1][k/N] <what the PR achieves>  (adapt the model tag)
+      Fill only the template's Motivation / Modifications / Accuracy Tests /
+      Speed Tests; keep the Checklist, review text and the bot's CI-states
+      block untouched (GET body, replace "## Motivation".."## Checklist",
+      PATCH). Motivation 1-2 sentences; Modifications 2-4 bullets (what
+      changed + env knob and default); Accuracy one line (GSM8K numbers);
+      Speed 1-3 lines of before -> after. No internal paths, hostnames,
+      investigation history, or AI attribution.
   - Long-running servers/benchmarks: launch in the background, filter the log,
     and tell me the PID and how to kill it.
 

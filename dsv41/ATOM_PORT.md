@@ -59,9 +59,101 @@ Full pre-condensation history: /shared_nfs/kk/dsv41/doc_backup_20260929/ATOM_POR
   bsweep1001b DONE (warm, reps agree): 8k now matches 64k/128k (bs4 -12.6%, bs6 -12.6%, bs8 +11.7%); 64k bs3 -8.3%,
   bs5 -13.7%, bs7 +13.8%. => gap at bs 3-6 (-8..-14%); ATOM has a cliff between bs6 and bs7 (300 -> 213 tok/s,
   i.e. bs*6 verify tokens 36 -> 42), ours declines smoothly. Context length does not matter (8k = 64k = 128k).
-  NEXT: GPU-only profile both engines at ctx 64k bs 4 and 6 (same client, warm), per-kernel/per-step breakdown;
+  **STEP 2 DONE (2026-10-01 11:05) -- profile attribution, bs 1/2/4/6 @ ctx 64k, both engines.**
+  Tools: decode_bs_sweep.py --profile-dir (SGLang /start_profile GPU 40 steps; ATOM needs `--torch-profiler-dir`
+  via ATOM_EXTRA_ARGS -- the env var alone is overridden by arg_utils default None), bs_scaling_compare.py (per-step
+  groups + kernel growth). Traces: /shared_nfs/kk/dsv41/atomport/prof_bsweep/prof_{sgl,sglt0}_ctx65536_bs*,
+  /shared_nfs/kk/atom_run/prof_bsweep/{bs*,t0_bs*}. ATOM steps = count(rejection_synthetic_sample_kernel).
+  Validity: SGLang kernel sum matches unprofiled step (11.45 busy vs 3.51/269 = 13.0 ms wall incl. gap) -> graph
+  kernel durations are real on this stack. Cross-engine ABSOLUTE times are confounded (ATOM profiler traces CPU and
+  inflated its step 10.4 -> 12.0 ms; ATOM ~1800 kernels/step vs our ~1105) -> compare GROWTH from bs1 per engine.
+  Unprofiled step (3.51/tps): ours 8.7 (bs1) -> 11.8 (bs4) ms, ATOM 9.6 -> 10.4 ms.
+  Busy growth bs1->bs6 (default temp): ours +5.21 ms, ATOM +2.23. MoE group: ours 2.53 -> 5.54 (+3.01), ATOM
+  2.69 -> 3.17 (+0.48) = ~2.5 of the ~3.0 ms extra growth. Sparse attn +0.82 vs +0.33. gemm/allreduce grow equally.
+  Per launch (us, bs1/2/4/6): ours moe1 a8w4 (t32x128x256 -> t32x64x256_kw2 at bs>=4) 25.8/39.5/62.7/73.9, ours
+  gemm2_a4w4_port 14.2/19.9/31.9/38.8; ATOM moe1 afp4_wfp4 t32x128x256 19.4/18.6/19.0/24.0, moe2 afp4 cshuffle
+  9.4/8.2/8.5/13.0.
+  Checked: ATOM synthetic sampler force-accepts the REAL draft token ids (only the API text is "synthetic "), so no
+  fixed-token routing collapse.
+  TEMP 0 test (both greedy): ours MoE growth +3.01 -> +2.15 ms, tps bs4/bs6 269 -> 285 / 232 -> 248 (+6-7%); ATOM
+  unchanged (+0.45; ATOM already greedy-draft under synthetic accept). => ~0.9 ms/step at bs6 is our more diverse
+  token stream at temp 1 (sampled bonus/draft -> more distinct experts); ~1.7 ms MoE growth gap remains greedy.
+  Rough roofline (hypothesis, routing not measured): our a8w4 does ~5.4 TB/s at random routing (9.4 MB experts) ->
+  bs6 113 us ~ 65 experts; ATOM's 37 us can load <= ~31 experts even at 8 TB/s peak -> ATOM is touching fewer
+  distinct experts OR is far more efficient. Cannot tell from traces alone.
+  NEXT (decisive, one variable each): (1) log distinct experts per MoE layer per step in both engines at bs 1/4/6
+  (topk_ids unique count) -> routing vs kernel; (2) offline microbench with IDENTICAL topk_ids at tokens 6..48:
+  our a8w4 flydsl stage1/2 vs afp4_wfp4 flydsl (ATOM's kernels) for 5120/1152, E=385 k=7 and E=384 k=6;
+  (3) temp-parity item: why our temp-1 stream is more diverse than ATOM's (sample_simulated_bonus?) -- AgentX sends
+  no temperature, so this ~0.9 ms at bs6 is live in c8. Servers up: SGLang PID 1054569 (8888, HIP 4,5 = smi 4,7),
+  ATOM-with-profiler PID 1082834 (8000, HIP 6,7).
+  **STEP 3 (2026-10-01 11:40) -- distinct experts per MoE call, both engines EAGER + scripts/moe_route_probe**
+  (sitecustomize wraps aiter.fused_moe.fused_moe; stats per (E, num_tokens) -> $MOE_PROBE_OUT.<pid>; ATOM via
+  PROBE=1 PROBE_DIR=... MOE_PROBE_OUT=... and ATOM_EXTRA_ARGS="--enforce-eager --level 0 --cudagraph-mode NONE";
+  SGLang via PYTHONPATH prefix + --disable-cuda-graph). route_ab.py, ctx 8192 random ids, OSL 512, 1 rep.
+  Mean distinct routed experts per TARGET MoE call (ours E385 / ATOM E384), temp0 | default:
+    T6 (bs1):  ours 16.4 | 16.4   ATOM 9.0 | 9.1
+    T24 (bs4): ours 37.4 | 47.9   ATOM 7.0 | 6.8   <- ATOM's 24 tokens route to ~7 experts = near-identical tokens
+    T36 (bs6): ours 57.8 | 79.2   ATOM 73.0 | 58.5 (prompt-dependent; the 64k bs6 profile must have collapsed too:
+    24 us moe1 cannot load ~70 experts).
+  => the bs-scaling "MoE gap" is largely a WORKLOAD difference: ATOM's decode stream on random-id prompts routes to
+  far fewer experts. Our greedy stream is also repetitive (seed0 8 unique / 50 tokens). Verifying ATOM's actual ids
+  via a delivered_text hook (token_stream_check.py; ATOM API text is "synthetic "). Also: our DSPARK_BLOCK_SIZE=5 vs
+  ATOM 5 spec + 1 -- both show T=6/request in the probe. Hash-routed layers (tid2eid[input_ids]) make routing
+  directly token-id dependent. Open: does the same collapse happen in AgentX (real-text prompts)? If yes, ATOM's
+  c8 P90 is partly a benchmark artifact of force-accepted degenerate drafts.
+  KERNEL study (user asked to include): ours a8w4 because weights are gate/up INTERLEAVE (aiter fused_moe.py
+  ~L792: INTERLEAVE on gfx950 -> bf16/fp8 act); non-interleaved Silu -> fp4x2 act (a4w4, ATOM). Plan: probe also
+  dumps one fused_moe call signature per (E,T) ($MOE_PROBE_OUT.sig.<pid>.jsonl); microbench rebuilds random tensors
+  of the same shapes/kwargs and runs each engine's own aiter at identical topk_ids with controlled distinct experts.
+  **STEP 3 RESULTS (2026-10-01 12:30):**
+  (a) Token streams (token_stream_check.py, ATOM ids via delivered_text hook): ATOM's delivered ids are DIVERSE
+  (0.74-0.86 unique / 200, both temps); ours are repetitive (temp0 0.04-0.47, default 0.07-0.49). So the collapse
+  is NOT repeated token ids.
+  (b) Per-layer dump (MOE_PROBE_DUMP + flag file $MOE_PROBE_OUT.dump_on): layer 0 routing is IDENTICAL in both
+  engines (same first-token row), ours stays diverse with depth (6 unique rows, 16-31 distinct per layer), ATOM
+  CONVERGES with depth: distinct 29 -> 15 -> 16 -> 11 -> 9 -> 7, unique routing rows 6 -> 2 by ~layer 5, hidden row
+  norms identical (13.00/13.00). => inside ATOM the verify tokens of a request become near-identical through the
+  stack. Mechanism unknown (ATOM itself declares synthetic-acceptance output meaningless; force-accepted drafts may
+  be degenerate). Measured consequence: ATOM touches far fewer experts per verify call.
+  (c) KERNEL study (moe_kernel_bench.py, identical controlled topk_ids, CUDA-graph timing, whole fused_moe call;
+  needs is_shuffled=True on w1/w2, AITER_BF16_FP8_MOE_BOUND=0, w2_scale cols padded 36 -> 40 or the kernel faults):
+  T:D -> ours a8w4 interleave / a4w4 separated E384k6 / a4w4 separated E385k7 (our aiter, HIP6):
+    6:7 49.6/57.3/59.4  6:16 58.4/65.4/66.6  24:7 46.6/58.9/59.3  24:37 87.8/85.7/90.3  24:48 102.9/95.6/100.3
+    36:58 118.5/126.9/131.6  36:80 149.0/151.1/157.8 us. ATOM's own aiter+configs (chroot, HIP7) same within ~10%.
+  => at equal routing the kernels are equivalent (ours slightly faster at low D); cost tracks distinct experts.
+  The kernel choice (a8w4 vs a4w4) is NOT the c8 gap. Switching to a4w4 would buy nothing and risk accuracy.
+  CONCLUSION: the bs 3-6 step gap vs ATOM is mostly MoE work driven by how many distinct experts the verify
+  tokens route to, and ATOM's synthetic-acceptance verify tokens collapse to few experts. Our ~0.9 ms (bs6) temp-1
+  extra diversity is the same effect on our side.
+  OPEN / NEXT: (1) does ATOM's collapse also happen under AgentX real-text prompts (probe ATOM eager on a short
+  AgentX replay)? If yes, ATOM's c8 P90 reference is inflated by a synthetic-acceptance artifact -> raise with the
+  benchmark owners rather than chase it. (2) Find ATOM's mechanism (dump verify input_ids/positions in ATOM).
+  (3) Our temp-1 diversity (~0.9 ms at bs6): real-traffic-correct, only reducible by changing what simulated
+  acceptance feeds back (fairness question, same as item E).
+  Servers: all stopped after STEP 3 (GPUs 4-7 free).
+  **STEP 4 RUNNING (11:30): AgentX-text routing check.** Eager+probe servers (SGLang 4,5:8888 wrapper 1109712;
+  ATOM 6,7:8000 wrapper 1109713), scripts/moe_route_probe/agentx_route.sh = same aiperf agentx-mvp c8 command,
+  600 s + --unsafe-override (scenario wants >=900 s), warmup 1/lane; probe snapshot diff -> distinct experts per
+  verify size. Outputs /shared_nfs/kk/dsv41/atomport/agentx_route_sgl, /shared_nfs/kk/atom_run/agentx_route.
+  Decision: ATOM collapses on AgentX too -> c8 P90 gap is largely a synthetic-acceptance artifact (report to
+  benchmark owners); no collapse -> re-attribute c8 under AgentX load.
+  **STEP 4 RESULT (12:00): ATOM COLLAPSES ON AGENTX TOO (stronger than on random ids).** 640 s, 0 errors both
+  (SGLang 65 req, ATOM 62). Mean distinct routed experts per target-MoE decode call, by verify tokens T:
+    T6 ours 24.0 / ATOM 9.0; T12 42.2 / 6.9; T18 57.8 / 6.4; T24 73.0 / 7.0; T30 84.3 / 7.4;
+    weighted over all decode calls ours 45.3 / ATOM 8.6 (316k / 265k calls). ATOM T>=36 calls look normal (~91-114;
+    T36 2840 calls) -- not yet explained (non-verify / mixed batches?).
+  With the equal-routing microbench (24 tokens: 7 experts ~47-59 us vs 37-48 experts ~86-103 us per layer), this
+  accounts for roughly 40 x ~40 us ~ 1.6 ms/step at bs4, i.e. about the whole unprofiled bs4 gap (11.8 vs 10.4 ms).
+  CONCLUSION C: the c8 P90 gap vs ATOM is dominated by ATOM's synthetic-acceptance verify tokens collapsing onto
+  ~7-9 experts (MoE weight traffic ~5-10x lower than real routing). Real traffic would not have this. Not a kernel,
+  scheduling, or PDI problem on our side. Caveats: measured in eager mode (routing is graph-independent; ATOM's
+  graph-mode moe1 times 19 us flat corroborate); mechanism inside ATOM still unknown.
+  NEXT (user to decide): write up for benchmark owners / ATOM (evidence: route tables, per-layer convergence,
+  microbench); optionally find the mechanism (dump ATOM verify input_ids/positions). Servers stopped, GPUs 4-7 free.
+  (old) NEXT: GPU-only profile both engines at ctx 64k bs 4 and 6 (same client, warm), per-kernel/per-step breakdown;
   first suspects are anything whose cost scales with bs*6 tokens (MoE M-buckets / tuned CSV rows at M=24..36,
-  attention decode split, sampling). Servers still up: SGLang PID 1054569 (8888), ATOM PID 1054570 (8000).
+  attention decode split, sampling). Servers still up: SGLang PID 1054569 (8888), ATOM PID 1054570 (8000) [replaced 10:35 by profiler-enabled ATOM, see STEP 2].
   **C RUN LOG (launched 2026-10-01 07:25):** both lanes below, lane PIDs 1026775 (k175, 8888) / 1026776 (k350, 8889) (relaunched 07:33; first try crashed on self.tp_rank in temp log, dirs *.tprankcrash);
   kill: `kill -- -<pid>` then free GPUs 4-7. Overnight nohups moved to lane_888{8,9}.night0930.nohup. TEMP log
   `PDICOST ext= pre_max= steps=` (tp_rank 0, marker TMP_PDICOST_LOG) added in scheduler._prefill_cost_decode_steps --

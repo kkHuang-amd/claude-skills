@@ -17,7 +17,9 @@ ENVV=(PATH=/root/.cargo/bin:/usr/local/go/bin:/opt/venv/bin:/opt/rocm/bin:/usr/l
   HSA_ENABLE_IPC_MODE_LEGACY=1 MOONCAKE_DISABLE_HIP_DMABUF=1 HIP_VISIBLE_DEVICES=${GPUS:-4,5}
   OMP_NUM_THREADS=4 ATOM_NUMA_BIND=0 ATOM_DISABLE_MMAP=true AITER_LOG_LEVEL=WARNING HF_HUB_OFFLINE=1
   ATOM_PATHPROBE_OUT=${ATOM_PATHPROBE_OUT:-/tmp/atom_pathprobe.jsonl})
-[ "${PROBE:-0}" = 1 ] && ENVV+=(PYTHONPATH=$D/atom_pathprobe)
+[ "${PROBE:-0}" = 1 ] && ENVV+=(PYTHONPATH=${PROBE_DIR:-$D/atom_pathprobe})
+[ -n "${MOE_PROBE_OUT:-}" ] && ENVV+=(MOE_PROBE_OUT=$MOE_PROBE_OUT MOE_PROBE_DUMP=${MOE_PROBE_DUMP:-0})
+[ -n "${ATOM_TORCH_PROFILER_DIR:-}" ] && ENVV+=(ATOM_TORCH_PROFILER_DIR=$ATOM_TORCH_PROFILER_DIR)
 if [ "${MODE:-cmd}" = server ]; then
   CONC=${CONC:-1}; CAP="[1,2,3,4,5,6,7,8,16,32,48,64,128]"
   [ "$CONC" -eq 32 ] && CAP="[$(seq -s, 1 32),48,64,128]"

@@ -23,8 +23,13 @@ ap.add_argument("--temperature", type=float, default=None)
 ap.add_argument("--model", default="/shared_nfs/deepseek-ai/DeepSeek-V4.1-Flash")
 ap.add_argument("--tag", default="x")
 ap.add_argument("--out", default="/shared_nfs/kk/dsv41/atomport/decode_bs_sweep.tsv")
+ap.add_argument("--profile-dir", default="", help="profile repeat 0 of each point once all streams decode")
+ap.add_argument("--profile-delay", type=float, default=2.0)
+ap.add_argument("--profile-steps", type=int, default=40, help="SGLang num_steps")
+ap.add_argument("--profile-secs", type=float, default=0.5, help="ATOM start->stop window")
 a = ap.parse_args()
 URL = f"http://127.0.0.1:{a.port}"
+started = []
 
 
 def request(ids, max_tokens, stream):
@@ -50,6 +55,8 @@ def one(ids, res):
             if not line.startswith(b"data:") or line.strip() == b"data: [DONE]":
                 continue
             d = json.loads(line[5:])
+            if not stamps:
+                started.append(1)
             if a.engine == "sglang":
                 stamps.append(time.perf_counter()); ntok.append(d["meta_info"]["completion_tokens"])
             else:
@@ -63,6 +70,21 @@ def one(ids, res):
     res.append((stamps, ntok))
 
 
+def profile_when_decoding(bs, sub):
+    while len(started) < bs:
+        time.sleep(0.05)
+    time.sleep(a.profile_delay)
+    if a.engine == "sglang":
+        body = {"output_dir": f"{a.profile_dir}/{sub}", "num_steps": a.profile_steps, "activities": ["GPU"],
+                "with_stack": False, "record_shapes": False}
+        r = requests.post(URL + "/start_profile", json=body, timeout=600)
+    else:
+        requests.post(URL + "/start_profile", timeout=600).raise_for_status()
+        time.sleep(a.profile_secs)
+        r = requests.post(URL + "/stop_profile", timeout=1800)
+    print(f"profile {sub}: {r.status_code} {r.text[:160]}", flush=True)
+
+
 for ctx in [int(x) for x in a.ctx.split(",")]:
     for bs in [int(x) for x in a.bs.split(",")]:
         for rep in range(a.repeat):
@@ -74,7 +96,10 @@ for ctx in [int(x) for x in a.ctx.split(",")]:
                 url, body = request(p, 1, False)
                 requests.post(url, json=body, timeout=7200).raise_for_status()
             res = []
+            started.clear()
             ths = [threading.Thread(target=one, args=(p, res)) for p in prompts]
+            if a.profile_dir and rep == 0:
+                ths.append(threading.Thread(target=profile_when_decoding, args=(bs, f"{a.tag}_ctx{ctx}_bs{bs}")))
             for t in ths: t.start()
             for t in ths: t.join()
             tps, itl = [], []

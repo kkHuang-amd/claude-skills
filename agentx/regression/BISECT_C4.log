@@ -1,0 +1,12 @@
+2026-10-02 14:22:05 ==== bisect_c4 start (pid 54772)
+2026-10-02 14:28:57 ==== bisect_c4 start (pid 55458)
+2026-10-02 14:44:58 REF good c73f7077eb tok=3640.3 | B0 41cbe65de0 = 3683.3 183.0 594
+2026-10-02 14:44:58 RUN c4 c73f7077eb tag=sglc73f-049-r2 (attempt 1)
+2026-10-02 15:53:54 good rerun c73f7077eb = 3355.6 182.0 559
+2026-10-02 15:53:54 good mean 3497.9, same-code spread 0.0814, gap vs B0 -0.0530
+2026-10-02 15:53:54 ABORT: same-code spread 0.0814 >= half the gap -0.0530 -- c4 tok/s/GPU too noisy to bisect; needs a better metric or more runs
+2026-10-02 17:07:42 ==== bisect_c4 start (pid 68146)
+2026-10-02 17:07:42 REF good c73f7077eb = 3640.3 191.7 589 | rerun = 3355.6 182.0 559 | B0 41cbe65de0 = 3683.3 183.0 594
+2026-10-02 17:07:42 tok/s/GPU: good 3497.9 bad 3683.3 gap -0.0530 spread 0.0814 -> used=0 (mid 3590.6 band -46.34)
+2026-10-02 17:07:42 intvty:    good 186.8 bad 183.0 gap 0.0206 spread 0.0519 -> used=0 (mid 184.9 band 0.96)
+2026-10-02 17:07:42 DONE: no c4 gap that the same-code spread can resolve (need gap >= 0.04 and spread < gap/2) -- nothing to bisect

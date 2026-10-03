@@ -12,6 +12,7 @@ Owner node: crsuse2-m2m-049
 #41931（只改 compressor）完全補回：c1 配對 per-request ITL，HEAD 比 PA 慢 2.6 %，B1 比 PA 快 1.3 %；server decode 213.5 => 221.6（PA 219.0）。
 c4 **不可 bisect**：同一個 c73f 跑兩次，tok/s 差 8.1 %、intvty 差 5.2 %（雙峰：約 590 vs 約 560 個請求），雙指標 bisect 17:08 以「DONE: no c4 gap」結束。
 GPU 已釋放；沒有任何背景工作。fix branch `fix/dsv4-compressor-tgemm` 尚未 commit。
+**更新（10-03 04:11）：** 修正版 c1/c4/c16/c256 vs CI 已完成（見文末），全部在 CI 雜訊內（c4 雙峰除外）。GPU 已釋放，沒有背景工作。
 **雜訊檢查（14:35 加入）：** B0 之後先在 049 重跑 c73f c4（075 同 code 只有 3,425，而 049 是 3,640）；同 code 差距 ≥ gap/2 就停止 bisect，不做。
 判準：tok/s/GPU ≥ mid+band 為 good、≤ mid-band 為 bad，中間就重跑一次、取平均和 mid 比；mid、band 由 Phase A c4 與 B0 c4 算出。
 **決策紀錄：** `BISECT_C4.log`（本目錄）。**斷線恢復：** 直接重新啟動同一個指令（結果依 TAG 快取，已完成的會跳過）：
@@ -198,3 +199,42 @@ PA 自己的 slow tail 若也會飄約 3 %，就是雜訊。另外排 B1 c1（�
 - **結論：** 可量到的回歸只有 decode 速度（c1 per-request ITL +2.6 %、server decode -2.5～-3.2 %），#41931 可以補回（c4 server 端已確認）。
   B1 c1（約 17:20）是最後的確認。同事看到的 c4 gap 要確認是不是這種請求數的雙峰（比對 succ 數）。
 | crsuse2-m2m-049 | 2026-10-02 | c1 | **B1** fix branch（HEAD + #41931） | 2,124.9（PA +1.5 %） | 218.2（-0.5 %） | OK，246 succ | **修正確認**：配對 ITL median 0.987（p10–p90 0.970–1.014），B0 是 1.026；server decode 221.6（PA 219.0 / B0 213.5） |
+
+### 修正版全點 vs CI（2026-10-02 23:53，crsuse2-m2m-049）
+
+使用者要求：用 `/sgl-workspace/sglang`（fix branch = HEAD 41cbe65de0 + #41931）跑 c1/c4/c16/c256，tok/s/GPU 和 P90 intvty 對 CI。
+`TAG=fix41931-049 POINTS="c1 c4 c16 c256" SKIP_SMOKE=1`，matrix pid 74372 @049。c1/c4 沿用 B1 已有結果（matrix 自動 SKIP）；
+c16 23:53 開始（約 01:10），c256 接著跑（MegaMoE/HiCache/router，FlyDSL 首次編譯可能要 15–30 分；約 03:30）。
+`e2e/points/ci36401947630/c256/client_env` 補上 `KV_OFFLOAD_BACKEND_METADATA='{"name":"hicache"}'`（075 查出的：缺了它 client 不寫 JSON），現在和 `../points/c256` 一致。
+075 的 c256 參考（c73f，舊 aiter）：61,551.3 tok/s（CI -4.2 %），P90 intvty 25.62（-1.9 %），ITL mean +8 %。
+- c16 DONE 01:07：11,191.9 tok/s/GPU，P90 intvty 94.06。
+- c256 第 1 次（01:07）：**EPLB rebalance deadlock**（SKILL.md 有記錄的偶發問題）：8 個 rank 都有 `rebalance start`、0 個完成；
+  最後一筆 batch 01:23:18，01:33 所有 rank NCCL COALESCED timeout，/metrics 照樣回 200。01:55 手動停掉（不等到 05:07 的 4h 逾時），
+  原目錄改名為 `e2e-c256-fix41931-049.void-*`；01:55:19 重跑（matrix pid 90238）。
+
+**修正版 c1/c4/c16 vs CI（02:00）：**
+| 點 | tok/s/GPU（vs CI） | P90 intvty（vs CI） | ITL mean（vs CI） | succ（CI） |
+|---|---|---|---|---|
+| c1 | 2,124.9（+2.2 %） | 218.2（+0.7 %） | 4.31（-2 %） | 246（243） |
+| c4 | 3,374.3（-7.5 %，560 群） | 185.4（-1.6 %） | 4.75（0 %） | 560（592） |
+| c16 | 11,191.9（-0.2 %） | 94.06（-2.7 %） | 7.44（+2 %） | 2,302（2,303） |
+
+c16 觀察：和 049 PA c16 配對，per-request ITL median +1.6 %（很分散，p10 0.73 / p90 1.42）；server decode 在 bs 1 持平（250），
+bs≥2 各桶一致低 1.5–3.4 %（例：5–8 836→823，9–16 1029→994）。fix 在 M≥14 理應已補回 GEMM，所以這可能是
+c73f..HEAD 之間其他 commit 造成的小幅回歸（bs≥2 才出現）；也可能是雜訊（每桶裡的 context 長度不同）。量級 ≤3 %，在 e2e 雜訊內，暫列觀察。
+- c256 第 2 次 DONE 04:11（rebalance 正常）：64,603.5 tok/s/GPU（CI +0.5 %），P90 intvty 26.22（CI +0.4 %），15,393 succ（CI 15,361），
+  ITL mean 35.03（+1.6 %），TTFT mean -2.7 %。比 075 的 c73f/舊 aiter（61,551 / 25.62，ITL +8 %）更接近 CI。
+
+**修正版（HEAD 41cbe65de0 + #41931）全點 vs CI 結論：** c1 / c16 / c256 的兩個主要指標都在 CI ±3 % 內；c4 intvty -1.6 %，tok/s -7.5 %
+是 560 請求那一群（雙峰，非 code）。除了 c16 bs≥2 的 ≤3 % 觀察以外，沒有其他效能差異。
+- **重跑 c4/c16（user 10-03）：** 確認是誤差還是一直偏低。`TAG=fix41931-049-r2 POINTS="c4 c16"`，同一個 fix branch，預計 c4 ~05:30、c16 ~06:45。
+- c4 r2 DONE 05:26：560 succ，3,374.3 tok/s（和 B1 一樣：同一組 560 請求，total token 幾乎相同；JSON 是新的，duration 3,606 vs 3,620 s），
+  P90 intvty 184.6；server bs1 226.1 / bs2 389.6（PA 225.9 / 386.0）。
+  **同一群內比較：** 560 群 c73f 3,355.6 / 182.0，修正版 3,374.3 / 185.4、184.6 => 修正版 ≥ c73f。c4 沒有回歸，和 CI 的差距完全來自群別。
+- c16 r2 DONE 06:39：11,443.0 tok/s（CI +2.1 %），P90 intvty 101.91（CI +5.4 %），ITL mean 7.14（CI -2 %），2,321 succ。
+  配對 vs 049 PA：ITL median 0.995（第 1 次是 1.016）。server 各 bs 桶，同一份 code 跑兩次就差 ±2–4 %
+  （c73f：075 9–16 桶 993 vs 049 1029；修正版 bs2 408 vs 423、9–16 994 vs 1026）。
+  **結論：c16 第 1 次的 ≤3 % 是誤差，不是回歸。**
+
+**最終（10-03 06:40）：** 修正版（HEAD + #41931）在 c1/c4/c16/c256 都沒有效能回歸：c1 c16 c256 在 CI 雜訊內，
+c4 和 CI 的差距只是請求數群別（同一群內修正版 ≥ c73f）。唯一的真回歸是 #41019 的 GEMM，已由 #41931 修正。GPU 已釋放，沒有背景工作。

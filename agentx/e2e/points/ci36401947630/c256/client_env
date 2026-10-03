@@ -25,3 +25,4 @@ RESULT_FILENAME=dsv4_fp4_sglang_tp8_c256_dpep8_agentic
 REQUIRE_POWER=0
 GPU_MONITOR_INTERVAL=1
 GPU_METRICS_CSV=gpu_metrics.csv
+KV_OFFLOAD_BACKEND_METADATA='{"name":"hicache"}'

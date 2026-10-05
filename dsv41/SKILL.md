@@ -60,6 +60,7 @@ dsv41/
   ATOM_PORT.md     porting ATOM V4.1 optimizations (gap list in NOTES.md 2026-09-27).
   RUNBOOK.md       rebuild the validated env from a fresh container (keep in sync with scripts/).
   ENV_1001.md      HaiShaw/sglang dsv41-env + aiter e7d2453f2 + #5967 env rebuild and validation (own CONTINUE HERE).
+  MAIN_REGRESS_1002.md  regression check of upstream main + PR #42055 vs env1001 (own CONTINUE HERE).
   NOTES.md         longer findings / investigation log, newest first.
   scripts/         ALL runnable scripts (*.sh, *.py). Nothing executable anywhere else.
   patches/         other repos: <repo>_<upstreamPR>_<what>.patch (`git -C /sgl-workspace/<repo> apply`);

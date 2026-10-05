@@ -1,5 +1,62 @@
 # AgentX (InferenceX inferencex-agentx-mvp trace replay) -- DSV4.1-Flash
 
+## SUMMARY vs B200 vLLM NEW (run 37070984585, pulled 2026-10-05 by mi355-4)
+Same MI355X numbers as the 2026-10-05 summary below; only the vLLM column changes. vLLM = best TTT of TP / DEP at that
+GPU count (TP2 points are DEP2 only; TP4 c64 DEP4 117,168.9 > TP4 116,807.6). Raw table: "Reference: vLLM on B200 NEW".
+
+| 併發 | TP | BCG TTT / P90 | Replay TTT / P90 | B200 vLLM TTT / P90 | BCG vs vLLM | Replay vs vLLM |
+|---|---|---|---|---|---|---|
+| 1 | 2 | 11,375.4 / 346.4 | 11,697.4 / 357.7 | not in new run | – | – |
+| 2 | 2 | 11,692.9 / 315.7 | 12,022.3 / 330.7 | not in new run | – | – |
+| 8 | 2 | 29,417.4 / 210.0 | 29,760.8 / 237.2 | 31,045.0 / 287.9 (DEP2) | -5.2% / -27.1% | -4.1% / -17.6% |
+| 16 | 2 | 54,080.7 / 134.5 | 54,345.3 / 165.0 | 56,674.2 / 230.1 (DEP2) | -4.6% / -41.5% | -4.1% / -28.3% |
+| 32 | 2 | 96,768.1 / 69.9 | 105,800.1 / 93.7 | 117,908.2 / 149.5 (DEP2) | -17.9% / -53.2% | -10.3% / -37.3% |
+| 64 | 2 | 117,918.7 / 40.1 | 142,243.2 / 52.0 | not in new run | – | – |
+| 1 | 4 | 6,188.1 / 391.8 | 6,271.4 / 406.7 | 7,698.6 / 583.2 (TP4) | -19.6% / -32.8% | -18.5% / -30.3% |
+| 2 | 4 | 6,362.9 / 368.0 | 6,322.4 / 373.4 | not in new run | – | – |
+| 8 | 4 | 15,290.4 / 278.6 | 15,335.5 / 285.8 | 16,549.2 / 385.0 (TP4) | -7.6% / -27.6% | -7.3% / -25.8% |
+| 16 | 4 | 27,946.0 / 203.4 | 28,141.6 / 220.1 | 29,412.5 / 317.6 (TP4) | -5.0% / -36.0% | -4.3% / -30.7% |
+| 32 | 4 | 56,039.2 / 120.6 | 57,890.6 / 138.5 | 62,356.4 / 221.4 (TP4) | -10.1% / -45.5% | -7.2% / -37.4% |
+| 64 | 4 | 81,735.1 / 60.1 | 88,391.8 / 66.5 | 117,168.9 / 138.8 (DEP4) | -30.2% / -56.7% | -24.6% / -52.1% |
+
+## Reference: vLLM on B200 NEW (InferenceX run 37070984585, 2026-10-02, pulled 2026-10-05 by mi355-4)
+[Run Sweep](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/37070984585/attempts/1) a8504a430 "Update B200 DSV41flash
+vLLM image and retune TP4/DEP2/DEP4", b200-nscale, vllm/vllm-openai:nightly-dev-x86_64-cu130-ac9126e58aa7, spec mtp. No
+agg_bmk artifact; per-point bmk_agentic_* JSONs in /shared_nfs/kk/dsv41/ref_b200_vllm/run37070984585/ (same fields as below).
+Only these 12 points were swept (no pure TP2, no TP4 c2).
+
+| conc | DEP2 (tp2 ep2 dpa) | TP4 (ep1) | DEP4 (tp4 ep4 dpa) | ok / total requests |
+|---|---|---|---|---|
+| 1 | – | 7,698.6 / 583.2 | – | TP4 334/345 |
+| 4 | – | 10,293.2 / 446.0 | – | TP4 770/814 |
+| 8 | 31,045.0 / 287.9 | 16,549.2 / 385.0 | – | 1399/1486, 1437/1524 |
+| 16 | 56,674.2 / 230.1 | 29,412.5 / 317.6 | – | 2634/2811, 2722/2900 |
+| 32 | 117,908.2 / 149.5 | 62,356.4 / 221.4 | – | 4737/5091, 4927/5281 |
+| 64 | – | 116,807.6 / 142.9 | 117,168.9 / 138.8 | 11500/12211, 11543/12250 |
+| 128 | – | 166,192.5 / 72.2 | 173,193.9 / 81.2 | 18300/19724, 18804/20226 |
+
+## SUMMARY vs B200 vLLM (2026-10-05): TP2 / TP4, BCG vs Replay
+TTT = tok/s/GPU, P90 = P90 interactivity. MI355X, EP1, engram host table, MTP/DSpark. Replay = --enable-decoder-swa-bounded-replay
+--cuda-graph-backend-prefill disabled; BCG = breakable prefill graph, no replay. B200 vLLM = InferenceX run 36423355395 (same TP).
+
+| 併發 | TP | PDI | chunk | mem-fraction | BCG TTT / P90 | Replay TTT / P90 | B200 vLLM TTT / P90 | BCG vs vLLM | Replay vs vLLM |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 2 | 16 | 16384 | 0.70 | 11,375.4 / 346.4 | 11,697.4 / 357.7 | 13,128.0 / 393.1 | -13.4% / -11.9% | -10.9% / -9.0% |
+| 2 | 2 | 16 | 16384 | 0.70 | 11,692.9 / 315.7 | 12,022.3 / 330.7 | 13,448.7 / 373.4 | -13.1% / -15.5% | -10.6% / -11.4% |
+| 8 | 2 | 16 | 16384 | 0.70 | 29,417.4 / 210.0 | 29,760.8 / 237.2 | 31,009.1 / 252.7 | -5.1% / -16.9% | -4.0% / -6.1% |
+| 16 | 2 | 16 | 16384 | 0.80 | 54,080.7 / 134.5 | 54,345.3 / 165.0 | 55,804.0 / 175.0 | -3.1% / -23.1% | -2.6% / -5.7% |
+| 32 | 2 | 4 | 16384 | 0.80 | 96,768.1 / 69.9 | 105,800.1 / 93.7 | 93,351.7 / 67.3 | +3.7% / +3.9% | +13.3% / +39.2% |
+| 64 | 2 | 4 | 4096 | 0.85 | 117,918.7 / 40.1 | 142,243.2 / 52.0 | 20,502.5 / 28.1 ⁴ | +475.1% / +42.7% | +593.8% / +85.1% |
+| 1 | 4 | 16 | 16384 | 0.70 | 6,188.1 / 391.8 | 6,271.4 / 406.7 | 7,282.7 / 512.3 | -15.0% / -23.5% | -13.9% / -20.6% |
+| 2 | 4 | 16 | 16384 | 0.70 | 6,362.9 / 368.0 | 6,322.4 / 373.4 | 7,450.1 / 470.2 | -14.6% / -21.7% | -15.1% / -20.6% |
+| 8 | 4 | 16 | 16384 | 0.70 | 15,290.4 / 278.6 | 15,335.5 / 285.8 | 16,127.4 / 316.7 | -5.2% / -12.0% | -4.9% / -9.8% |
+| 16 | 4 | 16 | 16384 | 0.80 | 27,946.0 / 203.4 | 28,141.6 / 220.1 | 28,773.9 / 226.6 | -2.9% / -10.2% | -2.2% / -2.9% |
+| 32 | 4 | 4 | 16384 | 0.80 | 56,039.2 / 120.6 | 57,890.6 / 138.5 | 60,400.2 / 162.1 | -7.2% / -25.6% | -4.2% / -14.6% |
+| 64 | 4 | 4 | 4096 | 0.85 | 81,735.1 / 60.1 | 88,391.8 / 66.5 | 107,014.2 / 91.1 | -23.6% / -34.0% | -17.4% / -27.0% |
+
+TP2 BCG = night0930_c* (rolao/dsv41/opt-branch a5e40eca5e, different code from main); TP2 Replay = tp2r_c* (main 58f0d250ec + #42055);
+TP4 BCG / Replay = tp4s_c*_bcg / _rep (both main + #42055, same lane). (4) vLLM TP2 c64 collapsed (1,252 profiled requests), not a fair point.
+
 ## NEW BEST candidate: + aiter sparse decode #5833 + #6042 (2026-10-01, s6042_c*, 1 run each, 0 errors)
 Same as the table below (a5e40eca5e, same PDI / chunk / mem per point) but PYTHONPATH aiter =
 /sgl-workspace/aiter-5750-sparse6042 (aiter-5750 + pa_decode_sparse.py and gfx950 sparse_mla.py from #5833+#6042;
@@ -140,3 +197,68 @@ FP4, TP2, 2 physical GPUs, no DP. No c4 row in the screenshot.
 
 vs rolao all-opts (TTT / P90): c1 -9.3%/-20.6%, c2 -12.7%/-20.3%, c8 -7.4%/-24.5%, c16 -10.1%/-1.2%,
 c32 PDI4 -1.4%/-4.8% (PDI16 -7.2%/+39%), c64 PDI4 +8.9%/+64% (PDI16 -17.7%/3.3x).
+
+## Reference: vLLM on B200 (InferenceX run 36423355395, 2026-09-28, pulled 2026-10-02 by mi355-4)
+[Run Sweep #14800](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/36423355395): dsv41flash fp4, b200-nscale,
+vllm/vllm-openai:nightly-ddd6fbca (FlashInfer sparse indexer + fp8 KV), spec mtp (DSpark). From artifact results_bmk/agg_bmk.json
+(raw copy /shared_nfs/kk/dsv41/ref_b200_vllm/ix_run36423355395_agg_bmk.json). tok/s/GPU = request_metrics.throughput.per_gpu.total_tput_tps,
+P90 = request_metrics.latency.intvty.p90 (same fields as agentx/summary_table.py). Missing requests are warmup drops; errors <= 9 per point.
+
+| conc | TP2 tok/s/GPU / P90 | TP4 tok/s/GPU / P90 |
+|---|---|---|
+| 1 | 13,128.0 / 393.1 | 7,282.7 / 512.3 |
+| 2 | 13,448.7 / 373.4 | 7,450.1 / 470.2 |
+| 4 | 18,432.2 / 319.9 | 9,703.1 / 424.5 |
+| 8 | 31,009.1 / 252.7 | 16,127.4 / 316.7 |
+| 16 | 55,804.0 / 175.0 | 28,773.9 / 226.6 |
+| 32 | 93,351.7 / 67.3 | 60,400.2 / 162.1 |
+| 64 | 20,502.5 / 28.1 (collapsed, 1252 profiled) | 107,014.2 / 91.1 |
+| 128 | 18,694.9 / 25.5 (collapsed, 1491 profiled) | 141,302.6 / 44.9 |
+
+Our best TP2 (MI355X, 2 GPUs) vs vLLM B200 TP2 (same GPU count), tok/s/GPU / P90 (2026-10-02):
+c1 s6042 11,521.6 / 367.5 vs 13,128.0 / 393.1 = -12.2% / -6.5%; c2 s6042 11,802.3 / 334.5 vs 13,448.7 / 373.4 = -12.2% / -10.4%;
+c4 026da361c0 15,680.7 / 267.0 vs 18,432.2 / 319.9 = -14.9% / -16.5%; c8 s6042 29,529.9 / 225.8 vs 31,009.1 / 252.7 = -4.8% / -10.6%;
+c16 s6042 54,303.0 / 142.8 vs 55,804.0 / 175.0 = -2.7% / -18.4%; c32 s6042 98,624.1 / 71.5 vs 93,351.7 / 67.3 = +5.6% / +6.2%;
+c64 s6042 119,969.9 / 40.8 vs 20,502.5 / 28.1 (vLLM TP2 collapsed). No SGLang c128. s6042 used aiter-5750-sparse6042 + ATOM-port
+worktree (not in the current container); current main + #42055 matches env1001 (MAIN_REGRESS_1002.md).
+SGLang TP4 sweep (c1-c64, recipe defaults) running 2026-10-02 on mi355-4, see MAIN_REGRESS_1002.md.
+SGLang TP4 c64 (2026-10-02 mi355-4, tp4dbg_hosttbl_c64): main 58f0d250ec + #42055, TP4 EP1, engram host table per_rank,
+PDI16 / chunk 4096 / mem 0.70: 65,201.5 / 91.4 (p50 129.6, TTFT p50/p90 12.19/30.19 s, cache hit 0.963, 7029 profiled, 0 err)
+vs vLLM B200 TP4 c64 107,014.2 / 91.1 = -39.1% / +0.3%. (Engram GPU-resident tp4m_c64 was invalid: ~0 prefix-cache hits.)
+SGLang TP4 c64 + --enable-decoder-swa-bounded-replay --cuda-graph-backend-prefill disabled (tp4_bsr_c64, 2026-10-02 mi355-4):
+72,693.2 / 99.4 (p50 143.2, TTFT p50/p90 10.12/25.30 s, cache 0.964, 7798 profiled, 0 err) = +11.5% / +8.8% vs the same
+config without it (65,201.5 / 91.4); vs vLLM B200 TP4 c64 107,014.2 / 91.1 = -32.1% / +9.1%. vLLM's --swa-bounded-replay
+(default ON, vllm/config/cache.py) also keeps SWA KV out of the prefix cache; SGLang's flag only does the late-layer tail.
+Same + PDI 4 (tp4_bsr_pdi4_c64): 87,850.1 / 65.7 (p50 101.5, TTFT p50/p90 1.62/6.91 s, cache 0.964, 9427 profiled, 0 err)
+= +20.9% / -33.9% vs PDI16 (72,693.2 / 99.4); vs vLLM B200 TP4 c64 107,014.2 / 91.1 = -17.9% / -27.9%.
+
+## SGLang TP4 sweep tp4s_* (2026-10-02/03 mi355-4, one lane GPUs 0-3; see MAIN_REGRESS_1002.md)
+TP4 EP1, engram host table, main 58f0d250ec + #42055, TP2-best per-point PDI/chunk/mem. bcg = breakable prefill graph;
+rep = prefill graph disabled + --enable-decoder-swa-bounded-replay. tok/s/GPU / P90; vs vLLM B200 TP4 (run 36423355395).
+
+| conc | bcg | rep | rep vs bcg | bcg vs vLLM | rep vs vLLM |
+|---|---|---|---|---|---|
+| 1 | 6,188.1 / 391.8 | 6,271.4 / 406.7 | +1.3% / +3.8% | -15.0% / -23.5% | -13.9% / -20.6% |
+| 2 | 6,362.9 / 368.0 | 6,322.4 / 373.4 | -0.6% / +1.5% | -14.6% / -21.7% | -15.1% / -20.6% |
+| 8 | 15,290.4 / 278.6 | 15,335.5 / 285.8 | +0.3% / +2.6% | -5.2% / -12.0% | -4.9% / -9.8% |
+| 16 | 27,946.0 / 203.4 | 28,141.6 / 220.1 | +0.7% / +8.2% | -2.9% / -10.2% | -2.2% / -2.9% |
+| 32 | 56,039.2 / 120.6 | 57,890.6 / 138.5 | +3.3% / +14.8% | -7.2% / -25.6% | -4.2% / -14.5% |
+| 64 | 81,735.1 / 60.1 | 88,391.8 / 66.5 | +8.1% / +10.6% | -23.6% / -34.1% | -17.4% / -26.9% |
+
+All 12 points 0 errors, 0 faults, cache hit 0.964-0.981. c32/c64 run PDI 4 (TP2-best); TP4 c64 rep at PDI16 earlier gave
+72,693.2 / 99.4 (P90 +9% vs vLLM), so the PDI choice trades TTT vs P90 at high conc.
+
+## SGLang TP2 rep sweep tp2r_* (2026-10-03 mi355-4, one lane GPUs 0,1; main 58f0d250ec + #42055, TP2-best per-point settings)
+rep = prefill graph disabled + --enable-decoder-swa-bounded-replay. tok/s/GPU / P90.
+| conc | tp2r (rep) | baseline (bcg) | rep vs baseline | vs vLLM B200 TP2 |
+|---|---|---|---|---|
+| 1 | 11,697.4 / 357.7 | night0930 11,375.4 / 346.4 | +2.8% / +3.3% | -10.9% / -9.0% |
+| 2 | 12,022.3 / 330.7 | env1001 11,535.8 / 322.2 | +4.2% / +2.6% | -10.6% / -11.4% |
+| 8 | 29,760.8 / 237.2 | env1001 29,407.5 / 218.1 | +1.2% / +8.8% | -4.0% / -6.1% |
+| 16 | 54,345.3 / 165.0 | night0930 54,080.7 / 134.5 | +0.5% / +22.7% | -2.6% / -5.7% |
+| 32 | 105,800.1 / 93.7 | env1001 98,143.5 / 74.8 | +7.8% / +25.3% | +13.3% / +39.3% |
+| 64 | 142,243.2 / 52.0 | env1001 119,381.4 / 41.0 | +19.2% / +26.9% | vLLM TP2 c64 collapsed (20,502.5 / 28.1) |
+
+All 6 points 0 errors, 0 faults, cache 0.962-0.980. rep beats every previous TP2 number at c8-c64 (c64 +18.6% / +27.5%
+vs s6042, c32 +7.3% / +31.0% vs s6042). NEW TP2 BEST config: main + #42055, TP2 EP1 host table, TP2-best per-point
+PDI/chunk/mem, --enable-decoder-swa-bounded-replay --cuda-graph-backend-prefill disabled.

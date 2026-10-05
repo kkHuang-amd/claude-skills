@@ -92,13 +92,11 @@ case "$TP" in
     2|4) ;;
     *) echo "Unsupported DSpark TP=$TP; expected 2 or 4" >&2; exit 1 ;;
 esac
-# The Engram tables cost ~47.2 GiB per rank at TP4 and ~94.4 GiB at TP2. A
-# 288 GiB card holds the TP4 share beside its quarter of the checkpoint, so TP4
-# keeps them resident and avoids the host lookup, as GB300 does at the same card
-# size and the MI355X vLLM arm does below c128 (validated at c1-32). TP2 cannot,
-# and neither can TP4 at the saturation point, where resident tables leave too
-# few KV tokens per request.
-if (( TP >= 4 && CONC < 128 )); then
+# Row-sharded host Engram tables at every TP, as the B200 SGLang recipe does.
+# GPU-resident tables (~47.2 GiB per rank at TP4) left TP4 c64 with almost no
+# prefix-cache hits and a prefill queue that never drained (tp4m_c64).
+# ENGRAM_HOST_TABLE=0 keeps them resident.
+if [[ "${ENGRAM_HOST_TABLE:-1}" == 0 ]]; then
     export SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE=0
     unset SGLANG_DSV41_ENGRAM_HOST_TABLE_LAYOUT
 else

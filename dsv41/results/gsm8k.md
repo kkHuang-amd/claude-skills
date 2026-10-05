@@ -59,3 +59,5 @@
 | 2026-10-01 | env1001_r1 INVALID (server had SGLANG_SIMULATE_ACC_LEN: SERVER_ONLY without EVAL_ONLY=true) | 1319 | 5 | 0.376 | 0.006 | 79.073 s | /shared_nfs/kk/dsv41/gsm8k_env1001_r1.log |
 | 2026-10-01 | env1001_eval_r2 | 1319 | 5 | 0.894 | 0.000 | 40.007 s | /shared_nfs/kk/dsv41/gsm8k_env1001_eval_r2.log |
 | 2026-10-01 | env1001_eval_r3 | 1319 | 5 | 0.906 | 0.000 | 39.059 s | /shared_nfs/kk/dsv41/gsm8k_env1001_eval_r3.log |
+| 2026-10-02 | main42055_r1 | 1319 | 5 | 0.901 | 0.000 | 40.041 s | /shared_nfs/kk/dsv41/gsm8k_main42055_r1.log |
+| 2026-10-02 | main42055_r2 | 1319 | 5 | 0.897 | 0.000 | 38.513 s | /shared_nfs/kk/dsv41/gsm8k_main42055_r2.log |

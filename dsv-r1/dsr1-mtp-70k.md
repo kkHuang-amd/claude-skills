@@ -4,8 +4,8 @@ Owner node: mi355-4
 
 ## CONTINUE HERE
 
-**Status:** in progress — run2 sweep running (2026-10-05). Run1 (np=conc*4, default MRR) aborted after c4/c8.
-**Next:** wait for SWEEP_DONE in run2_sweep.out, fill results table from run2/c*.log.
+**Status:** done — run2 complete, 0 failed requests, results in table below (2026-10-05). Run1 (np=conc*4, default MRR) aborted after c4/c8.
+**Next:** none requested. Workload is prefill-bound (~27k total tok/s plateau from c8); TPOT grows ~linearly with conc due to 70k prefills interleaving with decode.
 **Run2 settings:** server restarted per conc with `--max-running-requests=conc`, `--num-prompts=conc*8`,
 `--warmup-requests 2` (warmup = first 70k prompt, output capped at 32, not counted). Script: `sweep2.sh`.
 Note: KV holds max_total_num_tokens=3217291 at mem 0.8 (~45 x 70.3k seqs), so c64 cannot be fully resident.
@@ -42,3 +42,8 @@ Used: MI355X fp8 low-latency config + those MTP flags.
 |------|------|------|---------|-----------|-------------|--------------|--------------|------------|
 | mi355-4 | 2026-10-05 | 4 (run1, MRR default=48) | 16 | 98.95 | 23186 | 4978 | 22.68 | 2.97 |
 | mi355-4 | 2026-10-05 | 8 (run1, MRR default=48) | 32 | 70.67 | 16560 | 19352 | 48.38 | 3.02 |
+| mi355-4 | 2026-10-05 | 4 (run2, MRR=4) | 32 | 105.16 | 24644 | 4119 | 23.95 | 3.00 |
+| mi355-4 | 2026-10-05 | 8 (run2, MRR=8) | 64 | 111.74 | 26186 | 5829 | 52.05 | 2.99 |
+| mi355-4 | 2026-10-05 | 16 (run2, MRR=16) | 128 | 115.35 | 27030 | 8320 | 110.85 | 2.97 |
+| mi355-4 | 2026-10-05 | 32 (run2, MRR=32) | 256 | 116.99 | 27414 | 12127 | 233.00 | 2.95 |
+| mi355-4 | 2026-10-05 | 64 (run2, MRR=64) | 512 | 114.64 | 26864 | 59037 | 358.39 | 2.95 |

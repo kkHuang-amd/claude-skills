@@ -1,13 +1,14 @@
 #!/bin/bash
-# usage: decode_run.sh <conc> <clean|prof>
+# usage: decode_run.sh <conc> <clean|puredecode|prof>
 # clean: D64 bench (in 65536 / out 1024, ignore-eos, 3*conc prompts).
+# puredecode: conc prompts, out 8192, no profiler (steady-state TPOT without prefill interleave).
 # prof : conc prompts with out 8192 so all conc requests decode together; once all have their first
 #        token, POST /start_profile (server stops itself after max_iterations), then /stop_profile.
 C=$1; MODE=$2
 D=${WORK:-/shared_nfs/kk/dsv41_b200}; M=${MODEL_PATH:-/shared_nfs/deepseek-ai/DeepSeek-V4.1-Flash}; U=http://127.0.0.1:8000
 mkdir -p $D/bench
 metric() { curl -s $U/metrics | awk -v k="$1" '$1 ~ "^"k"({|$)" {s+=$2} END {print s+0}'; }
-if [ "$MODE" = clean ]; then N=$((3*C)); OUT=1024; else N=$C; OUT=8192; fi
+if [ "$MODE" = clean ]; then N=$((3*C)); OUT=1024; else N=$C; OUT=8192; fi  # puredecode: as prof, no profiler
 T0=$(metric vllm:time_to_first_token_seconds_count)
 vllm bench serve --backend vllm --base-url $U --model deepseek-ai/DeepSeek-V4.1-Flash --tokenizer $M \
   --dataset-name random --random-input-len 65536 --random-output-len $OUT --ignore-eos \

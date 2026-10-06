@@ -13,7 +13,7 @@ T0=$(metric vllm:time_to_first_token_seconds_count)
 vllm bench serve --backend vllm --base-url $U --model deepseek-ai/DeepSeek-V4.1-Flash --tokenizer $M \
   --dataset-name random --random-input-len 65536 --random-output-len 1024 --ignore-eos --seed 0 \
   --num-prompts $C --max-concurrency $C --percentile-metrics ttft,tpot,itl --metric-percentiles 50,90 \
-  --save-result --result-dir $D/bench --result-filename d64_c${C}_${MODE}.json > $D/bench/d64_c${C}_${MODE}.log 2>&1 &
+  --save-result --result-dir $D/bench --result-filename d64_c${C}${RUN_TAG}_${MODE}.json > $D/bench/d64_c${C}${RUN_TAG}_${MODE}.log 2>&1 &
 BP=$!
 if [ "$MODE" = warmprof ]; then
   while kill -0 $BP 2>/dev/null; do
@@ -26,4 +26,4 @@ if [ "$MODE" = warmprof ]; then
   curl -s -X POST $U/start_profile; sleep 5; curl -s -X POST $U/stop_profile; echo "stop_profile"
 fi
 wait $BP; echo "bench exit=$?"
-rg 'Successful requests|Output token throughput|Mean TTFT|Median TTFT|P90 TTFT|Mean TPOT|Median TPOT|P90 TPOT|Mean ITL|Median ITL|P90 ITL|Acceptance length|Error|Traceback' $D/bench/d64_c${C}_${MODE}.log | cut -c1-150
+rg 'Successful requests|Output token throughput|Mean TTFT|Median TTFT|P90 TTFT|Mean TPOT|Median TPOT|P90 TPOT|Mean ITL|Median ITL|P90 ITL|Acceptance length|Error|Traceback' $D/bench/d64_c${C}${RUN_TAG}_${MODE}.log | cut -c1-150

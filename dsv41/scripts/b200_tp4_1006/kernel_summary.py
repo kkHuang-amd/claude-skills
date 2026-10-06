@@ -54,6 +54,8 @@ def main():
     ksum = sum(tot.values()); ns = max(len(steps), 1)
     names = collections.Counter(s["name"] for s in steps).most_common(3)
     print(f"trace `{path.split('/')[-1]}`; steps (execute_* annotations): {len(steps)} {names}")
+    kstreams = collections.Counter(e["args"].get("stream") for e in k)
+    print(f"kernel streams: {len(kstreams)}; sum/busy {ksum / busy:.3f}x")
     if extend:
         print(f"wall GPU window {wall/1e3:.2f} ms, summed kernel time {ksum/1e3:.2f} ms, GPU idle {100*(1-busy/wall):.1f}%")
     else:

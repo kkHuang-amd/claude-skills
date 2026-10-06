@@ -24,6 +24,18 @@ GPU count (TP2 points are DEP2 only; TP4 c64 DEP4 117,168.9 > TP4 116,807.6). Ra
 vLLM image and retune TP4/DEP2/DEP4", b200-nscale, vllm/vllm-openai:nightly-dev-x86_64-cu130-ac9126e58aa7, spec mtp. No
 agg_bmk artifact; per-point bmk_agentic_* JSONs in /shared_nfs/kk/dsv41/ref_b200_vllm/run37070984585/ (same fields as below).
 Only these 12 points were swept (no pure TP2, no TP4 c2).
+Recipe (a8504a430 srt-slurm-recipes/dsv41flash/vllm/b200-fp4-mtp/agentic.yaml): TP4 = tensor-parallel 4, no EP -> TP MoE +
+all-reduce, engram cpu_offload + use_thp. DEP2/DEP4 = TP1 x DP2/DP4 + enable-expert-parallel, kernel-config
+moe_backend=deep_gemm_mega_moe, engram embedding_across_dp, vllm-router consistent_hash in front of the DP ranks,
+max-num-batched-tokens 4096 (DEP2). EP is A2A, not all-reduce: DeepseekV4MegaMoEExperts (vllm deepseek_v4/nvidia/model.py
+@ac9126e58) writes tokens into deep_gemm.get_symm_buffer_for_mega_moe(ep_group) and fp8_fp4_mega_moe fuses dispatch + GEMM
++ combine over NVLink symmetric memory (the "AgRsAll2AllManager" log line is the generic manager, not on this path).
+Throughput runs use rejection_sample_method=synthetic, synthetic_acceptance_length 3.51 (server log DEP2 c16).
+vLLM engram embedding_across_dp=true = one table sharded over all TP x DP ranks, per-step gather ids / lookup owned rows /
+exchange back. SGLang equivalent is built in, no knob: under DP attention tp_size spans all ranks, EngramEmbedding shards
+rows over it and _dp_sharded_lookup does dp_gather_replicate ids -> _owned_rows -> dp_reduce_scatter (HIP int32 path),
+host table per_rank works with it. SGLang has no counterpart to vLLM's default (one TP-sharded replica per DP rank, no
+per-step collective) nor to dp_shared_memory (one /dev/shm copy shared by co-located DP replicas, no collective).
 
 | conc | DEP2 (tp2 ep2 dpa) | TP4 (ep1) | DEP4 (tp4 ep4 dpa) | ok / total requests |
 |---|---|---|---|---|

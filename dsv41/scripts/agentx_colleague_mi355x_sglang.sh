@@ -9,7 +9,8 @@ set -eo pipefail
 # bounds follow the MI355X vLLM sibling, which measured TP2 and TP4 on this SKU.
 # https://lmsysorg.mintlify.app/cookbook/autoregressive/DeepSeek/DeepSeek-V4_1
 # LOCAL COPY of /sgl-workspace/dsv41flash_fp4_mi355x_sglang_mtp.sh (colleague recipe, 2026-09-26). Only changes:
-#   benchmark_lib path, hf download skipped for an existing local MODEL_PATH, EXTRA_ARGS knob. Run via agentx_colleague_run.sh.
+#   benchmark_lib path, hf download skipped for an existing local MODEL_PATH, EXTRA_ARGS knob, host engram table at every
+#   TP, REPLAY knob (default on), per-concurrency best PDI / chunk / mem defaults. Run via agentx_colleague_run.sh.
 source "${INFMAX_CONTAINER_WORKSPACE:-/workspace/InferenceX}/benchmarks/benchmark_lib.sh"
 check_env_vars MODEL TP EP_SIZE CONC KV_OFFLOADING TOTAL_CPU_DRAM_GB RESULT_DIR DURATION
 check_env_vars EVAL_ONLY SPEC_DECODING DP_ATTENTION PORT
@@ -79,12 +80,19 @@ export HSA_NO_SCRATCH_RECLAIM=0
 export GPU_MAX_HW_QUEUES=2
 
 # ---- Topology ---------------------------------------------------------------
-# The DP-attention + sglang-router topology is validated for DSv4-Pro on this
-# SKU, not for DSv4.1-Flash: the DSpark worker requires attn_tp=1 under DP and
-# the Engram host tables are sized per rank. Reject it rather than ignore it.
+# LOCAL: DP_ATTENTION=true = DEP<TP> (attn TP1 x DP<TP>, MegaMoE a2a EP<TP>) behind
+# sglang-router, the MI355X counterpart of the B200 vLLM DEP2/DEP4 arms. The DSpark
+# MoE draft needs attn_tp=1 under DP, so DP always equals TP and EP_SIZE must too.
 case "$DP_ATTENTION" in
     false) ;;
-    true) echo "Error: DP_ATTENTION=true is not supported by this recipe" >&2; exit 1 ;;
+    true)
+        # DP_MOE=megamoe (default): DEP<TP>, MegaMoE a2a EP<TP>. DP_MOE=tp: DP<TP> attention, MoE stays TP-sharded
+        # over all ranks (gather / reduce-scatter, EP_SIZE=1).
+        case "${DP_MOE:=megamoe}" in
+            megamoe) [[ "$EP_SIZE" == "$TP" ]] || { echo "Error: DP_MOE=megamoe needs EP_SIZE=TP (got $EP_SIZE)" >&2; exit 1; } ;;
+            tp) [[ "$EP_SIZE" == 1 ]] || { echo "Error: DP_MOE=tp needs EP_SIZE=1 (got $EP_SIZE)" >&2; exit 1; } ;;
+            *) echo "Error: DP_MOE must be megamoe or tp, got '$DP_MOE'" >&2; exit 1 ;;
+        esac ;;
     *) echo "Error: DP_ATTENTION must be true or false, got '$DP_ATTENTION'" >&2; exit 1 ;;
 esac
 
@@ -124,10 +132,12 @@ fi
 # as concurrency climbs rather than retaining more SWA tails. This node measured
 # 42.69 GiB free after graph capture at 0.80, within a GiB of the 43.59 GiB B300
 # recorded at the same fraction before deciding C64 needed 0.85.
+# LOCAL: per-concurrency bests from the TP2 sweeps (night0930 / tp2r_*), used unchanged at TP4 (tp4s_*):
+#   c<16 0.70, c16-32 0.80, c>=64 0.85.
 MEM_FRACTION_STATIC_DEFAULT=0.70
-if (( TP == 2 && CONC >= 32 )); then
+if (( CONC >= 64 )); then
     MEM_FRACTION_STATIC_DEFAULT=0.85
-elif (( TP == 2 && CONC >= 16 )); then
+elif (( CONC >= 16 )); then
     MEM_FRACTION_STATIC_DEFAULT=0.80
 fi
 MEM_FRACTION_STATIC="${MEM_FRACTION_STATIC:-$MEM_FRACTION_STATIC_DEFAULT}"
@@ -148,18 +158,85 @@ fi
 # upstream 16384 exhausts HBM on the first 66k-99k-token AgentX prompts. It also
 # bounds the decode stall a queued prefill imposes on in-flight requests, which
 # is what the ITL tail measures.
-CHUNKED_PREFILL_SIZE="${CHUNKED_PREFILL_SIZE:-4096}"
+# LOCAL: measured best is 16384 at c<=32 and 4096 at c>=64 (ATOM_PORT.md chunk A/B); no OOM seen at 16384 on MI355X.
+CHUNKED_PREFILL_SIZE_DEFAULT=16384
+if (( CONC >= 64 )); then
+    CHUNKED_PREFILL_SIZE_DEFAULT=4096
+fi
+CHUNKED_PREFILL_SIZE="${CHUNKED_PREFILL_SIZE:-$CHUNKED_PREFILL_SIZE_DEFAULT}"
 # Forces N decode steps between one prefill batch and the next, so a queue of
 # long AgentX prefixes cannot starve in-flight decode. 16 is the latency-oriented
 # cadence every other DSv4.1-Flash recipe runs (B200/H200/GB300 hardcode it;
 # B300 drops to 4 to buy prefill duty at TP2 c32+). TP2 c64 drops to 4 here: at
 # 16 its prefill queue averaged 41 requests and median TTFT reached 35 s.
 # Env-overridable so a sweep can retune it without editing the recipe.
+# LOCAL: 4 from c32 up at both TPs (c32 PDI4 beat PDI16 on TTT and P90, 93,855.8 / 68.7 vs 90,876.4 / 102.0).
 PREFILL_DECODE_INTERVAL_DEFAULT=16
-if (( TP == 2 && CONC >= 64 )); then
+if (( CONC >= 32 )); then
     PREFILL_DECODE_INTERVAL_DEFAULT=4
 fi
 PREFILL_DECODE_INTERVAL="${PREFILL_DECODE_INTERVAL:-$PREFILL_DECODE_INTERVAL_DEFAULT}"
+
+# LOCAL: DP-attention path, following the DSv4 MI355X recipe agentx/sa-script/dsv4_fp4_mi355x_sglang_mtp.sh
+# (DP_ATTENTION=true, ENABLE_MEGAMOE=1 arm). PDI and mem stay the DSv4.1 per-CONC bests above.
+DP_ARGS=()
+SGLANG_BACKEND_PORT="$PORT"
+if [[ "$DP_ATTENTION" == true ]]; then
+    SGLANG_BACKEND_PORT=$((PORT + 1))
+    SGLANG_ROUTER_METRICS_PORT=$((PORT + 10000))
+    # Route each AgentX session to one DP rank so its radix prefix stays hot.
+    export AIPERF_HTTP_X_SMG_ROUTING_KEY_FROM_CORRELATION_ID=true
+    export GPU_MAX_HW_QUEUES=5
+    # DSpark with a2a MoE under DP requires static ragged verify.
+    export SGLANG_RAGGED_VERIFY_MODE=static
+    # CHUNKED_PREFILL_SIZE stays the per-rank budget; SGLang divides the engine-wide value by dp_size.
+    PER_RANK_CHUNK=$CHUNKED_PREFILL_SIZE
+    CHUNKED_PREFILL_SIZE=$((CHUNKED_PREFILL_SIZE * TP))
+    DP_ARGS=(
+        --dp "$TP"
+        --enable-dp-attention
+        --enable-dp-lm-head
+        --enable-prefill-delayer
+        --enable-dp-attention-local-control-broadcast
+        --tokenizer-worker-num "$TP"
+        # 1 (SGLang default) like the non-DP arms so P90 interactivity stays comparable; DSv4 used 20.
+        --stream-interval "${DP_STREAM_INTERVAL:-1}"
+        --prefill-delayer-token-usage-low-watermark "${DP_PREFILL_DELAYER_LOW_WATERMARK:-0.7}"
+        --load-balance-method "${LOAD_BALANCE_METHOD:-total_requests}"
+    )
+    if [[ "$DP_MOE" == megamoe ]]; then
+        # MoE comm is mori a2a under MegaMoE, so the DP gatherv / reduce-scatter path is off.
+        export SGLANG_SHARED_EXPERT_TP1=0
+        export SGLANG_DP_SHARED_EXPERT_LOCAL=0
+        export SGLANG_DP_USE_GATHERV=0
+        export SGLANG_DP_USE_REDUCE_SCATTER=0
+        export SGLANG_AMD_USE_FLYDSL_MEGA_MOE=1
+        export SGLANG_AMD_FLYDSL_MEGA_QUANT="${SGLANG_AMD_FLYDSL_MEGA_QUANT:-a8w4}"
+        export SGLANG_AITER_MEGA_RANK_SYNC="${SGLANG_AITER_MEGA_RANK_SYNC:-0}"
+        # mori symmetric heap sits outside --mem-fraction-static; 4 GiB default overflows.
+        export MORI_SHMEM_HEAP_SIZE="${MORI_SHMEM_HEAP_SIZE:-17179869184}"
+        # MegaMoE falls back to the non-fused path for any rank batch above MTPR (a power of two).
+        export SGLANG_AMD_FLYDSL_MEGA_MOE_MTPR="${SGLANG_AMD_FLYDSL_MEGA_MOE_MTPR:-$PER_RANK_CHUNK}"
+        DP_ARGS+=(
+            --moe-a2a-backend megamoe
+            # MegaMoEV2 assumes an unfused shared expert (fused: HSA 0x1016 fault on DSv4).
+            --disable-shared-experts-fusion
+            # V4.1 vision rejects MoE A2A; drop the tower like vLLM's language-model-only (text bias unchanged,
+            # the loader skips vision.* and *_vl weights when the tower is absent).
+            --json-model-override-args '{"vision_n_layers": 0}'
+        )
+        # No --moe-dense-tp-size by default (DSv4 passes 1): with it unset require_mlp_tp_gather() is True, which
+        # pads every DP rank to the same token count / graph bucket and sets global_dp_buffer_len, the DP-sync state
+        # engram's _dp_sharded_lookup needs (vLLM engram pads to the DP max the same way). DSv4.1 has no dense FFN.
+        [ -n "${DP_MOE_DENSE_TP_SIZE:-}" ] && DP_ARGS+=(--moe-dense-tp-size "$DP_MOE_DENSE_TP_SIZE")
+    else
+        # TP MoE under DP: gathered MLP input and reduce-scatter back, as the DSv4 non-MegaMoE DP arm.
+        export SGLANG_SHARED_EXPERT_TP1=${SGLANG_SHARED_EXPERT_TP1:-1}
+        export SGLANG_DP_SHARED_EXPERT_LOCAL=${SGLANG_DP_SHARED_EXPERT_LOCAL:-1}
+        export SGLANG_DP_USE_GATHERV=${SGLANG_DP_USE_GATHERV:-1}
+        export SGLANG_DP_USE_REDUCE_SCATTER=${SGLANG_DP_USE_REDUCE_SCATTER:-1}
+    fi
+fi
 
 # Saturation arms carry a larger in-flight working set than the 30-minute
 # default warmup drain allows.
@@ -169,7 +246,8 @@ fi
 
 # The MI355X runner assigns a per-runner port; do not reselect it here.
 export AIPERF_SERVER_URL="http://localhost:${PORT}"
-export AIPERF_SERVER_METRICS_URLS="${AIPERF_SERVER_URL}/metrics"
+# LOCAL: under DP the client talks to the router; server metrics come from the backend.
+export AIPERF_SERVER_METRICS_URLS="http://localhost:${SGLANG_BACKEND_PORT}/metrics"
 export AIPERF_REQUIRED_SERVER_METRIC_PREFIX="sglang:"
 echo "Using SGLang endpoint ${AIPERF_SERVER_URL}"
 
@@ -195,9 +273,10 @@ echo "DSpark block size: $DSPARK_BLOCK_SIZE, golden AL=$DSV41_GOLDEN_AL"
 SGLANG_CMD=(
     python3 -m sglang.launch_server
     --model-path "$MODEL_PATH" --served-model-name "$MODEL"
-    --host 0.0.0.0 --port "$PORT"
+    --host 0.0.0.0 --port "$SGLANG_BACKEND_PORT"
     --trust-remote-code
     --tp "$TP" --ep-size "$EP_SIZE"
+    "${DP_ARGS[@]}"
     # Backends resolve automatically on gfx950 (dsv4 attention, AITER MoE); the
     # cookbook warns that overriding them costs decode speed, and the DSv4-Pro
     # MI355X recipe's explicit --attention-backend/--page-size/--kv-cache-dtype
@@ -213,7 +292,6 @@ SGLANG_CMD=(
     # tc_piecewise is unavailable on HIP, and naming the backend explicitly is
     # also what skips the auto-disable cascade that would otherwise drop prefill
     # graphs entirely. Both qualified gfx950 SGLang launches pin it this way.
-    --cuda-graph-backend-prefill breakable
     --reasoning-parser auto
     --tool-call-parser auto
     # Draft-token forward passes under long-context agentic load block the
@@ -221,6 +299,24 @@ SGLANG_CMD=(
     --watchdog-timeout 3600
     --enable-metrics
 )
+# LOCAL: REPLAY=1 (default) disables prefill graphs and bounds decoder SWA replay instead; it beat the breakable prefill
+# graph at every TP2/TP4 point (results/agentx.md, tp2r_* / tp4s_*). REPLAY=0 restores the recipe's breakable graph.
+# Under DP attention: bounded replay works with MegaMoE a2a (local SGLang patch 2026-10-05, DEP_1005.md problem 1) but
+# stays rejected with TP MoE (DP_MOE=tp gathers full-extend rows per layer) -> DP_MOE=tp defaults to REPLAY=0.
+# The prefill graph stays disabled under DP. PREFILL_GRAPH overrides the backend.
+REPLAY_DEFAULT=1
+PREFILL_GRAPH_DEFAULT=breakable
+if [[ "$DP_ATTENTION" == true ]]; then
+    [[ "${DP_MOE:-megamoe}" == tp ]] && REPLAY_DEFAULT=0
+    # Breakable prefill replay also fails under DP_MOE=tp: a rank padded to the DP max (7587 -> 16384 tokens) trips
+    # the DSv4 c2_prefill_norm_rope_store shape check (dp2tp_c32, 2026-10-05).
+    PREFILL_GRAPH_DEFAULT=disabled
+fi
+if [[ "${REPLAY:-$REPLAY_DEFAULT}" == 1 ]]; then
+    SGLANG_CMD+=(--cuda-graph-backend-prefill "${PREFILL_GRAPH:-disabled}" --enable-decoder-swa-bounded-replay)
+else
+    SGLANG_CMD+=(--cuda-graph-backend-prefill "${PREFILL_GRAPH:-$PREFILL_GRAPH_DEFAULT}")
+fi
 # LOCAL: EXTRA_ARGS="..." appended verbatim (e.g. --fp8-gemm-backend aiter)
 [ -n "${EXTRA_ARGS:-}" ] && SGLANG_CMD+=(${EXTRA_ARGS})
 write_command "$RESULT_DIR/sglang_command.txt" "${SGLANG_CMD[@]}"
@@ -233,9 +329,11 @@ write_command "$RESULT_DIR/sglang_command.txt" "${SGLANG_CMD[@]}"
 # A leaked server keeps its HBM and blocks the next job on this node; always
 # tear the tree down.
 SERVER_PID=""
+ROUTER_PID=""
 cleanup_server() {
     local rc=$?
     trap - EXIT INT TERM
+    [ -n "$ROUTER_PID" ] && stop_background_process_tree "$ROUTER_PID" "SGLang router" 30
     stop_background_process_tree "$SERVER_PID" "SGLang server" 60
     exit "$rc"
 }
@@ -246,7 +344,28 @@ trap 'exit 143' TERM
 "${SGLANG_CMD[@]}" >> "$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 echo "Server PID: $SERVER_PID"
-wait_for_server_ready --port "$PORT" --server-log "$SERVER_LOG" --server-pid "$SERVER_PID"
+wait_for_server_ready --port "$SGLANG_BACKEND_PORT" --server-log "$SERVER_LOG" --server-pid "$SERVER_PID"
+
+if [[ "$DP_ATTENTION" == true ]]; then
+    ROUTER_LOG="$RESULT_DIR/router.log"
+    echo "Starting SGLang router on port $PORT for $TP DP ranks..."
+    python3 -m sglang_router.launch_router \
+        --worker-urls "http://localhost:$SGLANG_BACKEND_PORT" \
+        --policy "${ROUTER_POLICY:-cache_aware}" \
+        --request-id-headers x-correlation-id \
+        --dp-aware \
+        --host 0.0.0.0 \
+        --port "$PORT" \
+        --prometheus-host 127.0.0.1 \
+        --prometheus-port "$SGLANG_ROUTER_METRICS_PORT" \
+        --connect-timeout-secs 900 \
+        --request-timeout-secs 14400 \
+        --disable-health-check \
+        --disable-retries > "$ROUTER_LOG" 2>&1 &
+    ROUTER_PID=$!
+    echo "Router PID: $ROUTER_PID"
+    wait_for_server_ready --port "$PORT" --server-log "$ROUTER_LOG" --server-pid "$ROUTER_PID"
+fi
 
 # LOCAL: SERVER_ONLY=1 keeps the server up (no aiperf) for profiling; stop it by killing this script's PID.
 if [[ "${SERVER_ONLY:-0}" == 1 ]]; then

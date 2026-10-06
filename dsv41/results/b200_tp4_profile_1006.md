@@ -6,7 +6,7 @@ Owner node: dgx-025
 
 **Status:** request is now rev 3 (decode = cold pass + cache-warm pass, report/profile the warm one). P1a done, P2 done
 (both unaffected by rev 3). **P1, P2, P3 all done** (decode c1/c8/c16 with the rev 3 method). Open item: B200 c8 TPOT here 3.00 ms vs 1.92 ms
-quoted from InferenceX run 37070984585 (see P1b "Gap to flag"). The c1 server (entry idx 0) is left running on GPU 0-3.
+quoted from InferenceX run 37070984585 (see P1b "Gap to flag"). Extra single-stream c8 trace done (see that section); its server (entry idx 2 + single-stream env) is left running on GPU 0-3.
 **Next:** nothing requested; possible follow-up is reconciling the c8 TPOT gap with the InferenceX artifacts.
 **Files:** `dsv41/scripts/b200_tp4_1006/` (`serve.sh`, `prefix_sweep.py`, `decode_run.sh`, `extend_prof.py`,
 `kernel_summary.py`, recipe copy).
@@ -352,6 +352,118 @@ largest 'other': void at::native::reduce_kernel<512, 1, at::native::ReduceOp<flo
 c1 -> c8 the step nearly doubles while tokens per step go 6 -> 48; MoE (1.6 -> 4.2 -> 6.1 ms) and dense GEMM grow with
 batch, mHC and attention barely move. The c8/c16 all-reduce rows include ~0.5 ms/step of rank skew (see c8 rev 2 note).
 
+## Extra -- single-stream decode trace, c8 (user request, 2026-10-06, dgx-025)
+
+Why: B200 multi-stream summed kernel time double-counts concurrency (c8 rank 0: 19 kernel streams, sum/busy 1.203x),
+while MI355X runs ~serial. A single-stream capture gives per-kernel cost without co-residency.
+
+How (no edit of the installed vLLM): `dsv41/scripts/b200_tp4_1006/single_stream/sitecustomize.py`, an import hook that
+is active with `DSV41_SINGLE_STREAM=1` + that dir on `PYTHONPATH`, plus `VLLM_DISABLE_SHARED_EXPERTS_STREAM=1
+VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD=0`. It keeps the same kernels and moves them to the current stream:
+attention compressor / insert_cache / aux input GEMMs inline (`maybe_execute_in_parallel` / `execute_in_parallel`
+forced sequential), `DeepseekV4DecoderLayer.mhc_stream` resolves to the current stream (mHC overlap path kept, joins
+become no-ops; setting it to None would switch kernels and drop the fused all-reduce+mHC), engram cpu-offload lookups
+always inline. The SGLang notes in `agentx/` (`SGLANG_OPT_USE_MULTI_STREAM_OVERLAP` + `use_stream_pool` patch) do not
+apply to vLLM. Model-runner D2H copy streams are left alone (memcpy only).
+```bash
+DSV41_SINGLE_STREAM=1 PYTHONPATH=dsv41/scripts/b200_tp4_1006/single_stream \
+VLLM_DISABLE_SHARED_EXPERTS_STREAM=1 VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD=0 \
+CUDA_VISIBLE_DEVICES=0,1,2,3 bash dsv41/scripts/b200_tp4_1006/serve.sh 2 c8_1stream
+RUN_TAG=_1stream bash dsv41/scripts/b200_tp4_1006/decode_run.sh 8 cold|warm|warmprof
+```
+Gotchas: first try crashed in CUDA graph capture (`cudaErrorStreamCaptureIsolation` at `model.py:595`, joining the
+never-used mHC stream) -> fixed by the property above. One server start had `CUPTI_ERROR_NOT_INITIALIZED` in all
+workers (traces with CPU events only); a plain restart fixed it, so check `rg 'CUPTI initialization failed'` in the
+server log before trusting a trace.
+
+Verified serial: kernels land on 2 stream ids (graph replays alternate) with **0.00 ms cross-stream concurrency**;
+remaining sum/busy 1.077x is same-stream PDL overlap (25.6 ms of 363 ms on the main stream). Batch 8 in all 40 steps.
+
+| c8, rev 3 warm | multi-stream | single-stream | delta |
+|---|---:|---:|---:|
+| TPOT p50 ms | 3.00 | 3.34 | +11.5% |
+| ITL p50 ms | 10.42 | 11.57 | +11.0% |
+| output tok/s | 2417 | 2226 | -7.9% |
+| profiled step ms (rank 0) | 10.670 | 12.132 | +13.7% |
+| kernel streams / sum-busy | 19 / 1.203x | 2 / 1.077x | |
+
+Per-group ms/step, rank 0 (summed kernel time; single-stream ~= exclusive cost):
+
+| group | multi-stream | single-stream | delta |
+|---|---:|---:|---:|
+| MoE (incl. routing) | 4.201 | 4.331 | +0.130 |
+| dense GEMM | 2.918 | 3.057 | +0.139 |
+| mHC (hyper-connections) | 1.272 | 1.356 | +0.084 |
+| norm/rope/elementwise/quant | 1.111 | 1.052 | -0.059 |
+| sparse MLA attention | 0.874 | 0.876 | +0.002 |
+| all-reduce/comm | 0.780 | 0.827 | +0.047 |
+| indexer (logits + top-k) | 0.596 | 0.581 | -0.015 |
+| KV compressor / compressed-KV | 0.179 | 0.178 | -0.001 |
+| other | 0.146 | 0.145 | -0.001 |
+| sampling/draft-specific | 0.128 | 0.133 | +0.005 |
+| engram | 0.038 | 0.042 | +0.004 |
+
+Reading: summed kernel time per group barely moves (+0.33 ms/step total, MoE/GEMM/mHC +0.08-0.14 each), while the step
+wall grows +1.46 ms. So on B200 c8 multi-streaming hides ~1.4 ms/step (~12% ITL) of otherwise serial work and does
+not inflate per-kernel cost by contention; the multi-stream group table can be compared per kernel with MI355X, and
+this single-stream wall (12.13 ms profiled, 11.57 ms ITL) is the serial reference.
+
+trace `dp0_pp0_tp0_dcp0_ep0_rank0.1791288976500812292.pt.trace.json.gz`; steps (execute_* annotations): 40 [('execute_context_0(0)_generation_8(48)', 40)]
+kernel streams: 2; sum/busy 1.077x
+wall GPU window 485.30 ms -> **12.132 ms/step** over 40 steps; summed kernel time 12.577 ms/step (multi-stream overlap); GPU idle 3.8%
+
+| group | total ms | ms/step | pct |
+|---|---:|---:|---:|
+| MoE (incl. routing) | 173.22 | 4.331 | 34.4 |
+| dense GEMM | 122.29 | 3.057 | 24.3 |
+| mHC (hyper-connections) | 54.25 | 1.356 | 10.8 |
+| norm/rope/elementwise/quant | 42.08 | 1.052 | 8.4 |
+| sparse MLA attention | 35.03 | 0.876 | 7.0 |
+| all-reduce/comm | 33.09 | 0.827 | 6.6 |
+| indexer (logits + top-k) | 23.23 | 0.581 | 4.6 |
+| KV compressor / compressed-KV | 7.10 | 0.178 | 1.4 |
+| other | 5.81 | 0.145 | 1.2 |
+| sampling/draft-specific | 5.30 | 0.133 | 1.1 |
+| engram | 1.67 | 0.042 | 0.3 |
+
+```csv
+kernel_name,group,calls,total_us,us_per_step,pct
+"bmm_MxE4m3_MxE2m1MxE4m3_Fp32_Ab32_Bb32_Cb32_t128x32x256_s5_et128x32_m256x32x32_c2x1x1_rM_TN_transOut_schPd2x1x2x3_biasFp",MoE (incl. routing),1600,97179,2429.5,19.32
+"kernel_cutlass_kernel_flashinfergemmkernelsdense_blockscaled_gemm_sm100Sm100BlockScaledPersistentDenseGemmKernel_object_",dense GEMM,7360,67877,1696.9,13.49
+"bmm_Bfloat16_MxE2m1MxE4m3_Fp32_Ab32_Bb32_t128x32x256_s4_et128x32_m256x32x32_c2x1x1_rM_TN_transOut_schPd2x1x2x3_biasFp32M",MoE (incl. routing),1600,56316,1407.9,11.19
+"void deep_gemm::sm100_mega_mhc_impl<5120u, 40u, 148u, true, true, false, 0u>(CUtensorMap_st, CUtensorMap_st, CUtensorMap",mHC (hyper-connections),3160,48046,1201.2,9.55
+"fmhaSm100fKernel_QkvE4m3OBfloat16H512PagedKvDenseDynamicTokenSparseP1MultiCtasKvVarSeqQ16Kv128StaticSwapsAbForGen",sparse MLA attention,1520,28570,714.2,5.68
+"void flashinfer::trtllm_mnnvl_allreduce::twoshotAllreduceKernel<(unsigned char)4, __nv_bfloat16, true, float4>(flashinfe",all-reduce/comm,3520,25581,639.5,5.08
+"kernel_cutlass_kernel_flashinfergemmkernelsdense_blockscaled_gemm_sm100Sm100BlockScaledPersistentDenseGemmKernel_object_",dense GEMM,1800,15994,399.9,3.18
+"kernel_cutlass_device_kernel_tensorptrbf16gmemalign16o4816512div85121_tensorptri64gmemo481_tensorptrf32gmemo64641_cutlas",dense GEMM,1600,11066,276.7,2.20
+"nvjet_sm100_tss_64x16_64x16_2x4_2cta_h_bz_splitK_TNT",dense GEMM,1640,9687,242.2,1.93
+"kernel_cutlass_kernel_flashinferquantizationkernelsmxfp8_quantizeMXFP8QuantizeSwizzledKernel_object_at__tensorptrbf16gme",norm/rope/elementwise/quant,3560,8328,208.2,1.66
+"ncclDevKernel_AllGather_RING_LL(ncclDevKernelArgsStorage<4096ul>)",all-reduce/comm,240,7505,187.6,1.49
+"void moe::dev::finalize::finalizeKernel<moe::dev::finalize::KernelParams<cutlass::bfloat16_t, float, 2, true> >(moe::dev",MoE (incl. routing),1600,7323,183.1,1.46
+"void moe::dev::routing::routingCustom::routingIndicesClusterKernel<moe::dev::routing::routingCustom::KernelParams<__nv_b",MoE (incl. routing),1600,7245,181.1,1.44
+"_dsv4_topk_kernel",indexer (logits + top-k),1600,6224,155.6,1.24
+"void vllm::deepseek_v4_fused_ops::fusedDeepseekV4FullCacheKernel<c10::BFloat16, true, true, false>(c10::BFloat16*, unsig",KV compressor / compressed-KV,1720,5923,148.1,1.18
+"void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, float, float, true, false, fal",dense GEMM,1880,5650,141.3,1.12
+"_build_flashinfer_mixed_sparse_indices_kernel",sparse MLA attention,1720,4980,124.5,0.99
+"_q_kv_norm_quant_kernel",norm/rope/elementwise/quant,1720,4356,108.9,0.87
+"kernel_cutlass_kernel_flashinferquantizationkernelsmxfp8_quantizeMXFP8QuantizeSwizzledKernel_object_at__tensorptrbf16gme",norm/rope/elementwise/quant,1720,4212,105.3,0.84
+"void vllm::act_and_mul_kernel<c10::BFloat16, __nv_bfloat162, &(c10::BFloat16 vllm::silu_kernel<c10::BFloat16>(c10::BFloa",norm/rope/elementwise/quant,1720,3696,92.4,0.73
+"kernel_cutlass_kernel_flashinferquantizationkernelsmxfp8_quantizeMXFP8QuantizeLinearKernel_object_at__tensorptrbf16gmema",norm/rope/elementwise/quant,1720,3284,82.1,0.65
+"void at::native::vectorized_elementwise_kernel<8, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*, 3ul> >(i",norm/rope/elementwise/quant,1720,3232,80.8,0.64
+"void vllm::cooperative::cooperative_topk_cs2<512u>(vllm::cooperative::CooperativeTopKParams<512u>)",indexer (logits + top-k),160,3200,80.0,0.64
+"mhc_post_tilelang_kernel",mHC (hyper-connections),280,2700,67.5,0.54
+"bmm_MxE4m3_MxE2m1MxE4m3_Fp32_Ab32_Bb32_Cb32_t128x32x256_s5_et128x32_m128x32x32_c1x1x1_rM_TN_transOut_schPd2x1x2x3_biasFp",MoE (incl. routing),120,2684,67.1,0.53
+"nvjet_sm100_tst_256x48_64x5_4x1_v_bz_TNT",dense GEMM,40,2311,57.8,0.46
+"nvjet_sm100_tst_256x40_64x5_4x1_v_bz_TNT",dense GEMM,40,2292,57.3,0.46
+"void at::native::unrolled_elementwise_kernel<at::native::CUDAFunctor_add<int>, std::array<char*, 3ul>, 4, TrivialOffsetC",norm/rope/elementwise/quant,1600,2239,56.0,0.45
+"void at::native::vectorized_elementwise_kernel<8, at::native::FillFunctor<unsigned char>, std::array<char*, 1ul> >(int, ",norm/rope/elementwise/quant,1720,2234,55.8,0.44
+"void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::T",norm/rope/elementwise/quant,320,1995,49.9,0.40
+```
+
+largest 'other': _compute_local_logits_stats_kernel 1.37ms; void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::A 0.68ms; Kernel 0.50ms; _expand_candidates_kernel 0.48ms; _compute_swa_indices_and_lens_kernel 0.44ms; memcpy32_post 0.44ms; _post_update_kernel 0.31ms; _hash_ids_kernel 0.21ms
+
+Trace: `/shared_nfs/kk/dsv41_b200/traces/decode_c8_1stream/` (4 ranks, ~22 MB) on dgx-025.
+
 ## Traces (dgx-025, not in git)
 
 | trace set | path | size |
@@ -360,6 +472,7 @@ batch, mHC and attention barely move. The c8/c16 all-reduce rows include ~0.5 ms
 | decode c16 (rev 3 warmprof), 40 steps, 4 ranks | `/shared_nfs/kk/dsv41_b200/traces/decode_c16/` | 22 MB |
 | decode c8 (rev 3 warmprof), 40 steps, 4 ranks | `/shared_nfs/kk/dsv41_b200/traces/decode_c8_rev3/` | 22 MB |
 | decode c1 (rev 3 warmprof), 40 steps, 4 ranks | `/shared_nfs/kk/dsv41_b200/traces/decode_c1/` | 22 MB |
+| decode c8 single-stream (rev 3 warmprof), 40 steps, 4 ranks | `/shared_nfs/kk/dsv41_b200/traces/decode_c8_1stream/` | 22 MB |
 | extend L=64k + 512, 4 ranks | `/shared_nfs/kk/dsv41_b200/traces/extend_65536/` | 1.1 MB |
 | extend L=256k + 512, 4 ranks | `/shared_nfs/kk/dsv41_b200/traces/extend_262144/` | 1.2 MB |
 

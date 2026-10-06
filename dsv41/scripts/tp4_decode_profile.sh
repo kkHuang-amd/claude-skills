@@ -39,7 +39,7 @@ if [ "$MODE" = prefix ]; then
     python3 -I "$D/prefix_ttft_sweep.py" --port "$PORT" --api "$API" > "$OUT/load.out" 2>&1
     echo "load exit=$?"; grep -E '^L=|^\||^N=|Error|Traceback' "$OUT/load.out" | cut -c1-220
 else
-    python3 -I "$D/decode_load_profile.py" --port "$PORT" --api "$API" --conc "$CONC" --isl "$ISL" --osl "$OSL" \
+    python3 -I "$D/decode_load_profile.py" --port "$PORT" --api "$API" --conc "${LOAD_CONC:-$CONC}" --isl "$ISL" --osl "$OSL" \
         --profile-dir "$OUT" --profile-steps "$STEPS" > "$OUT/load.out" 2>&1
     echo "load exit=$?"; grep '^\[' "$OUT/load.out" | cut -c1-220
 fi

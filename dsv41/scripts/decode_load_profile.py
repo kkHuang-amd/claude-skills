@@ -75,7 +75,7 @@ def run(a, label, profile):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--port", type=int, default=8888)
-    p.add_argument("--conc", type=int, default=8)
+    p.add_argument("--conc", default="8", help="one conc or a list, e.g. 1,4,8")
     p.add_argument("--isl", type=int, default=65536)
     p.add_argument("--osl", type=int, default=1024)
     p.add_argument("--seed", type=int, default=0)
@@ -87,12 +87,18 @@ def main():
     # and "profile" every prefill is a cached-prefix hit (~0.1 s) and all `conc` requests decode together. With cold
     # prefills the TTFTs spread ~0.7-12 s and early requests finished their OSL before the last started -> the
     # 08:37 profile caught bs=4, not 8.
-    osl = a.osl
-    a.osl = 1; run(a, "prime", False)
+    # --conc may be a list ("1,4,8"): one prime at the largest conc caches every prompt (round i uses the first `conc`
+    # prompts of the same seed), then clean + profile per conc, traces under <profile-dir>/c<conc>/.
+    concs = [int(x) for x in str(a.conc).split(",")]
+    osl, pdir = a.osl, a.profile_dir
+    a.conc, a.osl = max(concs), 1; run(a, "prime", False)
     a.osl = osl
-    run(a, "clean", False)               # numbers without profiler overhead
-    if a.profile_dir:
-        run(a, "profile", True)
+    for c in concs:
+        a.conc = c
+        run(a, f"clean c{c}", False)     # numbers without profiler overhead
+        if pdir:
+            a.profile_dir = f"{pdir}/c{c}"
+            run(a, f"profile c{c}", True)
 
 
 if __name__ == "__main__":

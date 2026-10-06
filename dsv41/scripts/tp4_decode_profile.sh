@@ -2,11 +2,13 @@
 # MI355X TP4 decode profile at the B200_REQUEST_1006.md D64 shape (TP4_GAP_1006.md): same server config as the AgentX
 # rerun (Replay, EP1, engram host table, DSpark sim AL, c8 PDI/chunk/mem), SERVER_ONLY, then decode_load_profile.py.
 #   CONC=8 ISL=65536 OSL=1024 bash tp4_decode_profile.sh      # GPUs 0-3, port 8888
+#   MODE=prefix API=generate|completions bash tp4_decode_profile.sh   # cached-prefix TTFT sweep (prefix_ttft_sweep.py)
 # Output: /shared_nfs/kk/dsv41/profile_tp4/<TAG>/ (server.log, load.out, torch traces). Refuses while GPUs are busy.
 set -uo pipefail
 D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+MODE=${MODE:-decode} API=${API:-generate}
 CONC=${CONC:-8} ISL=${ISL:-65536} OSL=${OSL:-1024} STEPS=${STEPS:-40}
-TAG=${TAG:-m255_tp4_d$((ISL / 1024))k_c${CONC}}
+if [ "$MODE" = prefix ]; then TAG=${TAG:-m255_tp4_prefix_${API}}; else TAG=${TAG:-m255_tp4_d$((ISL / 1024))k_c${CONC}}; fi
 OUT=/shared_nfs/kk/dsv41/profile_tp4/$TAG; mkdir -p "$OUT"
 if pgrep -f 'agentx_lane.sh|tp4_moe_tune.sh|gemm_moe_tune.py' >/dev/null || pgrep -f '^sglang::' >/dev/null; then
     echo "REFUSING: lane / MoE tuning / sglang server running"; exit 1
@@ -15,7 +17,8 @@ export PYTHONPATH=/sgl-workspace/mori SRC=/sgl-workspace/sglang/python SGLANG_OP
 export EXTRA_ARGS="--fp8-gemm-backend aiter --enforce-shared-experts-fusion"
 export TP=4 EP_SIZE=1 GPUS=${GPUS:-0,1,2,3} PORT=${PORT:-8888} CONC=$CONC
 export PREFILL_DECODE_INTERVAL=16 CHUNKED_PREFILL_SIZE=16384 MEM_FRACTION_STATIC=${MEM:-0.70}
-export SERVER_ONLY=1 TAG=$TAG SGLANG_TORCH_PROFILER_DIR=$OUT
+export SERVER_ONLY=1 TAG=$TAG
+[ "$MODE" = decode ] && export SGLANG_TORCH_PROFILER_DIR=$OUT
 setsid bash "$D/agentx_colleague_run.sh" > "$OUT/server.log" 2>&1 < /dev/null &
 SPID=$!
 echo "server lane PID/PGID $SPID (kill -- -$SPID); log $OUT/server.log"
@@ -26,9 +29,20 @@ for _ in $(seq 1 180); do
 done
 grep -q 'ready to roll' "$OUT/server.log" || { echo "server not ready after 30 min"; kill -- -$SPID; exit 1; }
 grep -o "'enable_decoder_swa_bounded_replay': [A-Za-z]*\|'tp_size': [0-9]*\|'ep_size': [0-9]*" "$OUT/server.log" | head -3 | paste -sd' '
-python3 -I "$D/decode_load_profile.py" --port "$PORT" --conc "$CONC" --isl "$ISL" --osl "$OSL" \
-    --profile-dir "$OUT" --profile-steps "$STEPS" > "$OUT/load.out" 2>&1
-echo "load exit=$?"; grep '^\[' "$OUT/load.out" | cut -c1-220
+# Both hangs (07:12, 08:19) hit when the load burst landed while the post-ready 1-token request was still in flight;
+# AgentX (aiperf starts ~3 s later) never hung. Let it finish, then send one small request alone before the burst.
+sleep 15
+curl -s -m 120 "http://127.0.0.1:$PORT/v1/completions" -H 'Content-Type: application/json' \
+    -d '{"model":"default","prompt":"Hello","max_tokens":8,"temperature":0}' | grep -q '"choices"' \
+    && echo "pre-load single request OK" || { echo "pre-load single request FAILED (server not serving)"; kill -- -$SPID; exit 1; }
+if [ "$MODE" = prefix ]; then
+    python3 -I "$D/prefix_ttft_sweep.py" --port "$PORT" --api "$API" > "$OUT/load.out" 2>&1
+    echo "load exit=$?"; grep -E '^L=|^\||^N=|Error|Traceback' "$OUT/load.out" | cut -c1-220
+else
+    python3 -I "$D/decode_load_profile.py" --port "$PORT" --api "$API" --conc "$CONC" --isl "$ISL" --osl "$OSL" \
+        --profile-dir "$OUT" --profile-steps "$STEPS" > "$OUT/load.out" 2>&1
+    echo "load exit=$?"; grep '^\[' "$OUT/load.out" | cut -c1-220
+fi
 sleep 20   # trace flush
 kill -- -$SPID 2>/dev/null; sleep 5
 for p in $(ps -eo pid,comm | awk '$2 ~ /^sglang::/{print $1}'); do kill -9 "$p"; done

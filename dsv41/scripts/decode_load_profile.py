@@ -19,16 +19,25 @@ import requests
 
 
 def one(url, ids, osl, res, i, first_evt):
-    body = {"input_ids": ids, "stream": True,
-            "sampling_params": {"max_new_tokens": osl, "ignore_eos": True, "temperature": 0.0}}
+    if url.endswith("/generate"):
+        body = {"input_ids": ids, "stream": True,
+                "sampling_params": {"max_new_tokens": osl, "ignore_eos": True, "temperature": 0.0}}
+    else:  # /v1/completions with token-id prompt (the OpenAI path AgentX uses works without the 07:12 hang)
+        body = {"model": "default", "prompt": ids, "max_tokens": osl, "ignore_eos": True, "temperature": 0.0,
+                "stream": True, "stream_options": {"include_usage": True}}
     t0 = time.perf_counter(); t_first = t_last = None; ntok = 0
-    with requests.post(url, json=body, stream=True, timeout=3600) as r:
+    with requests.post(url, json=body, stream=True, timeout=900) as r:  # fail fast on a server hang
         r.raise_for_status()
         for line in r.iter_lines():
             if not line.startswith(b"data:") or line.strip() == b"data: [DONE]":
                 continue
             d = json.loads(line[5:])
-            n = d.get("meta_info", {}).get("completion_tokens", ntok)
+            if "meta_info" in d:
+                n = d["meta_info"].get("completion_tokens", ntok)
+            elif d.get("usage"):  # final usage chunk: exact token count, no new text
+                ntok = max(ntok, d["usage"].get("completion_tokens", ntok)); continue
+            else:
+                n = ntok + (1 if any(c.get("text") for c in d.get("choices", [])) else 0)
             if n > ntok:
                 now = time.perf_counter()
                 if t_first is None:
@@ -41,7 +50,8 @@ def run(a, label, profile):
     base = f"http://127.0.0.1:{a.port}"
     rng = random.Random(a.seed)
     res = [None] * a.conc; first = [threading.Event() for _ in range(a.conc)]
-    ths = [threading.Thread(target=one, args=(f"{base}/generate", [rng.randrange(1000, 100000) for _ in range(a.isl)],
+    path = "/generate" if a.api == "generate" else "/v1/completions"
+    ths = [threading.Thread(target=one, args=(f"{base}{path}", [rng.randrange(1000, 100000) for _ in range(a.isl)],
                                               a.osl, res, i, first)) for i in range(a.conc)]
     t0 = time.perf_counter()
     for t in ths:
@@ -69,13 +79,20 @@ def main():
     p.add_argument("--isl", type=int, default=65536)
     p.add_argument("--osl", type=int, default=1024)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--api", choices=["generate", "completions"], default="generate")
     p.add_argument("--profile-dir")
     p.add_argument("--profile-steps", type=int, default=40)
     a = p.parse_args()
-    run(a, "warmup", False)              # JIT / graph warmup at this shape
-    a.seed += 1; run(a, "clean", False)  # numbers without profiler overhead
+    # Same prompts (same seed) in every round: the "prime" round cold-prefills them with 1 output token, so in "clean"
+    # and "profile" every prefill is a cached-prefix hit (~0.1 s) and all `conc` requests decode together. With cold
+    # prefills the TTFTs spread ~0.7-12 s and early requests finished their OSL before the last started -> the
+    # 08:37 profile caught bs=4, not 8.
+    osl = a.osl
+    a.osl = 1; run(a, "prime", False)
+    a.osl = osl
+    run(a, "clean", False)               # numbers without profiler overhead
     if a.profile_dir:
-        a.seed += 1; run(a, "profile", True)
+        run(a, "profile", True)
 
 
 if __name__ == "__main__":

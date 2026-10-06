@@ -1,4 +1,4 @@
-# Request to the B200 node: vLLM TP4 profile + fixed-shape microbench for DSV4.1-Flash (2026-10-06, rev 2)
+# Request to the B200 node: vLLM TP4 profile + fixed-shape microbench for DSV4.1-Flash (2026-10-06, rev 3)
 
 Requested by: crsuse2-m2m-255 (MI355X side, see TP4_GAP_1006.md). Executor: B200 node agent.
 Write your results ONLY into `dsv41/results/b200_tp4_profile_1006.md` (new file, you own it; `Owner node: <hostname>`
@@ -41,8 +41,12 @@ everything except where noted; restart only if the recipe differs per conc.
 ## Deliverable 1 -- clean numbers (no profiler)
 
 **1a. Decode, D64:** `vllm bench serve --dataset-name random --random-input-len 65536 --random-output-len 1024
---ignore-eos`, conc 8 and 16 (P1b), conc 1 (P3), num-prompts 3 x conc. Report per row: mean/p50/p90 TTFT, TPOT, ITL
-(ms), output tok/s, and the server's last `SpecDecoding metrics` line (must show mean AL ~3.5).
+--ignore-eos --seed 0 --num-prompts <conc> --max-concurrency <conc>`, conc 8 and 16 (P1b), conc 1 (P3). Run it
+TWICE with the same --seed: the first run cold-prefills the prompts into the prefix cache; report and profile the
+SECOND run, where every prefill is a cache hit and all `conc` requests decode together. (rev 3: with cold 64k
+prefills the TTFTs spread over seconds and early requests finish before the last one starts -- the MI355X profile
+caught bs=4 instead of 8 that way.) Report per row: mean/p50/p90 TTFT, TPOT, ITL (ms), output tok/s, and the server's
+last `SpecDecoding metrics` line (must show mean AL ~3.5).
 
 **1b. Cached-prefix TTFT sweep (conc 1):** for each prefix length L in 32k, 64k, 128k, 256k and new length N in 512,
 4096: send prompt P_L (random token ids, max_tokens 1) to warm the prefix cache, then P_L + N fresh random tokens
@@ -57,8 +61,10 @@ Enable the profiler the way this image supports it (check `vllm serve --help | g
 `VLLM_TORCH_PROFILER_DIR=<dir>` or `--profiler-config`). Keep traces SHORT (bounded iterations or ~1-2 s windows),
 with_stack off, record_shapes on. Use `POST /start_profile` / `POST /stop_profile`.
 
-1. **Decode steady state**, D64 at conc 8 and 16 (P1b), conc 1 (P3): start the bench, wait until every request has
-   its first token (all prefills done), then start_profile, ~30-40 decode steps, stop_profile.
+1. **Decode steady state**, D64 at conc 8 and 16 (P1b), conc 1 (P3): on the SECOND (cache-warm) run of 1a, wait
+   until every request has its first token, then start_profile, ~30-40 decode steps, stop_profile. Check in the trace
+   that the decode batch size equals conc (e.g. from the attention / MoE kernel shapes) and state it in the doc.
+   Summarize the rank whose trace actually contains the CUDA-graph kernels (on MI355X only one rank's trace did).
 2. **Extend over a cached prefix** (P2), conc 1: warm P_L (max_tokens 1), then profile P_L + 512 new tokens
    (max_tokens 1) for L = 64k and L = 256k -- two traces, so per-kernel time can be compared across prefix length.
 

@@ -13,10 +13,12 @@ import json
 import re
 
 CATS = [
-    ("indexer", r"indexer|mqa_logits|top_?k|topk"),
+    ("ar_mhc_fused", r"all_reduce_mhc"),
+    ("mhc", r"mhc|_hc_|hc_prenorm|sinkhorn"),
+    ("indexer", r"indexer|mqa_logits|top_?k|topk|radixsort|digitcumsum"),
     ("kv_compress", r"compress"),
     ("sparse_mla_attn", r"mla|sparse|attn|attention|pa_decode|flash|fmha"),
-    ("moe", r"moe|expert|topk_softmax|grouped"),
+    ("moe", r"moe|expert|topk_softmax|grouped|_router_|bmm_mxe"),
     ("comm", r"all_?reduce|allgather|all_gather|reduce_scatter|cross_device|rccl|nccl|custom_ar|quick_?reduce"),
     ("engram", r"engram"),
     ("dense_gemm", r"gemm|matmul|cijk|hipblaslt|mfma|gemv|bmm|_mm_|linear"),
@@ -57,15 +59,15 @@ def main():
     for e in ev:
         by[e["name"]][0] += 1; by[e["name"]][1] += e["dur"]
     tot = sum(v[1] for v in by.values())
-    cat = collections.defaultdict(float)
-    for n, (_, us) in by.items():
+    cat = collections.defaultdict(float); ncat = collections.defaultdict(int)
+    for n, (cnt, us) in by.items():
         c = next((c for c, rx in CATS if re.search(rx, n, re.I)), "other")
-        cat[c] += us
+        cat[c] += us; ncat[c] += cnt
     print(f"window {win / 1e3:.1f} ms, GPU busy {busy / win:.0%} (idle {1 - busy / win:.0%}), "
           f"{win / 1e3 / a.steps:.3f} ms/step over {a.steps} steps; kernel time {tot / 1e3:.1f} ms")
-    print("category,total_ms,ms_per_step,pct")
+    print("category,total_ms,ms_per_step,kernels_per_step,pct")
     for c, us in sorted(cat.items(), key=lambda x: -x[1]):
-        print(f"{c},{us / 1e3:.2f},{us / 1e3 / a.steps:.3f},{us / tot:.1%}")
+        print(f"{c},{us / 1e3:.2f},{us / 1e3 / a.steps:.3f},{ncat[c] / a.steps:.1f},{us / tot:.1%}")
     rows = sorted(by.items(), key=lambda x: -x[1][1])
     lines = [f"{n[:120].replace(',', ';')},{c},{us:.0f},{us / a.steps:.1f},{us / tot:.1%}" for n, (c, us) in rows]
     print(f"top {a.top}: kernel_name,calls,total_us,us_per_step,pct")

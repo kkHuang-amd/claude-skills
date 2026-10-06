@@ -61,6 +61,8 @@ dsv41/
   RUNBOOK.md       rebuild the validated env from a fresh container (keep in sync with scripts/).
   ENV_1001.md      HaiShaw/sglang dsv41-env + aiter e7d2453f2 + #5967 env rebuild and validation (own CONTINUE HERE).
   MAIN_REGRESS_1002.md  regression check of upstream main + PR #42055 vs env1001 (own CONTINUE HERE).
+  REL_REGRESS_1005.md   release-image sglang regression check (closed; TP2 c64/c8 no regression).
+  DEP_1005.md      DP attention (DEP2 MegaMoE / DP2 TP MoE) bring-up: open SGLang DP problems list (own CONTINUE HERE).
   NOTES.md         longer findings / investigation log, newest first.
   scripts/         ALL runnable scripts (*.sh, *.py). Nothing executable anywhere else.
   patches/         other repos: <repo>_<upstreamPR>_<what>.patch (`git -C /sgl-workspace/<repo> apply`);
@@ -78,7 +80,11 @@ dsv41/
 - `launch_server.sh` TP4 server (PERF=1, DSPARK=1); `setup_env.sh` idempotent env setup (RUNBOOK); `setup_atomport_env.sh`
   idempotent ATOM-port best-config env (sglang rolao worktree, aiter-5750 + patch + tuned CSV, flydsl 0.3.4.1).
 - `agentx_colleague_run.sh` **current** AgentX launcher (shim for `agentx_colleague_mi355x_sglang.sh`); knobs `TAG CONC OPUS
-  TP EP_SIZE GPUS PREFILL_DECODE_INTERVAL SRC EXTRA_ARGS SERVER_ONLY EVAL_ONLY`; out /shared_nfs/kk/dsv41/agentx/<TAG>/.
+  TP EP_SIZE GPUS PREFILL_DECODE_INTERVAL CHUNKED_PREFILL_SIZE MEM_FRACTION_STATIC REPLAY SRC EXTRA_ARGS SERVER_ONLY EVAL_ONLY`;
+  out /shared_nfs/kk/dsv41/agentx/<TAG>/. Defaults = best config (2026-10-05): SRC /sgl-workspace/sglang, REPLAY=1,
+  OPUS sparse prefill, `--fp8-gemm-backend aiter --enforce-shared-experts-fusion`, per-CONC PDI/chunk/mem
+  (c<16 16/16384/0.70, c16 16/16384/0.80, c32 4/16384/0.80, c>=64 4/4096/0.85). Only CONC/TP/GPUS/PORT/TAG are needed:
+  `TP=2 GPUS=0,1 CONC=64 TAG=x bash scripts/agentx_colleague_run.sh`. Max 2 servers per node at once (REL_REGRESS_1005.md).
 - `agentx_series.sh` sequential AgentX points (`RUNS SCRIPT PREFIX`), progress agentx/series.txt.
 - Historical: `agentx_dsv41_mi355x_sglang.sh`, `agentx_dsv41_b200port_mi355x.sh`, `agentx_colleague_pipeline.sh`.
 - `run_gsm8k.sh` -> results/gsm8k.md; `run_gsm8k_openai.sh` engine-neutral GSM8K (never with simulated acceptance);

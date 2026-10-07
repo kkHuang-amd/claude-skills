@@ -171,9 +171,23 @@ CHUNKED_PREFILL_SIZE="${CHUNKED_PREFILL_SIZE:-$CHUNKED_PREFILL_SIZE_DEFAULT}"
 # 16 its prefill queue averaged 41 requests and median TTFT reached 35 s.
 # Env-overridable so a sweep can retune it without editing the recipe.
 # LOCAL: 4 from c32 up at both TPs (c32 PDI4 beat PDI16 on TTT and P90, 93,855.8 / 68.7 vs 90,876.4 / 102.0).
+# LOCAL: DP + TP MoE can run bounded replay only on an SGLang tree with the DP late-layer resize
+# (HaiShaw/sglang fix/dsv41-dp-fault b70264d7bc); detect it in SRC.
+DP_TP_REPLAY_OK=0
+if [[ "${DP_ATTENTION:-false}" == true && "${DP_MOE:-megamoe}" == tp ]] &&
+    grep -q _late_layer_dp_counts "${SRC:-/sgl-workspace/sglang/python}/sglang/srt/models/deepseek_v4.py" 2>/dev/null; then
+    DP_TP_REPLAY_OK=1
+fi
+# LOCAL: DP2 + TP MoE + replay (DEP_1005.md, 2026-10-06 sweep, P90-oriented): c32 PDI 32 (103,742 / 109.5 vs
+# PDI16 102,786 / 98.8, PDI4 102,631 / 88.9); c64 PDI 16 (144,746 / 78.5 vs PDI4 149,400 / 48.6, PDI32 123,457 / 98.3).
+# c128 saturates (TTFT p50 29-49 s) and follows the TP rule.
 PREFILL_DECODE_INTERVAL_DEFAULT=16
 if (( CONC >= 32 )); then
     PREFILL_DECODE_INTERVAL_DEFAULT=4
+fi
+if [[ "$DP_TP_REPLAY_OK" == 1 ]]; then
+    (( CONC == 32 )) && PREFILL_DECODE_INTERVAL_DEFAULT=32
+    (( CONC == 64 )) && PREFILL_DECODE_INTERVAL_DEFAULT=16
 fi
 PREFILL_DECODE_INTERVAL="${PREFILL_DECODE_INTERVAL:-$PREFILL_DECODE_INTERVAL_DEFAULT}"
 
@@ -301,13 +315,13 @@ SGLANG_CMD=(
 )
 # LOCAL: REPLAY=1 (default) disables prefill graphs and bounds decoder SWA replay instead; it beat the breakable prefill
 # graph at every TP2/TP4 point (results/agentx.md, tp2r_* / tp4s_*). REPLAY=0 restores the recipe's breakable graph.
-# Under DP attention: bounded replay works with MegaMoE a2a (local SGLang patch 2026-10-05, DEP_1005.md problem 1) but
-# stays rejected with TP MoE (DP_MOE=tp gathers full-extend rows per layer) -> DP_MOE=tp defaults to REPLAY=0.
+# Under DP attention: bounded replay works with MegaMoE a2a (local SGLang patch 2026-10-05, DEP_1005.md problem 1);
+# with TP MoE it needs the DP late-layer resize (DP_TP_REPLAY_OK above), else DP_MOE=tp defaults to REPLAY=0.
 # The prefill graph stays disabled under DP. PREFILL_GRAPH overrides the backend.
 REPLAY_DEFAULT=1
 PREFILL_GRAPH_DEFAULT=breakable
 if [[ "$DP_ATTENTION" == true ]]; then
-    [[ "${DP_MOE:-megamoe}" == tp ]] && REPLAY_DEFAULT=0
+    [[ "${DP_MOE:-megamoe}" == tp && "$DP_TP_REPLAY_OK" != 1 ]] && REPLAY_DEFAULT=0
     # Breakable prefill replay also fails under DP_MOE=tp: a rank padded to the DP max (7587 -> 16384 tokens) trips
     # the DSv4 c2_prefill_norm_rope_store shape check (dp2tp_c32, 2026-10-05).
     PREFILL_GRAPH_DEFAULT=disabled

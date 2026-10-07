@@ -1,0 +1,219 @@
+diff --git a/python/sglang/srt/arg_groups/deepseek_v4_hook.py b/python/sglang/srt/arg_groups/deepseek_v4_hook.py
+index 09a1321d74..849420c416 100644
+--- a/python/sglang/srt/arg_groups/deepseek_v4_hook.py
++++ b/python/sglang/srt/arg_groups/deepseek_v4_hook.py
+@@ -323,8 +323,12 @@ def validate_deepseek_v41_features(server_args: ServerArgs) -> None:
+                 "the prefill CUDA graph",
+                 cfg.cuda_graph_config.prefill.backend != Backend.DISABLED,
+             ),
+-            # input_ids_global is a DP-wide gather, so the tail slice cannot apply.
+-            ("DP attention", attn_dp_enabled_of(cfg)),
++            # TP MoE under DP gathers every rank's rows with the full-extend
++            # global_num_tokens; with an a2a backend each rank routes its own tail.
++            (
++                "DP attention without --moe-a2a-backend",
++                attn_dp_enabled_of(cfg) and cfg.moe_a2a_backend == "none",
++            ),
+         )
+         for feature, enabled in incompatible:
+             if enabled:
+diff --git a/python/sglang/srt/distributed/parallel_state.py b/python/sglang/srt/distributed/parallel_state.py
+index f5441452ae..18d94ec9ea 100644
+--- a/python/sglang/srt/distributed/parallel_state.py
++++ b/python/sglang/srt/distributed/parallel_state.py
+@@ -84,6 +84,11 @@ _is_npu = is_npu()
+ _is_cpu = is_cpu()
+ _is_xpu = is_xpu()
+ _is_musa = is_musa()
++# Under CUDA-graph capture, stage aiter custom all-gather / reduce-scatter inputs
++# through the pre-registered IPC pool instead of registering graph-pool tensors:
++# the registered path makes peers read stale data over IPC on replay (garbage
++# rows / NaN under DP attention + TP MoE on MI355X). Set to 0 to restore it.
++_AITER_CAPTURE_COPY_IN = os.environ.get("SGLANG_AITER_CAPTURE_COPY_IN", "1") == "1"
+ 
+ TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
+ 
+@@ -1190,7 +1195,7 @@ class GroupCoordinator:
+             return False
+         if getattr(ca_comm, "_IS_CAPTURING", False):
+             if torch.cuda.is_current_stream_capturing():
+-                if envs.SGLANG_MEMORY_SAVER_CUDA_GRAPH.get():
++                if envs.SGLANG_MEMORY_SAVER_CUDA_GRAPH.get() or _AITER_CAPTURE_COPY_IN:
+                     ca_comm.reduce_scatter(input, output, registered=False)
+                 else:
+                     ca_comm.reduce_scatter(input, output, registered=True)
+@@ -1309,7 +1314,7 @@ class GroupCoordinator:
+         ):
+             if getattr(ca_comm, "_IS_CAPTURING", False):
+                 if torch.cuda.is_current_stream_capturing():
+-                    if envs.SGLANG_MEMORY_SAVER_CUDA_GRAPH.get():
++                    if envs.SGLANG_MEMORY_SAVER_CUDA_GRAPH.get() or _AITER_CAPTURE_COPY_IN:
+                         ca_comm.all_gather_unreg(input, out=output, dim=0)
+                     else:
+                         ca_comm.all_gather_reg(input, out=output, dim=0)
+diff --git a/python/sglang/srt/layers/attention/deepseek_v4_backend.py b/python/sglang/srt/layers/attention/deepseek_v4_backend.py
+index 38d33033f2..5437dc5373 100644
+--- a/python/sglang/srt/layers/attention/deepseek_v4_backend.py
++++ b/python/sglang/srt/layers/attention/deepseek_v4_backend.py
+@@ -905,7 +905,8 @@ def _tail_rows(
+     t: torch.Tensor, *, token_indices: torch.Tensor, contiguous_start: Optional[int]
+ ) -> torch.Tensor:
+     if contiguous_start is not None:
+-        return t[contiguous_start:]
++        # DP padding may follow the extend's real rows.
++        return t[contiguous_start : contiguous_start + token_indices.shape[0]]
+     return t[token_indices]
+ 
+ 
+diff --git a/python/sglang/srt/layers/engram.py b/python/sglang/srt/layers/engram.py
+index 3e14388d59..b3f2904eb8 100644
+--- a/python/sglang/srt/layers/engram.py
++++ b/python/sglang/srt/layers/engram.py
+@@ -289,6 +289,13 @@ class EngramHasher(nn.Module):
+                 device=input_ids.device,
+             )
+         mode = forward_batch.forward_mode
++        if mode.is_idle():
++            # DP padding rows of an idle rank: no history to read or commit.
++            return torch.zeros(
++                (num_tokens, self.primes.shape[0], self.offsets.shape[1]),
++                dtype=torch.int64,
++                device=input_ids.device,
++            )
+         req_slots = forward_batch.req_pool_indices
+         bs = req_slots.shape[0]
+         device = input_ids.device
+diff --git a/python/sglang/srt/model_executor/forward_batch_info.py b/python/sglang/srt/model_executor/forward_batch_info.py
+index 8009e0a9b9..e46cc86d41 100644
+--- a/python/sglang/srt/model_executor/forward_batch_info.py
++++ b/python/sglang/srt/model_executor/forward_batch_info.py
+@@ -31,7 +31,7 @@ import hashlib
+ import warnings
+ from dataclasses import dataclass
+ from enum import IntEnum, auto
+-from functools import total_ordering
++from functools import lru_cache, total_ordering
+ from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple, Union
+ 
+ import torch
+@@ -63,6 +63,7 @@ from sglang.srt.runtime_context import (
+ )
+ from sglang.srt.speculative.spec_info import SpecInputType
+ from sglang.srt.utils import (
++    get_bool_env_var,
+     is_cpu,
+     is_hip,
+     is_npu,
+@@ -2101,7 +2102,23 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
+ 
+ def enable_num_token_non_padded():
+     # Elastic joiners also need graph padding masked after joining WORLD.
+-    return get_parallel().moe_ep_size > 1 or world_dp_gather_enabled()
++    if get_parallel().moe_ep_size > 1 or world_dp_gather_enabled():
++        return True
++    # DP attention + TP MoE gathers each rank's whole padded chunk into the MoE,
++    # so the model needs the real count to zero the pad rows (see
++    # deepseek_v4 _run_moe_ffn_dp_sync).
++    return _dp_tp_moe_masks_pad_rows()
++
++
++@lru_cache(maxsize=1)
++def _dp_tp_moe_masks_pad_rows() -> bool:
++    from sglang.srt.layers.moe import get_moe_a2a_backend
++
++    return (
++        get_bool_env_var("SGLANG_DP_MASK_PAD_ROWS", default="true")
++        and get_parallel().attn_dp_size > 1
++        and get_moe_a2a_backend().is_none()
++    )
+ 
+ 
+ def build_inner_fb_view(
+diff --git a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
+index 2d6240f9cb..73a704ef56 100644
+--- a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
++++ b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
+@@ -70,6 +70,7 @@ from sglang.srt.model_executor.forward_batch_info import (
+     ForwardBatch,
+     ForwardMode,
+     PPProxyTensors,
++    _dp_tp_moe_masks_pad_rows,
+     compute_local_num_token_non_padded,
+     enable_num_token_non_padded,
+     get_required_capture_hidden_mode,
+@@ -1268,6 +1269,14 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+                     post_warmup_hook=post_warmup_hook,
+                 )
+ 
++    def _set_dp_real_num_tokens(self, raw_num_token: int) -> None:
++        # An idle DP rank replays a fabricated batch whose count may not reach
++        # the slot, leaving the previous replay's value; the model masks DP pad
++        # rows by this count, so write the real one on every replay.
++        buf = self.buffers.num_token_non_padded
++        if buf is not None and _dp_tp_moe_masks_pad_rows():
++            buf.fill_(raw_num_token)
++
+     def _validate_capture_hidden_mode(self, forward_batch: ForwardBatch) -> None:
+         if self.capture_hidden_mode < forward_batch.capture_hidden_mode:
+             raise RuntimeError(
+@@ -1309,6 +1318,7 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+                     f"{ragged_layout.graph_num_tokens}"
+                 )
+                 self._stage_ragged_verify_layout(ragged_layout, graph_size_key)
++            self._set_dp_real_num_tokens(self.raw_num_token)
+             self.buffers.input_ids[: self.raw_num_token].copy_(forward_batch.input_ids)
+             self.buffers.positions[: self.raw_num_token].copy_(forward_batch.positions)
+             if (
+@@ -1400,6 +1410,7 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+             buffers.input_embeds[:raw_num_token].copy_(forward_batch.input_embeds)
+         # Padded tokens aren't read, so skip zeroing. Ragged input_ids arrive
+         # from the planner already padded to the tier, invalid slots zeroed.
++        self._set_dp_real_num_tokens(raw_num_token)
+         if self.enable_two_batch_overlap:
+             self.tbo_plugin.replay_prepare(
+                 forward_mode=self.capture_forward_mode,
+diff --git a/python/sglang/srt/models/deepseek_v4.py b/python/sglang/srt/models/deepseek_v4.py
+index e0771b6c97..263fa0ee76 100644
+--- a/python/sglang/srt/models/deepseek_v4.py
++++ b/python/sglang/srt/models/deepseek_v4.py
+@@ -3958,6 +3958,10 @@ class DeepseekV4DecoderLayer(nn.Module):
+             )
+             if _do_shared_local and local_hidden_states.shape[0] > 0:
+                 _shared_local = self.mlp._forward_shared_experts(local_hidden_states)
++            # The gather ships the whole padded chunk and the MoE runs on it, but
++            # graph replay never refreshes pad rows, so they hold stale pool
++            # memory (bf16-max scale) that overflows the MoE and the combine.
++            _mask_dp_pad_rows(local_hidden_states, forward_batch)
+             # self_attn has already reduced across attention TP, so these hidden
+             # states are replicated and must not be summed by a partial gather.
+             dp_gather_replicate(hidden_states, local_hidden_states, forward_batch)
+@@ -4290,15 +4294,27 @@ class DeepseekV4DecoderLayer(nn.Module):
+         state.hidden_states_mlp_output = hidden
+ 
+ 
++def _mask_dp_pad_rows(local_hidden_states, forward_batch) -> None:
++    n_real = forward_batch.num_token_non_padded
++    num_rows = local_hidden_states.shape[0]
++    if n_real is None or num_rows == 0:
++        return
++    pad = torch.arange(num_rows, device=local_hidden_states.device) >= n_real
++    local_hidden_states.masked_fill_(
++        pad.view(-1, *([1] * (local_hidden_states.dim() - 1))), 0
++    )
++
++
+ def _scatter_tail_rows(
+     tail: LateLayerTail, rows: torch.Tensor, num_tokens: int
+ ) -> torch.Tensor:
+     # Rows outside the tail are never read (see _check_late_layer_tail_readers).
+     full = rows.new_empty((num_tokens, rows.shape[1]))
++    n = tail.token_indices.shape[0]
+     if tail.contiguous_start is not None:
+-        full[tail.contiguous_start :].copy_(rows)
++        full[tail.contiguous_start : tail.contiguous_start + n].copy_(rows[:n])
+     else:
+-        full[tail.token_indices] = rows[: tail.token_indices.shape[0]]
++        full[tail.token_indices] = rows[:n]
+     return full
+ 
+ 

@@ -18,7 +18,7 @@ PROF_ARGS=()
 echo "NO_PROFILER=${NO_PROFILER:-0} IDX=$IDX TAG=$TAG MNS=$MNS MNBT=$MNBT CAP=$CAP"
 exec vllm serve $MODEL_PATH \
   --served-model-name deepseek-ai/DeepSeek-V4.1-Flash \
-  --port 8000 \
+  --port ${PORT:-8000} \
   --language-model-only \
   --tokenizer-mode deepseek_v41 \
   --tool-call-parser deepseek_v41 --enable-auto-tool-choice --reasoning-parser deepseek_v41 \

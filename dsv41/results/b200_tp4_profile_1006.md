@@ -6,10 +6,11 @@ Owner node: dgx-025
 
 **Status:** request is now rev 3 (decode = cold pass + cache-warm pass, report/profile the warm one). P1a done, P2 done
 (both unaffected by rev 3). **P1, P2, P3 all done** (decode c1/c8/c16 with the rev 3 method). The c8 TPOT 3.00 vs 1.92 ms
-question is resolved (workload, not recipe; see AgentX section). Extras done: single-stream c8 trace; AgentX c8 reproduction (TTT +0.5%, P90 -4.1% vs the table). The AgentX c8 server (entry idx 2, no profiler) is left running on GPU 0-3.
+question is resolved (workload, not recipe; see AgentX section). Extras done: single-stream c8 trace; AgentX c8 reproduction (TTT +0.5%, P90 -4.1% vs the table); AgentX c1 multi- vs
+single-stream (single-stream: P90 -19%, TTT -10%).
 **Next:** nothing requested.
 **Files:** `dsv41/scripts/b200_tp4_1006/` (`serve.sh` [`NO_PROFILER=1` for clean serving], `prefix_sweep.py`,
-`decode_run.sh`, `extend_prof.py`, `kernel_summary.py`, `single_stream/`, `run_agentx_c8.sh`, `ttt_p90.py`, recipe copy).
+`decode_run.sh`, `extend_prof.py`, `kernel_summary.py`, `single_stream/`, `run_agentx.sh` (CONC/PORT/RUN), `ttt_p90.py`, recipe copy).
 **Repro (P1a):**
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 bash dsv41/scripts/b200_tp4_1006/serve.sh 2 c8 > server_c8.log 2>&1 &
@@ -477,7 +478,7 @@ Goal: reproduce B200 vLLM TP4 c8 from run 37070984585 (TTT 16,549.2 tok/s/GPU, P
   equals the run's `srt-slurm-sha.txt`), own uv venv; the run's `benchmark_command.txt` verbatim except the URL/output
   dir: `--scenario agentx --concurrency 8 --benchmark-duration 3600 --warmup-requests-per-lane 10
   --trace-idle-gap-cap-seconds 300 --warmup-grace-period 1800 --public-dataset semianalysis_cc_traces_weka_062126`.
-  Runner `scripts/b200_tp4_1006/run_agentx_c8.sh`; metrics `scripts/b200_tp4_1006/ttt_p90.py` (TTT = (total_isl +
+  Runner `scripts/b200_tp4_1006/run_agentx.sh` (then named run_agentx_c8.sh); metrics `scripts/b200_tp4_1006/ttt_p90.py` (TTT = (total_isl +
   total_osl) / benchmark_duration / 4 GPUs; P90 intvty = p10 of `output_token_throughput_per_user`; reproduces the
   run's 16,549.2 / 385.0 exactly from its own `profile_export_aiperf.json`).
 
@@ -501,6 +502,36 @@ than 8 (idle gaps, sequential turns), while the microbench keeps all 8 requests 
 
 Artifacts: `/shared_nfs/kk/dsv41_b200/agentx/c8_run1/` (aiperf artifacts, `profile_export.jsonl`), server log
 `/shared_nfs/kk/dsv41_b200/server_c8_agentx.log`, reference artifacts `/shared_nfs/kk/dsv41_b200/ref37070984585/tp4_c8/`.
+
+## Extra -- AgentX c1, multi-stream vs single-stream (2026-10-07, dgx-025)
+
+Two servers in parallel on the same host, recipe entry idx 0 (c1: max-num-seqs 8, max-num-batched-tokens 4096,
+capture 4092), `NO_PROFILER=1`: **multi-stream** on GPU 0-3 :8000 (args diffed against the run's c1 server log:
+identical except model path / host / device_ids, as for c8), **single-stream** on GPU 4-7 :8001 (same + the
+`single_stream/` env; all 18 import-hook patch lines present). Client: `run_agentx.sh` with `CONC=1`, the run's c1
+`benchmark_command.txt` verbatim except URL/output dir (aiperf `89b21867`, 3600 s).
+
+| c1 | run 37070984585 | multi-stream | single-stream | single vs multi |
+|---|---:|---:|---:|---:|
+| **TTT (tok/s/GPU)** | 7,698.6 | **7,587.5** (-1.4%) | **6,796.7** | **-10.4%** |
+| **P90 intvty** | 583.2 | **549.3** (-5.8%) | **444.8** | **-19.0%** |
+| intvty p50 | 604.6 | 599.5 | 480.7 | -19.8% |
+| ITL p50 / p90 ms | 1.654 / 1.715 | 1.668 / 1.821 | 2.080 / 2.248 | +24.7% / +23.4% |
+| TTFT p50 / p90 ms | 181 / 282 | 280 / 430 | 268 / 416 | |
+| ISL / OSL mean | 329k / 1,981 | 328k / 1,978 | 312k / 1,989 | |
+| requests, errors | 334, 0 | 331, 0 | 311, 0 | |
+| AL (server) | | 3.52 | 3.45 | |
+
+- Multi-stream reproduces the table on TTT (-1.4%) and ITL p50 (+0.8%); P90 is -5.8%, just outside the ~5% band, from a
+  heavier ITL tail (p90 +6%). TTFT is again higher on this node (+55% p50; c8 solo was +40%); with two servers sharing
+  the host CPUs this run is not a clean TTFT number.
+- **Single-stream costs 20% of c1 interactivity** (ITL p50 +25%, i.e. +0.41 ms per token, ~+1.4 ms per decode step at
+  AL ~3.5) and 10% TTT. That is about twice the c8 microbench cost (+11% ITL), consistent with the c1 step having the
+  most idle SMs for side streams to fill. The single-stream run also saw a slightly lighter mix (ISL 312k vs 328k),
+  which if anything flatters it.
+
+Artifacts: `/shared_nfs/kk/dsv41_b200/agentx/c1_multi/`, `.../c1_1stream/`; server logs
+`/shared_nfs/kk/dsv41_b200/server_c1_{multi,1stream}.log`; reference `/shared_nfs/kk/dsv41_b200/ref37070984585/tp4_c1/`.
 
 ## Traces (dgx-025, not in git)
 

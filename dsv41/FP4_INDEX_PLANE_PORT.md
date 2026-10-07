@@ -48,7 +48,8 @@ P0.2 done on crsuse2-m2m-259 (results/fp4_index_scorer.md).
 - prefill: <= 2.3% at 131k;
 - verify: <= 1.3% at c32;
 - JIT: no help.
-- page-8 / candidate layers (P2, INDEXER_COST I4) is the only unmeasured lever.
+- page-8 / candidate-only scoring (P2): measured in INDEXER_COST_1007.md I4. The consumer layers 24..36 already cost
+  only ~0.2 ms each at 131k, so P2 has little value.
 **Test env (node-local, crsuse2-m2m-259):**
 - aiter worktree `/sgl-workspace/aiter-6145` @5b2f7d1d1; `3rdparty/composable_kernel` is a symlink to `/sgl-workspace/aiter`'s,
   which is the same CK commit.
@@ -198,6 +199,7 @@ Out of scope: the mono-only FP4 parts (`mono/kernels/index_score_fp4.py`, `index
 ## Progress log (append-only; every entry: date, node, what, link to result)
 
 - 2026-10-07 crsuse2-m2m-259: assessment above. Local aiter e7d2453f2 lacks `make_fp4_mqa_plan` / rowgroup kernel.
+- 2026-10-07 crsuse2-m2m-259: P2 has little value. The candidate consumer layers are already cheap (INDEXER_COST I4).
 - 2026-10-07 crsuse2-m2m-259: P3 sized.
   - **Method:** existing c1/c4/c8 traces (crsuse2-m2m-255) plus clean TPOT at c16/c32/c64 on this node, with the
     microbench at verify shapes (6 rows/request), which is validated against the trace kernel times.

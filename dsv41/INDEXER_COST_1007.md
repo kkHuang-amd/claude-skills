@@ -5,15 +5,14 @@ Created: 2026-10-07. Source data: FP4_INDEX_PLANE_PORT.md P0.3b, results/fp4_ind
 
 ## CONTINUE HERE
 
-**Status:** I1 is done and validated in `/sgl-workspace/sglang-i1` (branch `dsv41-index-q-prefill-fuse`, uncommitted; patch
-`patches/sglang_local_index_q_prefill_fuse_0001.patch`).
+**Status:** I1 is done and pushed. It is commit 0bac6d8607 on HaiShaw/sglang `perf/v41-index-q-prefill-fuse`, on top of
+aa5551d9b6 (main of 10-07). The bitwise check was re-run on the rebased tree (15/15, num_warps=2).
 - bitwise equal;
 - prefill q -53..-60%, prefill fwd -1.2..-1.6%;
 - GSM8K 0.908/0.912 vs main 0.907;
 - decode TPOT neutral.
 **Next:**
-- With the user's OK, commit on the branch and open the upstream PR ([AMD][V4.1] title, template per
-  NEW_WORKSPACE_PROMPT).
+- Open the upstream PR from that branch if the user wants it ([AMD][V4.1] title, template per NEW_WORKSPACE_PROMPT).
 - Then pick I4 (top-k/candidates at long context, ~4.4% at 131k) or I2 (JIT stalls).
 **Repro (measurement):**
 ```bash
@@ -60,8 +59,36 @@ Setup:
 | I1 | q path in prefill | q_inputs ~6.9 ms per 16k fwd (3.2%); split: pack 4.55 + rope_fq 1.54 + GEMM 0.58 + weights 0.21 | fused rows-tiled RoPE+fq+pack prefill kernel, bitwise equal | measured: q 7.10 -> 3.31 ms per 16k fwd; fwd -1.2..-1.6% | S | crsuse2-m2m-259 | implemented; GSM8K OK (0.908/0.912 vs 0.907); decode TPOT neutral | ready to upstream (ask) |
 | I2 | Per-width JIT stalls (scorer + workspace build) | server: 0.2-5.4 s and 0.7-3.9 s on first use of each width. Microbench (P0.4): A compiles 1 kernel per 4096-key bucket, ~0.16 s cold / ~42 ms warm-disk; the Triton workspace build compiles per row-count shape, 0.55-1.9 s cold. Row-group B does NOT help (also per width, 1.18 s cold) | (a) explain the server-vs-microbench gap first (4-rank concurrent compile? several variants per fwd?); (b) aiter: make the key width a runtime arg of `flydsl_pa_mqa_logits_fp4_prefill`; (c) prewarm widths at startup (~256 buckets to 1M; ~11 s warm-disk / ~42 s cold per process [inferred]); (d) coarser bucket | removes TTFT spikes on fresh nodes and on first long requests | S-M | | todo |
 | I3 | Scorer at long context | 8.4% of fwd at 131k (16k chunk) | row-group B, 1.3-1.4x at keys >= 4k (FP4_INDEX_PLANE_PORT.md P1, parked) | ~2.3% at 131k, ~0.5% at 33k | M | | parked |
-| I4 | "other" (top-k / candidates) at long context | ~10.7 ms per fwd at 131k (4.4%), grows with ctx | Profile first: split `_select_topk_extend_hip` into top-k / candidate select / consumer apply. Candidate layers 24..36 may score the full rectangle and then mask | unknown, up to ~4% at 131k | M | | todo (measure) |
+| I4 | select (top-k / candidates) at long context | MEASURED, see "I4 measured": select = 0.75% / 1.4% / 2.5% / 4.2% of a 16k fwd at 16k / 33k / 66k / 131k ctx. Memory-bound passes over the fp32 logits rectangle | A: fold layer-20 publish (block maxima) into its top-k pass, ~2-2.5 ms at 131k. B: tune topk_v2 toward roofline (~57% now), ~3-4 ms. C: top-k inside the scorer, no logits rectangle (aiter), ~8-12 ms | 1-5% at 131k only; <1.5% at <=33k | M / M / L | | measured, options open |
 | I5 | DSpark target-verify scoring | verify scorer = 0.5-2.3% of the decode step (c1..c64; 6 rows/req); row-group 1.5-2.4x at bs>=8 | P3 in FP4_INDEX_PLANE_PORT.md | 0.4-1.3% of the decode step (c32 best) | M | | sized, low priority |
+
+### I4 measured (2026-10-07, crsuse2-m2m-259, run i4_select_259, extra spans in select)
+
+**Per layer at ctx 131k, 16k new tokens, fwd 244 ms (ms, median of 3 forwards):**
+
+| layers | indexer | score | select |
+|---|---|---|---|
+| 2 / 8 / 14 (r=2, full) | ~7.4 each | ~4.0 each | ~1.5 each |
+| 20 (r=1, candidate source, full) | 15.4 | 8.05 | 5.57 (top-k + publish) |
+| 24 / 28 / 32 / 36 (consumers) | 0.22 each | 0.08 each | 0.03 each |
+
+**The consumer layers do NOT score the full context.** Earlier text in this repo's chat history inferred they did; the
+measurement refutes it. So "score only candidate blocks" (ATOM page-8, FP4_INDEX_PLANE_PORT.md P2) has little left to
+save.
+
+**Select split per 16k forward (ms):**
+
+| ctx | select | sel_topk | sel_publish | sel_consume | rest (fills/metadata) |
+|---|---|---|---|---|---|
+| 16k | 1.61 | 1.25 | 0.18 | 0.09 | 0.32 |
+| 33k | 3.00 | 2.09 | 0.67 | 0.10 | 0.29 |
+| 66k | 5.70 | 3.94 | 1.47 | 0.10 | 0.41 |
+| 131k | 10.31 | 7.10 | 2.81 | 0.10 | ~0.4 |
+
+**Roofline (5 TB/s) [inferred]:**
+- The scorer writes the [rows, lc] fp32 logits, and top-k (plus publish on layer 20) reads them again.
+- At 131k: r=2 layers have a ~4.3 GB rectangle, so top-k is >= 0.86 ms against 1.5 ms measured (~57%).
+- Layer 20 has ~8.6 GB, read twice (top-k + publish), so >= 3.4 ms against 5.57 ms measured.
 
 ### I1 measured split (2026-10-07, crsuse2-m2m-259, in-server spans, run i1_qsplit_259)
 
@@ -169,3 +196,5 @@ fake-quant (`_rope_fq4`).
 - 2026-10-07 crsuse2-m2m-259: I1 implemented; bitwise check and in-server q -53% / fwd -1.2..-1.6%. GSM8K A/B running.
 - 2026-10-07 crsuse2-m2m-259: I1 GSM8K A/B: 0.908 / 0.912 (warm rerun) vs main 0.907. Eval latency +12% on the warm rerun (n=1); a decode TPOT A/B is queued as next.
 - 2026-10-07 crsuse2-m2m-259: I1 decode TPOT A/B neutral (c16 3.95 vs 3.91, c32 ~5.32 vs ~5.27 ms). I1 is ready to upstream.
+- 2026-10-07 crsuse2-m2m-259: I1 pushed to HaiShaw/sglang perf/v41-index-q-prefill-fuse (0bac6d8607).
+- 2026-10-07 crsuse2-m2m-259: I4 measured. select is memory-bound over the logits rectangle (4.2% at 131k); the consumer layers are already cheap, so P2 page-8 has little value. Options A/B/C are listed.

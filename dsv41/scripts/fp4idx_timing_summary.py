@@ -36,6 +36,9 @@ for f in sorted(fwd):
     idx, sc = a["indexer_extend_gpu"] / 1e3, a["score_gpu"] / 1e3
     row = dict(F=F, idx=idx, sc=sc, sch=a["score_host"] / 1e3, q=a["q_inputs_gpu"] / 1e3,
                ws=a["ws_build_gpu"], wsh=a["ws_build_host"])
+    if a.get("select_n"):
+        row.update({k: a[k + "_gpu"] / 1e3 for k in ("select", "sel_publish", "sel_topk", "sel_consume")})
+        row["sel_n"] = {k: int(a[k + "_n"]) for k in ("sel_publish", "sel_topk", "sel_consume")}
     if a.get("q_wqb_n"):
         row.update({k: a[k + "_gpu"] / 1e3 for k in ("q_wqb", "q_rope_fq", "q_pack", "q_weights")})
     print(f"{f:>4} {r['tokens']:>6} {r['reqs']:>4} {r['max_seq']:>7} | {F:7.1f} | {idx:7.2f} {100 * idx / F:5.1f} | "
@@ -45,10 +48,14 @@ for f in sorted(fwd):
 
 print("\nmedian per (tokens, max_seq~1k):")
 for (tok, ms), rows in sorted(groups.items()):
-    m = {k: statistics.median(x[k] for x in rows) for k in rows[0]}
+    m = {k: statistics.median(x[k] for x in rows) for k in rows[0] if k != "sel_n"}
     print(f"  tok {tok:>6} seq~{ms:>7} n={len(rows):>2}: fwd {m['F']:7.1f} ms, indexer {m['idx']:6.2f} ms "
           f"({100 * m['idx'] / m['F']:4.1f}%), score {m['sc']:6.2f} ms ({100 * m['sc'] / m['F']:4.1f}%), "
           f"score host {m['sch']:5.2f} ms, ws {m['ws']:.0f}/{m['wsh']:.0f} us")
+    if "select" in rows[0]:
+        rest = m["idx"] - m["sc"] - m["q"] - m["select"]
+        print("      select split (ms): " + ", ".join(f"{k} {m[k]:.2f}" for k in ("select", "sel_publish", "sel_topk", "sel_consume"))
+              + f" | indexer rest (fills/metadata) {rest:.2f} | calls {rows[0]['sel_n']}")
     if "q_wqb" in rows[0]:
         print("      q split (ms, sum over layers): " + ", ".join(
             f"{k} {m[k]:.2f}" for k in ("q_wqb", "q_rope_fq", "q_pack", "q_weights")))

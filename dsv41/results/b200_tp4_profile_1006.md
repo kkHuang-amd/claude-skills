@@ -523,12 +523,28 @@ identical except model path / host / device_ids, as for c8), **single-stream** o
 | AL (server) | | 3.52 | 3.45 | |
 
 - Multi-stream reproduces the table on TTT (-1.4%) and ITL p50 (+0.8%); P90 is -5.8%, just outside the ~5% band, from a
-  heavier ITL tail (p90 +6%). TTFT is again higher on this node (+55% p50; c8 solo was +40%); with two servers sharing
-  the host CPUs this run is not a clean TTFT number.
+  heavier ITL tail (p90 +6%). TTFT is again higher on this node (+55% p50; c8 solo was +40%); the single-stream solo
+  rerun below shows this is not from the two servers sharing the host.
 - **Single-stream costs 20% of c1 interactivity** (ITL p50 +25%, i.e. +0.41 ms per token, ~+1.4 ms per decode step at
   AL ~3.5) and 10% TTT. That is about twice the c8 microbench cost (+11% ITL), consistent with the c1 step having the
   most idle SMs for side streams to fill. The single-stream run also saw a slightly lighter mix (ISL 312k vs 328k),
   which if anything flatters it.
+
+**Interference check (user request):** single-stream c1 rerun alone (fresh server, GPU 4-7, nothing else on the
+node):
+
+| c1 single-stream | parallel with multi-stream server | alone | delta |
+|---|---:|---:|---:|
+| TTT (tok/s/GPU) | 6,796.7 | 6,779.6 | -0.3% |
+| P90 intvty | 444.8 | 435.9 | -2.0% |
+| intvty p50 | 480.7 | 481.0 | +0.1% |
+| ITL p50 / p90 ms | 2.080 / 2.248 | 2.079 / 2.294 | 0.0% / +2.0% |
+| TTFT p50 / p90 ms | 268 / 416 | 326 / 498 | |
+| requests (ISL / OSL mean) | 311 (312k / 1,989) | 311 (312k / 1,989) | |
+
+Within noise, so running the two servers side by side did not distort the decode numbers; the single-stream cost
+(P90 -19%, TTT -10% vs multi-stream) stands. TTFT is not lower alone either, so the elevated TTFT on this node vs the
+InferenceX run is not caused by the parallel run.
 
 Artifacts: `/shared_nfs/kk/dsv41_b200/agentx/c1_multi/`, `.../c1_1stream/`; server logs
 `/shared_nfs/kk/dsv41_b200/server_c1_{multi,1stream}.log`; reference `/shared_nfs/kk/dsv41_b200/ref37070984585/tp4_c1/`.

@@ -5,11 +5,11 @@ Owner node: dgx-025
 ## CONTINUE HERE
 
 **Status:** request is now rev 3 (decode = cold pass + cache-warm pass, report/profile the warm one). P1a done, P2 done
-(both unaffected by rev 3). **P1, P2, P3 all done** (decode c1/c8/c16 with the rev 3 method). Open item: B200 c8 TPOT here 3.00 ms vs 1.92 ms
-quoted from InferenceX run 37070984585 (see P1b "Gap to flag"). Extra single-stream c8 trace done (see that section); its server (entry idx 2 + single-stream env) is left running on GPU 0-3.
-**Next:** nothing requested; possible follow-up is reconciling the c8 TPOT gap with the InferenceX artifacts.
-**Files:** `dsv41/scripts/b200_tp4_1006/` (`serve.sh`, `prefix_sweep.py`, `decode_run.sh`, `extend_prof.py`,
-`kernel_summary.py`, recipe copy).
+(both unaffected by rev 3). **P1, P2, P3 all done** (decode c1/c8/c16 with the rev 3 method). The c8 TPOT 3.00 vs 1.92 ms
+question is resolved (workload, not recipe; see AgentX section). Extras done: single-stream c8 trace; AgentX c8 reproduction (TTT +0.5%, P90 -4.1% vs the table). The AgentX c8 server (entry idx 2, no profiler) is left running on GPU 0-3.
+**Next:** nothing requested.
+**Files:** `dsv41/scripts/b200_tp4_1006/` (`serve.sh` [`NO_PROFILER=1` for clean serving], `prefix_sweep.py`,
+`decode_run.sh`, `extend_prof.py`, `kernel_summary.py`, `single_stream/`, `run_agentx_c8.sh`, `ttt_p90.py`, recipe copy).
 **Repro (P1a):**
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 bash dsv41/scripts/b200_tp4_1006/serve.sh 2 c8 > server_c8.log 2>&1 &
@@ -218,9 +218,9 @@ Its profile already had batch 8 in all 40 steps (`generation_8(48)`), 11.16 ms/s
 Group shares (rank 0, ms/step): MoE 4.20, dense GEMM 2.62, all-reduce 1.45, mHC 1.27, norm/elementwise/quant 1.06,
 sparse MLA 0.87, indexer 0.59, KV compressor 0.18, sampling/draft 0.10, engram 0.03; GPU idle 3.8%.
 
-**Gap to flag:** steady-state c8 TPOT here (rev 3 warm 3.00 ms; rev 2 out-8192 run 2.81 ms) vs 1.92 ms p50 quoted for B200 from InferenceX run 37070984585.
-Candidates: recipe differences (5ff11ab20 vs a8504a430, max-num-seqs) or aiperf vs `vllm bench serve` TPOT
-definitions. Not resolved here.
+**Gap to flag (resolved, see "AgentX c8 reproduction"):** steady-state c8 TPOT here (rev 3 warm 3.00 ms; rev 2
+out-8192 run 2.81 ms) vs 1.92 ms p50 quoted for B200 from InferenceX run 37070984585. The same server config gives
+ITL p50 1.93 ms under AgentX replay, so it is the workload (smaller effective batch), not the recipe.
 
 ## P2 -- extend over a cached prefix (Deliverable 2.2 / 3), conc 1, c8 server
 
@@ -463,6 +463,44 @@ kernel_name,group,calls,total_us,us_per_step,pct
 largest 'other': _compute_local_logits_stats_kernel 1.37ms; void at::native::reduce_kernel<512, 1, at::native::ReduceOp<float, at::native::A 0.68ms; Kernel 0.50ms; _expand_candidates_kernel 0.48ms; _compute_swa_indices_and_lens_kernel 0.44ms; memcpy32_post 0.44ms; _post_update_kernel 0.31ms; _hash_ids_kernel 0.21ms
 
 Trace: `/shared_nfs/kk/dsv41_b200/traces/decode_c8_1stream/` (4 ranks, ~22 MB) on dgx-025.
+
+## Extra -- AgentX c8 reproduction of the InferenceX table (2026-10-06/07, dgx-025)
+
+Goal: reproduce B200 vLLM TP4 c8 from run 37070984585 (TTT 16,549.2 tok/s/GPU, P90 intvty 385.0) on this node.
+
+- Server: `NO_PROFILER=1 bash serve.sh 2 c8_agentx` (multi-stream, no single-stream env). Its `non-default args` were
+  diffed against the run's server log (`im-b200-c008_agg_w0.out`, artifact `server_logs_dsv41flash_tp4_conc8_..._ep1-
+  dpafalse_...`): identical except model path (local dir vs HF id; same weights/served name), host (0.0.0.0 there),
+  device_ids (set here via CUDA_VISIBLE_DEVICES). Same vLLM `0.30.1rc1.dev493+gac9126e58`. This also confirms the run's
+  c8 used `max-num-seqs 16`.
+- Client: aiperf 0.12.0 at `89b21867` (InferenceX main `inferencex-e2e/utils/aiperf`; main's srt-slurm `098e15ac`
+  equals the run's `srt-slurm-sha.txt`), own uv venv; the run's `benchmark_command.txt` verbatim except the URL/output
+  dir: `--scenario agentx --concurrency 8 --benchmark-duration 3600 --warmup-requests-per-lane 10
+  --trace-idle-gap-cap-seconds 300 --warmup-grace-period 1800 --public-dataset semianalysis_cc_traces_weka_062126`.
+  Runner `scripts/b200_tp4_1006/run_agentx_c8.sh`; metrics `scripts/b200_tp4_1006/ttt_p90.py` (TTT = (total_isl +
+  total_osl) / benchmark_duration / 4 GPUs; P90 intvty = p10 of `output_token_throughput_per_user`; reproduces the
+  run's 16,549.2 / 385.0 exactly from its own `profile_export_aiperf.json`).
+
+| | run 37070984585 | this node | delta |
+|---|---:|---:|---:|
+| **TTT (tok/s/GPU)** | 16,549.2 | **16,635.8** | +0.5% |
+| **P90 intvty (tok/s/user)** | 385.0 | **369.1** | -4.1% |
+| intvty p50 | 520.1 | 518.2 | -0.4% |
+| ITL p50 / p90 ms | 1.923 / 2.597 | 1.930 / 2.709 | +0.4% / +4.3% |
+| TTFT p50 / p90 ms | 86 / 242 | 120 / 342 | +40% / +41% |
+| ISL / OSL mean | 164,883 / 1,155 | 165,549 / 1,159 | |
+| profiled requests, errors | 1437, 1 | 1438, 0 | |
+| AL (server) | 3.50 | 3.48 | |
+
+Both table metrics are within the noise band quoted in TP4_GAP_1006.md (TTT ~1%, P90 ~5%) -> **reproduced**. Only TTFT
+is clearly higher here (+40%), which barely moves TTT (TTFT is ~5% of B200 request time).
+
+This also resolves the P1b "gap to flag": AgentX ITL p50 is 1.93 ms on this same server config, so the 3.00 ms TPOT
+of the D64 microbench is not a recipe difference. In the trace replay most steps run at a smaller effective batch
+than 8 (idle gaps, sequential turns), while the microbench keeps all 8 requests decoding with 64k context.
+
+Artifacts: `/shared_nfs/kk/dsv41_b200/agentx/c8_run1/` (aiperf artifacts, `profile_export.jsonl`), server log
+`/shared_nfs/kk/dsv41_b200/server_c8_agentx.log`, reference artifacts `/shared_nfs/kk/dsv41_b200/ref37070984585/tp4_c8/`.
 
 ## Traces (dgx-025, not in git)
 

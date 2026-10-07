@@ -13,7 +13,9 @@ import yaml;print(yaml.safe_load(open('$R'))['zip_override_tp4']['roles']['agg']
 mkdir -p $D/traces/$TAG
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 export VLLM_USE_V2_MODEL_RUNNER=1 VLLM_USE_RUST_FRONTEND=1 PYTHONUNBUFFERED=1 VLLM_ENGINE_READY_TIMEOUT_S=7200
-echo "IDX=$IDX TAG=$TAG MNS=$MNS MNBT=$MNBT CAP=$CAP"
+PROF_ARGS=()
+[ "${NO_PROFILER:-0}" = 1 ] || PROF_ARGS=(--profiler-config "{\"profiler\":\"torch\",\"torch_profiler_dir\":\"$D/traces/$TAG\",\"torch_profiler_with_stack\":false,\"torch_profiler_record_shapes\":true,\"torch_profiler_use_gzip\":true,\"ignore_frontend\":true,\"max_iterations\":${PROF_ITERS:-40}}")
+echo "NO_PROFILER=${NO_PROFILER:-0} IDX=$IDX TAG=$TAG MNS=$MNS MNBT=$MNBT CAP=$CAP"
 exec vllm serve $MODEL_PATH \
   --served-model-name deepseek-ai/DeepSeek-V4.1-Flash \
   --port 8000 \
@@ -33,4 +35,4 @@ exec vllm serve $MODEL_PATH \
   --max-num-seqs $MNS \
   --compilation-config "$CC" \
   --max-cudagraph-capture-size $CAP \
-  --profiler-config "{\"profiler\":\"torch\",\"torch_profiler_dir\":\"$D/traces/$TAG\",\"torch_profiler_with_stack\":false,\"torch_profiler_record_shapes\":true,\"torch_profiler_use_gzip\":true,\"ignore_frontend\":true,\"max_iterations\":${PROF_ITERS:-40}}"
+  ${PROF_ARGS[@]+"${PROF_ARGS[@]}"}

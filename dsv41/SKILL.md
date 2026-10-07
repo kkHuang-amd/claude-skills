@@ -63,6 +63,8 @@ dsv41/
   MAIN_REGRESS_1002.md  regression check of upstream main + PR #42055 vs env1001 (own CONTINUE HERE).
   REL_REGRESS_1005.md   release-image sglang regression check (closed; TP2 c64/c8 no regression).
   DEP_1005.md      DP attention (DEP2 MegaMoE / DP2 TP MoE) bring-up: open SGLang DP problems list (own CONTINUE HERE).
+  INDEXER_COST_1007.md  V4.1 HIP indexer prefill cost breakdown + optimization backlog (own CONTINUE HERE).
+  FP4_INDEX_PLANE_PORT.md  porting ATOM #2479 V4.1 FP4 index plane (ragged scoring / page-8) (own CONTINUE HERE).
   NOTES.md         longer findings / investigation log, newest first.
   scripts/         ALL runnable scripts (*.sh, *.py). Nothing executable anywhere else.
   patches/         other repos: <repo>_<upstreamPR>_<what>.patch (`git -C /sgl-workspace/<repo> apply`);

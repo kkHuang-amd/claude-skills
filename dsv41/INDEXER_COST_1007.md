@@ -54,7 +54,7 @@ Setup:
 | I2 | Per-width JIT stalls (scorer + workspace build) | server: 0.2-5.4 s and 0.7-3.9 s on first use of each width. Microbench (P0.4): A compiles 1 kernel per 4096-key bucket, ~0.16 s cold / ~42 ms warm-disk; the Triton workspace build compiles per row-count shape, 0.55-1.9 s cold. Row-group B does NOT help (also per width, 1.18 s cold) | (a) explain the server-vs-microbench gap first (4-rank concurrent compile? several variants per fwd?); (b) aiter: make the key width a runtime arg of `flydsl_pa_mqa_logits_fp4_prefill`; (c) prewarm widths at startup (~256 buckets to 1M; ~11 s warm-disk / ~42 s cold per process [inferred]); (d) coarser bucket | removes TTFT spikes on fresh nodes and on first long requests | S-M | | todo |
 | I3 | Scorer at long context | 8.4% of fwd at 131k (16k chunk) | row-group B, 1.3-1.4x at keys >= 4k (FP4_INDEX_PLANE_PORT.md P1, parked) | ~2.3% at 131k, ~0.5% at 33k | M | | parked |
 | I4 | "other" (top-k / candidates) at long context | ~10.7 ms per fwd at 131k (4.4%), grows with ctx | Profile first: split `_select_topk_extend_hip` into top-k / candidate select / consumer apply. Candidate layers 24..36 may score the full rectangle and then mask | unknown, up to ~4% at 131k | M | | todo (measure) |
-| I5 | DSpark target-verify scoring | microbench: row-group 1.4-1.75x at bs>=32, ctx>=32k (5 rows/req) | P3 in FP4_INDEX_PLANE_PORT.md | decode-side, unmeasured in server | M | | todo |
+| I5 | DSpark target-verify scoring | verify scorer = 0.5-2.3% of the decode step (c1..c64; 6 rows/req); row-group 1.5-2.4x at bs>=8 | P3 in FP4_INDEX_PLANE_PORT.md | 0.4-1.3% of the decode step (c32 best) | M | | sized, low priority |
 
 ### I1 detail
 
@@ -77,3 +77,4 @@ fake-quant (`_rope_fq4`).
 
 - 2026-10-07 crsuse2-m2m-259: created from P0.3b data (`/shared_nfs/kk/dsv41/fp4_index_port/p03b_259_1007_0337/`).
 - 2026-10-07 crsuse2-m2m-259: I2 updated with P0.4. Row-group also compiles per key width; I3 is parked.
+- 2026-10-07 crsuse2-m2m-259: I5 sized; see results/fp4_index_scorer.md "P3 sizing".

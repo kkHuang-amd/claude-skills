@@ -143,3 +143,29 @@ Setup:
 | new kernel per new row count | no | no |
 | workspace build (A only, Triton) per new row-count shape | cold 0.55-1.9 s, warm 2-5 ms | not needed |
 | steady at 2048 rows, 128k keys | 1.32 ms | 0.85 ms |
+
+## P3 sizing: DSpark target-verify scorer share of the decode step (TP4)
+
+Node crsuse2-m2m-259, 2026-10-07. Verify has 6 rows per request (`speculative_num_draft_tokens`=6) and accept length 3.50.
+
+How it was computed:
+- **Step time:** clean TPOT x AL. c1/c4/c8 use ctx 64k from m255_tp4_d64k_bscurve (crsuse2-m2m-255, 10-06).
+  c16/c32/c64 use ctx 32k from p03v_259_* on this node.
+- **A (SGLang scorer):** the microbench at the same shapes (`scripts/fp4_verify_shapes_bench.py`), summed as
+  3 r=2 layers + 5 r=1 layers.
+- **Check:** it matches the in-server trace kernel `pa_mqa_logits_fp4_kernel_0`, which was c1/c4/c8 = 53/134/179 us
+  per step (that includes ~2.7 us/call profiler inflation), against a prediction of 36/118/181.
+- **Missing trace:** profiling c16 hung the server (NCCL BROADCAST watchdog timeout, the TP rank desync from
+  TP4_GAP_1006.md item 5), so c16+ has no trace.
+
+| conc | ctx | step ms | A us/step | A share | B us/step | saving us | saving % of step |
+|---|---|---|---|---|---|---|---|
+| 1 | 64k | 7.6 | 36 | 0.5% | 51 | -15 | -0.2% (B slower) |
+| 4 | 64k | 10.0 | 118 | 1.2% | 70 | 48 | 0.5% |
+| 8 | 64k | 11.2 | 181 | 1.6% | 111 | 70 | 0.6% |
+| 16 | 32k | 15.0 | 176 | 1.2% | 112 | 64 | 0.4% |
+| 32 | 32k | 20.5 | 449 | 2.2% | 190 | 259 | 1.3% |
+| 64 | 32k | 25.6 | 586 | 2.3% | 364 | 222 | 0.9% |
+
+Logs: `/shared_nfs/kk/dsv41/fp4_index_port/p03v_verify_shapes.log` and `p03v_run*.out`;
+`/shared_nfs/kk/dsv41/profile_tp4/p03v_259_*`.

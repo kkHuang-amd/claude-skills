@@ -39,6 +39,16 @@ P0.2 done on crsuse2-m2m-259 (results/fp4_index_scorer.md).
   coarser buckets.
 - P3 (DSpark verify, 1.4-1.75x at bs>=32 / ctx>=32k) is the one open port candidate. It needs a decode-side
   in-server measurement first.
+**P3 sized (10-07):** verify scorer = 0.5-2.3% of the decode step; B would save 0.4-1.3% (c4-c64, best c32), with
+-0.2% at c1 (results "P3 sizing"). Verify has 6 rows per request. This is modest, so P3 is low priority.
+- Implementing it needs request-level `query_start_loc` + the request page table in the decode/verify metadata.
+  The plan is shape-only, so it is capture-friendly.
+- Dispatch rule: B only when bs >= 4.
+**Overall verdict for the row-group port:** small gains everywhere measured.
+- prefill: <= 2.3% at 131k;
+- verify: <= 1.3% at c32;
+- JIT: no help.
+- page-8 / candidate layers (P2, INDEXER_COST I4) is the only unmeasured lever.
 **Test env (node-local, crsuse2-m2m-259):**
 - aiter worktree `/sgl-workspace/aiter-6145` @5b2f7d1d1; `3rdparty/composable_kernel` is a symlink to `/sgl-workspace/aiter`'s,
   which is the same CK commit.
@@ -119,7 +129,7 @@ perf-bottleneck-attribution skill, the gate needs a measured number, not an infe
 | P0.4 | Row-group vs current: compiles and first-call cost across widths | B also compiles per width (1.18 s cold vs A 0.16 s); P1 parked | crsuse2-m2m-259 | done 10-07 |
 | P1 | Request-level ragged prefill on the EXISTING page-64 plane. The local aiter prefill kernel already accepts `row_to_batch`/`local_starts`; SGLang fills them with identity. Change `build_prefill_schedule` + `low_ratio_index_topk_hip_extend` to feed request rows and the request page table. No pool/layout change | top-k identical, prefill indexer us down, GSM8K | | todo |
 | P2 | Only if P0.3 shows a page-8 layout gain over P1: page-8 interleaved plane behind a new arg (e.g. `--dsv41-index-page-size 8`). Needs the pool, writer template, candidate kernels, expand_index_page_table, PD/HiCache tiling and pool_configurator sizing | GSM8K + AgentX | | blocked on P0.3 |
-| P3 | Decode via ragged plan (graph-stable shapes) if P0.3 shows decode gain | TPOT | | blocked on P0.3 |
+| P3 | Target-verify via ragged plan (graph-stable shapes); B only when rows/req > 1 and bs >= 4 | sized 10-07: saves 0.4-1.3% of the decode step at c4-c64 (best c32, 1.3%); B is slower at c1 | crsuse2-m2m-259 | sized; low priority |
 | P4 | Upstream PR: title `[AMD][V4.1][k/N] ...`, format per NEW_WORKSPACE_PROMPT | PR link | | todo |
 
 Out of scope: the mono-only FP4 parts (`mono/kernels/index_score_fp4.py`, `index_query.stage_iquant_fp4`,
@@ -188,6 +198,11 @@ Out of scope: the mono-only FP4 parts (`mono/kernels/index_score_fp4.py`, `index
 ## Progress log (append-only; every entry: date, node, what, link to result)
 
 - 2026-10-07 crsuse2-m2m-259: assessment above. Local aiter e7d2453f2 lacks `make_fp4_mqa_plan` / rowgroup kernel.
+- 2026-10-07 crsuse2-m2m-259: P3 sized.
+  - **Method:** existing c1/c4/c8 traces (crsuse2-m2m-255) plus clean TPOT at c16/c32/c64 on this node, with the
+    microbench at verify shapes (6 rows/request), which is validated against the trace kernel times.
+  - **Result:** B saves 0.4-1.3% of the decode step; c1 is slower.
+  - **Server hang:** profiling at c16 hung the server (NCCL watchdog).
 - 2026-10-07 crsuse2-m2m-259: P0.4 done.
   - **JIT:** row-group also compiles per key width, and is slower to compile, so JIT is not a reason to port.
   - **P1:** proposed parked. Its only steady-state gain is <= ~2.3% at 131k.

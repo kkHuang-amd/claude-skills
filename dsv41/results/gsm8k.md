@@ -61,3 +61,4 @@
 | 2026-10-01 | env1001_eval_r3 | 1319 | 5 | 0.906 | 0.000 | 39.059 s | /shared_nfs/kk/dsv41/gsm8k_env1001_eval_r3.log |
 | 2026-10-02 | main42055_r1 | 1319 | 5 | 0.901 | 0.000 | 40.041 s | /shared_nfs/kk/dsv41/gsm8k_main42055_r1.log |
 | 2026-10-02 | main42055_r2 | 1319 | 5 | 0.897 | 0.000 | 38.513 s | /shared_nfs/kk/dsv41/gsm8k_main42055_r2.log |
+| 2026-10-06 | m255_tp4_sortfix | 1319 | 5 | 0.904 | 0.000 | 39.313 s | /shared_nfs/kk/dsv41/gsm8k_m255_tp4_sortfix.log |

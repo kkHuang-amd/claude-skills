@@ -46,13 +46,12 @@ def one(url, ids, osl, res, i, first_evt):
     res[i] = dict(ttft=(t_first - t0) * 1e3, tpot=(t_last - t_first) * 1e3 / max(ntok - 1, 1), ntok=ntok)
 
 
-def run(a, label, profile):
+def run(a, label, profile, prompts):
     base = f"http://127.0.0.1:{a.port}"
-    rng = random.Random(a.seed)
     res = [None] * a.conc; first = [threading.Event() for _ in range(a.conc)]
     path = "/generate" if a.api == "generate" else "/v1/completions"
-    ths = [threading.Thread(target=one, args=(f"{base}{path}", [rng.randrange(1000, 100000) for _ in range(a.isl)],
-                                              a.osl, res, i, first)) for i in range(a.conc)]
+    ths = [threading.Thread(target=one, args=(f"{base}{path}", prompts[i], a.osl, res, i, first))
+           for i in range(a.conc)]
     t0 = time.perf_counter()
     for t in ths:
         t.start()
@@ -62,14 +61,14 @@ def run(a, label, profile):
         time.sleep(0.5)  # let the batch settle into steady decode
         r = requests.post(f"{base}/start_profile", json={"output_dir": a.profile_dir, "num_steps": a.profile_steps,
                           "activities": ["GPU", "CPU"], "record_shapes": True, "with_stack": False}, timeout=600)
-        print(f"[{label}] start_profile at {time.perf_counter() - t0:.1f}s -> {r.status_code} {r.text[:120]}")
+        print(f"[{label}] start_profile at {time.perf_counter() - t0:.1f}s -> {r.status_code} {r.text[:120]}", flush=True)
     for t in ths:
         t.join()
     ok = [x for x in res if x]
     tt, tp = [x["ttft"] for x in ok], [x["tpot"] for x in ok]
     print(f"[{label}] conc {a.conc} ISL {a.isl} OSL {a.osl}: ok {len(ok)}/{a.conc}, tokens {sum(x['ntok'] for x in ok)}, "
           f"TTFT ms mean {st.mean(tt):.0f} max {max(tt):.0f}, TPOT ms mean {st.mean(tp):.3f} min {min(tp):.3f} "
-          f"max {max(tp):.3f}, wall {time.perf_counter() - t0:.1f}s")
+          f"max {max(tp):.3f}, wall {time.perf_counter() - t0:.1f}s", flush=True)
 
 
 def main():
@@ -89,16 +88,22 @@ def main():
     # 08:37 profile caught bs=4, not 8.
     # --conc may be a list ("1,4,8"): one prime at the largest conc caches every prompt (round i uses the first `conc`
     # prompts of the same seed), then clean + profile per conc, traces under <profile-dir>/c<conc>/.
+    # Prime ONE prompt at a time: a burst of 8 cold 64k prefills hung the server 3x (TP rank stuck in decode graph
+    # replay, TP4_GAP_1006.md); sequential cold prefills never did.
     concs = [int(x) for x in str(a.conc).split(",")]
+    rng = random.Random(a.seed)
+    prompts = [[rng.randrange(1000, 100000) for _ in range(a.isl)] for _ in range(max(concs))]
     osl, pdir = a.osl, a.profile_dir
-    a.conc, a.osl = max(concs), 1; run(a, "prime", False)
+    a.conc, a.osl = 1, 1
+    for i, pr in enumerate(prompts):
+        run(a, f"prime {i}", False, [pr])
     a.osl = osl
     for c in concs:
         a.conc = c
-        run(a, f"clean c{c}", False)     # numbers without profiler overhead
+        run(a, f"clean c{c}", False, prompts)     # numbers without profiler overhead
         if pdir:
             a.profile_dir = f"{pdir}/c{c}"
-            run(a, f"profile c{c}", True)
+            run(a, f"profile c{c}", True, prompts)
 
 
 if __name__ == "__main__":

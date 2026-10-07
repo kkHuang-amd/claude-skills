@@ -21,7 +21,9 @@ if [ "${DEPLOY:-0}" = 1 ]; then
     cp "$CFG/dsv41_fp4_tuned_fmoe.csv" "$CFG/dsv41_fp4_untuned_fmoe.csv" "$OUT/backup_$ts/"
     for kind in tuned untuned; do
         src=$OUT/$kind.csv; dst=$CFG/dsv41_fp4_${kind}_fmoe.csv; n=0
-        while IFS= read -r row; do grep -qxF "$row" "$dst" || { echo "$row" >> "$dst"; n=$((n+1)); }; done < <(tail -n +2 "$src")
+        # the tuner may emit extra trailing columns (e.g. nt); keep the destination's column count
+        ncol=$(head -1 "$dst" | awk -F, '{print NF}')
+        while IFS= read -r row; do row=$(cut -d, -f1-"$ncol" <<< "$row"); grep -qxF "$row" "$dst" || { echo "$row" >> "$dst"; n=$((n+1)); }; done < <(tail -n +2 "$src")
         echo "$kind: +$n rows -> $dst"
     done
     echo "backup: $OUT/backup_$ts (restore by copying back). Restart sglang servers to pick up the rows."

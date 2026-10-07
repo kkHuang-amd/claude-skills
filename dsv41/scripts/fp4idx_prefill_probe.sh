@@ -5,7 +5,7 @@
 # instrumented worktree (spans in low_ratio_backend_hip.py / deepseek_v4.py, env SGLANG_DSV41_IDX_TIMING=<dir>).
 # Load: prefill_cost_probe.py (max_new_tokens=1, cached prefix + NEW fresh tokens), then fp4idx_timing_summary.py.
 #   bash fp4idx_prefill_probe.sh      # GPUs 0-3, port 8888
-#   SRC=/sgl-workspace/sglang-fp4idx/python GPUS=0,1,2,3 PORT=8888 TAG=<name>
+#   SRC=/sgl-workspace/sglang-fp4idx/python GPUS=0,1,2,3 PORT=8888 TAG=<name> PROBE="16384:0,16 4096:0"
 # Output: /shared_nfs/kk/dsv41/fp4_index_port/<TAG>/ (server.log, load.out, idx_timing_rank0.jsonl, summary.txt).
 # Refuses while any sglang server / lane runs.
 set -uo pipefail
@@ -30,8 +30,10 @@ for _ in $(seq 1 180); do
 done
 grep -q 'ready to roll' "$OUT/server.log" || { echo "server not ready after 30 min"; kill -- -$SPID; exit 1; }
 sleep 15   # TP4_GAP_1006.md: let the post-ready request finish before any load
-python3 -I "$D/prefill_cost_probe.py" --port "$PORT" --new 16384 --prefix-k 0,16,48,112 --reps 3 > "$OUT/load.out" 2>&1
-python3 -I "$D/prefill_cost_probe.py" --port "$PORT" --new 4096 --prefix-k 0,28,124 --reps 3 >> "$OUT/load.out" 2>&1
+: > "$OUT/load.out"
+for p in ${PROBE:-16384:0,16,48,112 4096:0,28,124}; do   # PROBE="<new tokens>:<prefix k list> ..."
+    python3 -I "$D/prefill_cost_probe.py" --port "$PORT" --new "${p%%:*}" --prefix-k "${p#*:}" --reps 3 >> "$OUT/load.out" 2>&1
+done
 echo "load exit=$?"; grep -E '^prefix|Error|Traceback' "$OUT/load.out" | cut -c1-200
 kill -- -$SPID 2>/dev/null; sleep 5
 for p in $(ps -eo pid,comm | awk '$2 ~ /^sglang::/{print $1}'); do kill -9 "$p"; done

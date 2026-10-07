@@ -67,3 +67,6 @@
 | 2026-10-07 | tp2_maintree_check INVALID (SERVER_ONLY without EVAL_ONLY=true -> SGLANG_SIMULATE_ACC_LEN) | 1319 | 5 | 0.366 | 0.003 | 58.356 s | /shared_nfs/kk/dsv41/gsm8k_tp2_maintree_check.log |
 | 2026-10-07 | dp2tp_replay_eval_r1 | 1319 | 5 | 0.901 | 0.000 | 35.045 s | /shared_nfs/kk/dsv41/gsm8k_dp2tp_replay_eval_r1.log |
 | 2026-10-07 | dp2tp_replay_eval_r2 | 1319 | 5 | 0.907 | 0.000 | 33.664 s | /shared_nfs/kk/dsv41/gsm8k_dp2tp_replay_eval_r2.log |
+| 2026-10-07 | 259_gsm8k_i1 | 1319 | 5 | 0.908 | 0.000 | 64.627 s | /shared_nfs/kk/dsv41/gsm8k_259_gsm8k_i1.log |
+| 2026-10-07 | 259_gsm8k_base | 1319 | 5 | 0.907 | 0.000 | 32.162 s | /shared_nfs/kk/dsv41/gsm8k_259_gsm8k_base.log |
+| 2026-10-07 | 259_gsm8k_i1w | 1319 | 5 | 0.912 | 0.001 | 36.174 s | /shared_nfs/kk/dsv41/gsm8k_259_gsm8k_i1w.log |

@@ -13,7 +13,7 @@ OUT=/shared_nfs/kk/dsv41/profile_tp4/$TAG; mkdir -p "$OUT"
 if pgrep -f 'agentx_lane.sh|tp4_moe_tune.sh|gemm_moe_tune.py' >/dev/null || pgrep -f '^sglang::' >/dev/null; then
     echo "REFUSING: lane / MoE tuning / sglang server running"; exit 1
 fi
-export PYTHONPATH=/sgl-workspace/mori SRC=/sgl-workspace/sglang/python SGLANG_OPT_HIP_OPUS_SPARSE_PREFILL=1 OPUS=0
+export PYTHONPATH=/sgl-workspace/mori SRC=${SRC:-/sgl-workspace/sglang/python} SGLANG_OPT_HIP_OPUS_SPARSE_PREFILL=1 OPUS=0
 export EXTRA_ARGS="--fp8-gemm-backend aiter --enforce-shared-experts-fusion"
 export TP=4 EP_SIZE=1 GPUS=${GPUS:-0,1,2,3} PORT=${PORT:-8888} CONC=$CONC
 export PREFILL_DECODE_INTERVAL=16 CHUNKED_PREFILL_SIZE=16384 MEM_FRACTION_STATIC=${MEM:-0.70}

@@ -1,0 +1,240 @@
+diff --git a/python/sglang/srt/layers/attention/dsv4/low_ratio_backend_hip.py b/python/sglang/srt/layers/attention/dsv4/low_ratio_backend_hip.py
+index 1dc995cc00..3b53630f72 100644
+--- a/python/sglang/srt/layers/attention/dsv4/low_ratio_backend_hip.py
++++ b/python/sglang/srt/layers/attention/dsv4/low_ratio_backend_hip.py
+@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+ import torch
+ import triton
+ 
++from sglang.srt.layers.attention.dsv4 import _idx_timing
++
+ from sglang.kernels.ops.attention.dsv4 import topk_transform_paged
+ from sglang.kernels.ops.attention.dsv4.candidate_blocks_hip import (
+     CandidateBlocks,
+@@ -92,12 +94,31 @@ def _indexer_inputs(layer, x, q_lora, pos):
+             num_heads=indexer.n_heads,
+         )
+     # [T, H, 128] fp4 grid; the RoPE launch gathers freqs_cis[pos] itself
++    if _idx_timing.enabled():
++        return _indexer_inputs_timed(layer, indexer, x, q_lora, pos)
+     q = indexer.queries(q_lora, layer.freqs_cis, positions=pos)
+     q_fp4, q_scale = pack_fp4_query_flydsl(q)
+     weights = _indexer_head_weights(indexer, x)  # [T, H] bf16, already scaled
+     return q_fp4, q_scale, weights
+ 
+ 
++def _indexer_inputs_timed(layer, indexer, x, q_lora, pos):
++    """indexer.queries split into its launches, each in its own timing span (P0.3b / I1)."""
++    from sglang.srt.layers.attention.dsv4.dsv41_sparse import _rope_fq4
++
++    lid = int(layer.layer_id)
++    with _idx_timing.span("q_wqb", layer=lid, tokens=int(x.shape[0])):
++        q, _ = indexer.wq_b(q_lora)
++    with _idx_timing.span("q_rope_fq", layer=lid):
++        q = q.view(q.shape[0], indexer.n_local_heads, indexer.index_head_dim)
++        q = _rope_fq4(q, layer.freqs_cis, indexer.rope_head_dim, positions=pos)
++    with _idx_timing.span("q_pack", layer=lid):
++        q_fp4, q_scale = pack_fp4_query_flydsl(q)
++    with _idx_timing.span("q_weights", layer=lid):
++        weights = _indexer_head_weights(indexer, x)
++    return q_fp4, q_scale, weights
++
++
+ def build_low_ratio_decode_workspaces(
+     metadata_by_ratio: Dict[int, PagedIndexerMetadata],
+ ) -> Dict[int, FP4DecodeWorkspace]:
+@@ -117,6 +138,11 @@ def refresh_low_ratio_prefill_workspaces(
+     previous: Optional[Dict[int, FP4PrefillWorkspace]],
+ ) -> Dict[int, FP4PrefillWorkspace]:
+     """Must run outside CUDA-graph capture; see prepare_fp4_prefill_workspace."""
++    with _idx_timing.span("ws_build", ratios=sorted(metadata_by_ratio)):
++        return _refresh_low_ratio_prefill_workspaces(metadata_by_ratio, previous)
++
++
++def _refresh_low_ratio_prefill_workspaces(metadata_by_ratio, previous):
+     previous = previous or {}
+     return {
+         ratio: prepare_fp4_prefill_workspace(
+@@ -325,6 +351,20 @@ def _extend_k_slots(req_to_token, *, ratio, lc_per_req, req_pool_indices, device
+ 
+ 
+ def low_ratio_index_topk_hip_extend(
++    backend, layer, x, q_lora, pos, forward_batch: ForwardBatch
++) -> None:
++    with _idx_timing.span(
++        "indexer_extend",
++        layer=int(layer.layer_id),
++        ratio=int(layer.compress_ratio),
++        tokens=int(pos.shape[0]),
++    ):
++        return _low_ratio_index_topk_hip_extend(
++            backend, layer, x, q_lora, pos, forward_batch
++        )
++
++
++def _low_ratio_index_topk_hip_extend(
+     backend,
+     layer,
+     x,
+@@ -408,12 +448,22 @@ def low_ratio_index_topk_hip_extend(
+     assert indexer_metadata is not None, f"no prefill indexer metadata for {ratio = }"
+     num_tokens = pos.shape[0]
+     assert indexer_metadata.page_table.shape[0] >= num_tokens
+-    q_fp4, q_scale, weights = _indexer_inputs(layer, x, q_lora, pos)
++    with _idx_timing.span("q_inputs", layer=int(layer.layer_id)):
++        q_fp4, q_scale, weights = _indexer_inputs(layer, x, q_lora, pos)
+     k_payload = pool.get_index_k_fp4_payload_buffer(layer.layer_id)
+     k_scale = pool.get_index_k_fp4_scale_buffer(layer.layer_id)
+     prefill_workspace = metadata.fp4_low_ratio_prefill_workspaces.get(ratio)
+ 
+     def score_rows(rows: slice) -> torch.Tensor:
++        with _idx_timing.span(
++            "score",
++            layer=int(layer.layer_id),
++            rows=rows.stop - rows.start,
++            width=int(indexer_metadata.page_table.shape[1]),
++        ):
++            return _score_rows(rows)
++
++    def _score_rows(rows: slice) -> torch.Tensor:
+         return aiter_fp4_paged_mqa_logits(
+             q_fp4=q_fp4[rows],
+             q_scale=q_scale[rows],
+@@ -431,9 +481,11 @@ def low_ratio_index_topk_hip_extend(
+     def select_rows(
+         rows: slice, req_lo, req_hi, group_is_identity, consume_rows, publish
+     ):
+-        _select_topk_extend_hip(
+-            indexer=indexer,
+-            logits=score_rows(rows),
++        logits = score_rows(rows)
++        with _idx_timing.span("select", layer=int(layer.layer_id)):
++            _select_topk_extend_hip(
++                indexer=indexer,
++                logits=logits,
+             lc_per_req=lc_per_req[req_lo:req_hi],
+             extend_lens_cpu=[rows.stop - rows.start]
+             if req_hi == req_lo + 1
+@@ -527,14 +579,15 @@ def _select_topk_extend_hip(
+             pieces = []
+             for lo in range(0, t_len, step):
+                 chunk = slice(rows.start + lo, rows.start + min(lo + step, t_len))
+-                pieces.append(
+-                    select_candidate_blocks_hip(
+-                        logits[chunk, :lc],
+-                        compress_lens[chunk],
+-                        topk_blocks=indexer.candidate_topk_blocks,
+-                        block_size=indexer.candidate_block_size,
++                with _idx_timing.span("sel_publish", rows=chunk.stop - chunk.start, lc=lc):
++                    pieces.append(
++                        select_candidate_blocks_hip(
++                            logits[chunk, :lc],
++                            compress_lens[chunk],
++                            topk_blocks=indexer.candidate_topk_blocks,
++                            block_size=indexer.candidate_block_size,
++                        )
+                     )
+-                )
+             publish.append(cat_candidate_blocks(pieces))
+     if consume is not None:
+         tok_start = 0
+@@ -546,33 +599,36 @@ def _select_topk_extend_hip(
+             rows_page = page_indices[rows]
+             rows_raw = raw_indices[rows] if raw_indices is not None else None
+             if consume[b] is None:
+-                topk_transform_paged_hip(
+-                    logits[rows],
+-                    compress_lens[rows].contiguous(),
+-                    page_table[rows],
+-                    rows_page,
+-                    page_size,
+-                    rows_raw,
+-                )
++                with _idx_timing.span("sel_topk", rows=t_len):
++                    topk_transform_paged_hip(
++                        logits[rows],
++                        compress_lens[rows].contiguous(),
++                        page_table[rows],
++                        rows_page,
++                        page_size,
++                        rows_raw,
++                    )
+             else:
+-                topk_within_candidate_blocks_hip(
+-                    logits[rows],
+-                    compress_lens[rows],
+-                    consume[b],
+-                    page_table=page_table[rows],
+-                    page_size=page_size,
+-                    page_indices=rows_page,
+-                    raw_indices=rows_raw,
+-                )
++                with _idx_timing.span("sel_consume", rows=t_len):
++                    topk_within_candidate_blocks_hip(
++                        logits[rows],
++                        compress_lens[rows],
++                        consume[b],
++                        page_table=page_table[rows],
++                        page_size=page_size,
++                        page_indices=rows_page,
++                        raw_indices=rows_raw,
++                    )
+         return
+-    topk_transform_paged_hip(
+-        logits,
+-        compress_lens.contiguous(),
+-        page_table,
+-        page_indices,
+-        page_size,
+-        raw_indices,
+-    )
++    with _idx_timing.span("sel_topk", rows=int(logits.shape[0])):
++        topk_transform_paged_hip(
++            logits,
++            compress_lens.contiguous(),
++            page_table,
++            page_indices,
++            page_size,
++            raw_indices,
++        )
+ 
+ 
+ def _request_groups(
+diff --git a/python/sglang/srt/models/deepseek_v4.py b/python/sglang/srt/models/deepseek_v4.py
+index fda4135561..953a3962c1 100644
+--- a/python/sglang/srt/models/deepseek_v4.py
++++ b/python/sglang/srt/models/deepseek_v4.py
+@@ -4640,6 +4640,33 @@ class DeepseekV4ForCausalLM(nn.Module):
+         forward_batch: ForwardBatch,
+         input_embeds: Optional[torch.Tensor] = None,
+         pp_proxy_tensors: Optional[PPProxyTensors] = None,
++    ) -> torch.Tensor:
++        from sglang.srt.layers.attention.dsv4 import _idx_timing
++
++        mode = forward_batch.forward_mode
++        if not _idx_timing.enabled() or not mode.is_extend() or mode.is_target_verify():
++            return self._forward_impl(
++                input_ids, positions, forward_batch, input_embeds, pp_proxy_tensors
++            )
++        fwd = _idx_timing.next_forward()
++        with _idx_timing.span(
++            "forward",
++            fwd=fwd,
++            tokens=int(input_ids.shape[0]),
++            reqs=int(forward_batch.batch_size),
++            max_seq=int(max(forward_batch.seq_lens_cpu.tolist())),
++        ):
++            return self._forward_impl(
++                input_ids, positions, forward_batch, input_embeds, pp_proxy_tensors
++            )
++
++    def _forward_impl(
++        self,
++        input_ids: torch.Tensor,
++        positions: torch.Tensor,
++        forward_batch: ForwardBatch,
++        input_embeds: Optional[torch.Tensor] = None,
++        pp_proxy_tensors: Optional[PPProxyTensors] = None,
+     ) -> torch.Tensor:
+         if (
+             self.vision is not None

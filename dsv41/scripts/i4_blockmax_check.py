@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """I4: candidate_block_scores (unmasked fast path) vs a torch reference, edge shapes, fp32 + bf16, FILL_TAIL on/off.
   PYTHONPATH=/sgl-workspace/sglang-i4/python HIP_VISIBLE_DEVICES=0 python3 i4_blockmax_check.py
+Env: DTYPES (default fp32,bf16; fp32 only on a branch without bf16 logits).
 """
+import os
+
 import torch
 
 from sglang.kernels.ops.attention.dsv4.candidate_blocks_hip import candidate_block_scores
@@ -28,7 +31,7 @@ def reference(logits, lens, fill_tail):
 def main():
     bad = cases = 0
     for width in (1, 7, 8, 4095, 4096, 4097, 9001, 65536, 131071):
-        for dtype in (torch.float32, torch.bfloat16):
+        for dtype in [{"fp32": torch.float32, "bf16": torch.bfloat16}[d] for d in os.environ.get("DTYPES", "fp32,bf16").split(",")]:
             for fill_tail in (False, True):
                 torch.manual_seed(width)
                 rows = 257

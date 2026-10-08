@@ -23,7 +23,10 @@ aa5551d9b6 (main of 10-07). The bitwise check was re-run on the rebased tree (15
   10.9 ms/step at c8; at c1, attn+indexer is MI355X 0.45 vs B200 1.05 ms. Focus moves to TP4_GAP_1006.md decode levers:
   multi-stream overlap in the HIP decode graph (~2 ms/step at c1), then mHC/norm (~1 ms).
 - **I4 left open:**
-  - Upstream the block-max fix on its own (fp32 gain).
+  - Block-max fix PUSHED (2026-10-08): HaiShaw/sglang `perf/v41-candidate-blockmax-fastpath` @ 0c5ae950a9, on top of
+    b91919ffe2 (main of 10-08). Only `candidate_blocks_hip.py` changed; no bf16. On the branch: fp32 edge check 18/18,
+    `test_dsv41_decode_glue_hip.py` 6 passed, 131k fp32 block-max 2.03 -> 1.87 ms, publish 2.47 -> 2.33 ms. No PR
+    opened yet.
   - The bf16 logits accuracy A/B is not done. The NIAH run was stopped after bf16=1 len~32k = 10/20, with no fp32 side,
     so it is not interpretable.
   - Before rerunning `i4_niah_ab.sh`, fix `i4_niah_eval.py`:
@@ -336,3 +339,4 @@ fake-quant (`_rope_fq4`).
 - 2026-10-08 crsuse2-m2m-259: I4 block-max. The masked per-element load was the bottleneck; the unmasked fast path gives publish at 131k bf16 2.28 -> 1.42 ms, fp32 2.66 -> 2.32. 36/36 edge checks pass.
 - 2026-10-08 crsuse2-m2m-259: I4 in-server A/B (bf16 vs fp32, both with the block-max fix): fwd -1.7% at 131k, -0.9% at 66k, ~0 at <=33k. Next: NIAH accuracy A/B.
 - 2026-10-08 crsuse2-m2m-259: NIAH A/B stopped after one length (bf16=1 22k: 10/20; no fp32 side). I4 is parked because the B200 gap is decode; next work is decode multi-stream overlap (TP4_GAP_1006.md).
+- 2026-10-08 crsuse2-m2m-259: block-max fix pushed to HaiShaw/sglang perf/v41-candidate-blockmax-fastpath (0c5ae950a9).

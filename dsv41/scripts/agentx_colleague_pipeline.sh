@@ -6,9 +6,9 @@
 #   2b. Not: kill it, rerun with the colleague's code (kevin-mii dsv41-amd-4-model 3e8187fa88 + #41159) OPUS off;
 #       if that reproduces, OPUS=1 on colleague-4model-opus; otherwise stop for a human.
 #   RUNNING_SERIES_PID=<pid of the running agentx_series.sh>  REPRO_FRAC=0.85
-# Decisions -> /shared_nfs/kk/dsv41/agentx/series.txt ("PIPELINE ...").
+# Decisions -> /shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx/series.txt ("PIPELINE ...").
 set -uo pipefail
-D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd); OUT=/shared_nfs/kk/dsv41/agentx; S=$OUT/series.txt
+D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd); OUT=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx; S=$OUT/series.txt
 say(){ echo "[$(date +%F' '%T)] PIPELINE $*" >> "$S"; }
 TARGET=45518.84; FRAC=${REPRO_FRAC:-0.85}; RUNS="16:16 64:4"
 COMMON=(SCRIPT=agentx_colleague_run.sh TP=2 EP_SIZE=1 GPUS=4,5 DURATION=3600)

@@ -3,10 +3,10 @@
 # (e.g. a running series) to exit, start an EVAL_ONLY CONC=32 best-config server from that copy (first start
 # JIT-builds its aiter modules), run GSM8K 1319 once, stop the server (incl. sglang:: children).
 #   V=/sgl-workspace/verify_ap WAIT_PID=<pid> bash verify_atomport_env_server.sh
-# Output: /shared_nfs/kk/dsv41/atomport/verify_env/summary.txt (+ server under agentx/verify_atomport_env/).
+# Output: /shared_nfs/kk/results/DeepSeek-V4.1-Flash/atomport/verify_env/summary.txt (+ server under agentx/verify_atomport_env/).
 set -uo pipefail
 D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd); V=${V:-/sgl-workspace/verify_ap}
-O=/shared_nfs/kk/dsv41/atomport/verify_env; A=/shared_nfs/kk/dsv41/agentx; mkdir -p $O; S=$O/summary.txt
+O=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/atomport/verify_env; A=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx; mkdir -p $O; S=$O/summary.txt
 say(){ echo "[$(date +%F' '%T)] $*" >> $S; }
 stop(){ for p in $(ps -eo pid,comm,args | awk '$2=="python3" && /sglang.launch_server/{print $1}'); do kill -9 $p; done
         for p in $(ps -eo pid,comm | awk '$2 ~ /^sglang::/{print $1}'); do kill -9 $p; done; sleep 20; }

@@ -7,7 +7,7 @@ interactivity. Random ids avoid tokenizer cost; DSpark AL is fixed by the server
 Optional PROFILE_DIR: after the first ~2 s of decode in repeat 0, call /start_profile for PROFILE_STEPS steps.
 
 Env/args: --port 8888 --ctx 2048 --osl 1024 --conc 1 --repeat 3 --tag x [--profile-dir D --profile-steps 40]
-Output: one summary line per repeat to stdout; append a row to --out (default /shared_nfs/kk/dsv41/atomport/proxy.tsv).
+Output: one summary line per repeat to stdout; append a row to --out (default /shared_nfs/kk/results/DeepSeek-V4.1-Flash/atomport/proxy.tsv).
 """
 import argparse, json, random, statistics, threading, time, os
 import requests
@@ -22,7 +22,7 @@ ap.add_argument("--tag", default="x")
 ap.add_argument("--temperature", type=float, default=0.0)  # AgentX sends none -> server default 1.0
 ap.add_argument("--profile-dir", default="")
 ap.add_argument("--profile-steps", type=int, default=40)
-ap.add_argument("--out", default="/shared_nfs/kk/dsv41/atomport/proxy.tsv")
+ap.add_argument("--out", default="/shared_nfs/kk/results/DeepSeek-V4.1-Flash/atomport/proxy.tsv")
 a = ap.parse_args()
 URL = f"http://127.0.0.1:{a.port}"
 

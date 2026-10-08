@@ -3,7 +3,7 @@
 For each (temperature, bs): snapshot the probe file, run decode_bs_sweep.py (one rep), wait for the probe flush,
 diff the cumulative stats and print mean distinct experts per call for every (E, num_tokens) key seen in the window
 (target MoE = E 384/385, DSpark draft = E 128/129; decode verify keys have small num_tokens).
-  python3 route_ab.py --engine sglang --port 8888 --probe '/shared_nfs/kk/dsv41/atomport/moe_probe/sgl.*'
+  python3 route_ab.py --engine sglang --port 8888 --probe '/shared_nfs/kk/results/DeepSeek-V4.1-Flash/atomport/moe_probe/sgl.*'
 """
 import argparse, glob, json, subprocess, sys, time, os
 

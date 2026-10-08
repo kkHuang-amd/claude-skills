@@ -9,7 +9,7 @@
 #   PERF=1    -> recommended perf set (RUNBOOK.md "Recommended perf settings"): OPUS prefill
 #                (needs branch opus-prefill), QR=INT8 unless QR is given, and --enable-mixed-chunk when DSPARK=0
 #                (DSpark does not support mixed chunk).
-#   GPUS=0,1,2,3  PORT=30000  LOG=/shared_nfs/kk/dsv41/server.log
+#   GPUS=0,1,2,3  PORT=30000  LOG=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/server.log
 #   TP=4 EP=$TP (TP2 needs SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE=1 to fit)  MEM=<mem-fraction-static>
 set -euo pipefail
 SRC=${SRC:-/sgl-workspace/sglang-dsv41/python}

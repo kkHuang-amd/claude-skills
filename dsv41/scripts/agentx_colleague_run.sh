@@ -5,7 +5,7 @@
 #   Defaults = best config: SRC=/sgl-workspace/sglang/python, REPLAY=1, SGLANG_OPT_HIP_OPUS_SPARSE_PREFILL=1,
 #   EXTRA_ARGS="--fp8-gemm-backend aiter --enforce-shared-experts-fusion", per-CONC PDI / chunk / mem in the recipe.
 #   DP_ATTENTION=true -> DEP<TP>: EP_SIZE=TP, MegaMoE a2a, sglang-router on PORT, server on PORT+1 (use ports 2 apart).
-# Result dir: /shared_nfs/kk/dsv41/agentx/<TAG>/ ; driven by agentx_series.sh SCRIPT=agentx_colleague_run.sh
+# Result dir: /shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx/<TAG>/ ; driven by agentx_series.sh SCRIPT=agentx_colleague_run.sh
 set -eo pipefail
 D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source /workspace/claude-skills/agentx/agentx_env.sh
@@ -22,7 +22,7 @@ export DP_MOE=${DP_MOE:-megamoe}
 [ "$DP_ATTENTION" = true ] && [ "$DP_MOE" = megamoe ] && export EP_SIZE=$TP
 export IS_AGENTIC=1 KV_OFFLOADING=none TOTAL_CPU_DRAM_GB=0 EVAL_ONLY=${EVAL_ONLY:-false} SPEC_DECODING=mtp
 TAG=${TAG:-colleague_tp${TP}_c${CONC}_$(date +%m%d_%H%M)}
-export RESULT_DIR=/shared_nfs/kk/dsv41/agentx/$TAG AGENTIC_OUTPUT_DIR=/shared_nfs/kk/dsv41/agentx/$TAG
+export RESULT_DIR=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx/$TAG AGENTIC_OUTPUT_DIR=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx/$TAG
 export RESULT_FILENAME="dsv41flash_fp4_sglang_tp${TP}-ep${EP_SIZE}$([ "$DP_ATTENTION" = true ] && echo -dpa)$([ "$DP_ATTENTION" = true ] && [ "$DP_MOE" = tp ] && echo -tpmoe)_spec-dspark_agentic_c${CONC}"
 export HIP_VISIBLE_DEVICES=${GPUS:-4,5}
 unset ROCR_VISIBLE_DEVICES SGLANG_OPT_DSV41_OPUS_PREFILL

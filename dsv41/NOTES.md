@@ -4,7 +4,7 @@
 
 `scripts/hostreg_devptr_check.py`, GPU0: host 0x789b1d400000 dev 0x789add200000 **same=False**; devptr read ok (1024/1024),
 pinned control ok, hostptr -> `HIP error: an illegal memory access` (reproduces the engram fault). So this node also
-needs `patches/sglang_local_engram_host_devptr_0001.patch`. Logs: /shared_nfs/kk/dsv41/hostreg_check/{devptr,pinned,hostptr}.log.
+needs `patches/sglang_local_engram_host_devptr_0001.patch`. Logs: /shared_nfs/kk/results/DeepSeek-V4.1-Flash/hostreg_check/{devptr,pinned,hostptr}.log.
 Node has no sglang-dsv41 / sglang-rolao-opt worktree, so the patch was not re-applied/validated end-to-end here.
 
 ## 2026-09-29 Engram host-table GPU fault (crsuse2-m2m-176)
@@ -15,7 +15,7 @@ line -> first suspected MoE). `AMD_SERIALIZE_KERNEL=3` put it in engram_gather (
 On this driver the registered memory's device VA != host VA -> unmapped VA fault. Fix: `_host_device_pointer()`
 (hipHostGetDevicePointer) -> `_HostTable.dev_ptr`, used by both engram_gather calls. GSM8K 0.901, 0 faults.
 Assumption in the patch: scale pointer = dev_ptr + weight.numel() (scale follows uint8 weight in the host buffer).
-Full report: /shared_nfs/kk/dsv41/atomport/verify_env/report_crsuse2-m2m-176.md (+ notes_*.md).
+Full report: /shared_nfs/kk/results/DeepSeek-V4.1-Flash/atomport/verify_env/report_crsuse2-m2m-176.md (+ notes_*.md).
 
 ## 2026-09-27 ATOM gap survey (image rocm/atom-dev:nightly_202609250902)
 
@@ -44,7 +44,7 @@ Gaps vs /sgl-workspace/sglang-rolao-opt (spot-checked = verified by rg; others f
 Recipe diffs: mem 0.9 vs 0.70-0.85, chunk 16384 vs 4096, graph capture to 128 vs max-bs 64, block 16.
 
 ## Closed investigations (2026-09-24/25, condensed)
-Full logs with every intermediate run: `/shared_nfs/kk/dsv41/doc_backup_20260929/NOTES.md`. Setup: 4xMI355X TP4,
+Full logs with every intermediate run: `/shared_nfs/kk/results/DeepSeek-V4.1-Flash/doc_backup_20260929/NOTES.md`. Setup: 4xMI355X TP4,
 random-ids ISL4096/OSL1024, GSM8K 5-shot 1319 q. Run-to-run GSM8K spread at temp 0 is ~±1pt (batching nondeterminism).
 
 - **09-24 Gap vs PR (branch e2e824dc58).** Baseline (aiter acf8fdf93 unpatched, BOUND=0, sgl-kernel 0.4.7) GSM8K
@@ -61,7 +61,7 @@ random-ids ISL4096/OSL1024, GSM8K 5-shot 1319 q. Run-to-run GSM8K spread at temp
 - **09-24 sgl-kernel rebuilt from branch (AOT top-k sort_output).** Built via pyproject_rocm.toml +
   `AMDGPU_TARGET=gfx950 python setup_rocm.py install`. GOTCHA: the .egg is SHADOWED by the existing
   site-packages/sgl_kernel dir -> replace that dir. Verify: `torch.ops.sgl_kernel.deepseek_v4_topk_transform_512.default._schema`
-  contains sort_output. 0.4.7 backup: /shared_nfs/kk/dsv41/sgl_kernel_backup_0.4.7. Result: GSM8K 0.907/0.902,
+  contains sort_output. 0.4.7 backup: /shared_nfs/kk/results/DeepSeek-V4.1-Flash/sgl_kernel_backup_0.4.7. Result: GSM8K 0.907/0.902,
   throughput unchanged -> sort fusion was not the gap.
 - **09-24 Simulated-AL "slowdown" = false alarm.** SIM_AL=3.51 PR-style c1 378 tok/s vs real 621: per-step cost is
   identical (~10.0-10.2 ms/DSpark step at bs1, vs plain decode 6.77 ms); the seed-42 prompt simply has real AL 5.3-5.7.

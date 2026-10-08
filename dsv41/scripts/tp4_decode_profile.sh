@@ -3,13 +3,13 @@
 # rerun (Replay, EP1, engram host table, DSpark sim AL, c8 PDI/chunk/mem), SERVER_ONLY, then decode_load_profile.py.
 #   CONC=8 ISL=65536 OSL=1024 bash tp4_decode_profile.sh      # GPUs 0-3, port 8888
 #   MODE=prefix API=generate|completions bash tp4_decode_profile.sh   # cached-prefix TTFT sweep (prefix_ttft_sweep.py)
-# Output: /shared_nfs/kk/dsv41/profile_tp4/<TAG>/ (server.log, load.out, torch traces). Refuses while GPUs are busy.
+# Output: /shared_nfs/kk/results/DeepSeek-V4.1-Flash/profile_tp4/<TAG>/ (server.log, load.out, torch traces). Refuses while GPUs are busy.
 set -uo pipefail
 D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 MODE=${MODE:-decode} API=${API:-generate}
 CONC=${CONC:-8} ISL=${ISL:-65536} OSL=${OSL:-1024} STEPS=${STEPS:-40}
 if [ "$MODE" = prefix ]; then TAG=${TAG:-m255_tp4_prefix_${API}}; else TAG=${TAG:-m255_tp4_d$((ISL / 1024))k_c${CONC}}; fi
-OUT=/shared_nfs/kk/dsv41/profile_tp4/$TAG; mkdir -p "$OUT"
+OUT=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/profile_tp4/$TAG; mkdir -p "$OUT"
 if pgrep -f 'agentx_lane.sh|tp4_moe_tune.sh|gemm_moe_tune.py' >/dev/null || pgrep -f '^sglang::' >/dev/null; then
     echo "REFUSING: lane / MoE tuning / sglang server running"; exit 1
 fi

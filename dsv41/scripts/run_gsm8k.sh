@@ -2,11 +2,11 @@
 # GSM8K few-shot accuracy against a running server (default: full 1319, 5-shot, greedy),
 # matching the PR's reference: TP4/EP4 5-shot all 1319 -> 90.45% (DSpark off) / 90.22% (on).
 #   TAG=<name> NQ=1319 SHOTS=5 PORT=30000 PARALLEL=128 MAXTOK=512
-# Full log -> /shared_nfs/kk/dsv41/gsm8k_<TAG>.log ; summary line appended to results/gsm8k.md
+# Full log -> /shared_nfs/kk/results/DeepSeek-V4.1-Flash/gsm8k_<TAG>.log ; summary line appended to results/gsm8k.md
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 TAG=${TAG:-$(date +%m%d_%H%M)}; NQ=${NQ:-1319}; SHOTS=${SHOTS:-5}; PORT=${PORT:-30000}
-LOG=/shared_nfs/kk/dsv41/gsm8k_${TAG}.log; mkdir -p "$(dirname "$LOG")"
+LOG=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/gsm8k_${TAG}.log; mkdir -p "$(dirname "$LOG")"
 export PYTHONPATH=${SRC:-/sgl-workspace/sglang-dsv41/python}${PYTHONPATH:+:$PYTHONPATH}
 python3 -m sglang.test.few_shot_gsm8k --port "$PORT" --num-questions "$NQ" --num-shots "$SHOTS" \
   --parallel "${PARALLEL:-128}" --max-new-tokens "${MAXTOK:-512}" > "$LOG" 2>&1

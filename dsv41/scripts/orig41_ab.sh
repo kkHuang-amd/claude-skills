@@ -4,9 +4,9 @@
 #
 #   1) EVAL_ONLY CONC=32 server: GSM8K 1319 x3 (reported, no fallback)
 #   2) AgentX c1, c2 (PDI 16), PREFIX orig41
-# Output: /shared_nfs/kk/dsv41/atomport/orig41/summary.txt
+# Output: /shared_nfs/kk/results/DeepSeek-V4.1-Flash/atomport/orig41/summary.txt
 set -uo pipefail
-D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd); O=/shared_nfs/kk/dsv41/atomport/orig41; A=/shared_nfs/kk/dsv41/agentx
+D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd); O=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/atomport/orig41; A=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx
 AITER=/sgl-workspace/aiter-image; SGL=/sgl-workspace/sglang-orig41/python
 mkdir -p $O; S=$O/summary.txt; say(){ echo "[$(date +%T)] $*" >> $S; }
 export PYTHONPATH=$AITER:/sgl-workspace/mori
@@ -31,7 +31,7 @@ gsm8k_x3(){ # $1 tag -> prints mean
   local tag=$1 accs=""
   for r in 1 2 3; do
     SRC=$SGL PORT=8888 TAG=${tag}_r$r bash $D/run_gsm8k.sh >> $S 2>&1
-    a=$(grep -oE 'Accuracy: [0-9.]+' /shared_nfs/kk/dsv41/gsm8k_${tag}_r$r.log | tail -1 | awk '{print $2}'); accs="$accs ${a:-0}"
+    a=$(grep -oE 'Accuracy: [0-9.]+' /shared_nfs/kk/results/DeepSeek-V4.1-Flash/gsm8k_${tag}_r$r.log | tail -1 | awk '{print $2}'); accs="$accs ${a:-0}"
   done
   echo $accs | awk '{s=0; for(i=1;i<=NF;i++) s+=$i; printf "%.4f", s/NF}'
 }

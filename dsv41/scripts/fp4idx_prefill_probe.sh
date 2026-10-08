@@ -7,12 +7,12 @@
 #   bash fp4idx_prefill_probe.sh      # GPUs 0-3, port 8888
 #   SRC=/sgl-workspace/sglang-fp4idx/python GPUS=0,1,2,3 PORT=8888 TAG=<name> PROBE="16384:0,16 4096:0"
 #   AITER=/sgl-workspace/aiter-i4 puts that aiter worktree ahead of the editable install (I4 bf16 logits).
-# Output: /shared_nfs/kk/dsv41/fp4_index_port/<TAG>/ (server.log, load.out, idx_timing_rank0.jsonl, summary.txt).
+# Output: /shared_nfs/kk/results/DeepSeek-V4.1-Flash/fp4_index_port/<TAG>/ (server.log, load.out, idx_timing_rank0.jsonl, summary.txt).
 # Refuses while any sglang server / lane runs.
 set -uo pipefail
 D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 TAG=${TAG:-p03b_$(hostname | sed 's/.*-//')_$(date +%m%d_%H%M)}
-OUT=/shared_nfs/kk/dsv41/fp4_index_port/$TAG; mkdir -p "$OUT"
+OUT=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/fp4_index_port/$TAG; mkdir -p "$OUT"
 if pgrep -f 'agentx_lane.sh|tp4_moe_tune.sh|gemm_moe_tune.py' >/dev/null || pgrep -f '^sglang::' >/dev/null; then
     echo "REFUSING: lane / MoE tuning / sglang server running"; exit 1
 fi

@@ -3,10 +3,10 @@
 #   1. DEPLOY=1 tp4_moe_tune.sh (backs up + merges the 23 TP4 rows into aiter model_configs)
 #   2. decode profile again at the same D64 c8 shape -> TAG m255_tp4_d64k_c8_tuned
 #   3. GSM8K 5-shot 1319 on an EVAL_ONLY server (real draft acceptance, CONC=32 eval config) -> results/gsm8k.md
-# Undo the deploy: copy /shared_nfs/kk/dsv41/moe_tune_tp4/backup_<ts>/*.csv back into aiter model_configs.
+# Undo the deploy: copy /shared_nfs/kk/results/DeepSeek-V4.1-Flash/moe_tune_tp4/backup_<ts>/*.csv back into aiter model_configs.
 set -uo pipefail
 D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-OUT=/shared_nfs/kk/dsv41/profile_tp4
+OUT=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/profile_tp4
 busy(){ pgrep -f 'agentx_lane.sh|tp4_moe_tune.sh|gemm_moe_tune.py|tp4_decode_profile.sh' >/dev/null || pgrep -f '^sglang::' >/dev/null; }
 busy && { echo "REFUSING: GPUs busy (lane / tuning / profile / sglang server)"; exit 1; }
 

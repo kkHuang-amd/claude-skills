@@ -10,7 +10,7 @@ AITER=/sgl-workspace/aiter
 CFG=$AITER/aiter/configs/model_configs
 PATCH=/workspace/claude-skills/dsv41/patches/aiter_local_moe_tune_gpu_datagen.patch
 TUNER=csrc/ck_gemm_moe_2stages_codegen/gemm_moe_tune.py
-OUT=${OUT:-/shared_nfs/kk/dsv41/moe_tune_tp4}
+OUT=${OUT:-/shared_nfs/kk/results/DeepSeek-V4.1-Flash/moe_tune_tp4}
 GPUS=${GPUS:-0,1,2,3,4,5,6,7}
 NGPU=$(tr ',' '\n' <<< "$GPUS" | wc -l)
 mkdir -p "$OUT"

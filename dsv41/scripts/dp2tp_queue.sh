@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Run DP2 + TP MoE + bounded replay AgentX points back to back on GPUs 0,1 (fix tree), one server at a time.
-#   RUNS="32:32 64:4 64:16 64:32 128:4 128:16" setsid nohup bash dp2tp_queue.sh > /shared_nfs/kk/dsv41/agentx/dp2tp_queue.nohup 2>&1 < /dev/null &
-# Each point -> /shared_nfs/kk/dsv41/agentx/dp2tp_replay_c<CONC>_pdi<P>/ ; progress + results -> dp2tp_queue.txt
+#   RUNS="32:32 64:4 64:16 64:32 128:4 128:16" setsid nohup bash dp2tp_queue.sh > /shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx/dp2tp_queue.nohup 2>&1 < /dev/null &
+# Each point -> /shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx/dp2tp_replay_c<CONC>_pdi<P>/ ; progress + results -> dp2tp_queue.txt
 set -uo pipefail
 D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-OUT=/shared_nfs/kk/dsv41/agentx
+OUT=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx
 Q=$OUT/dp2tp_queue.txt
 SRC=${SRC:-/sgl-workspace/sglang-dsv41-dp-fault/python}
 PER_RUN_TIMEOUT=${PER_RUN_TIMEOUT:-6300}

@@ -24,10 +24,10 @@ idle (the baselines were single-lane runs), and judge regression only on the sin
 image build: pyproject + aot .hip). aiter `/sgl-workspace/aiter` e7d2453f2 + same local edits as MAIN_REGRESS_1002.md.
 Launcher `scripts/agentx_lane.sh` -> `agentx_colleague_run.sh`, Replay variant (prefill graph disabled + bounded replay).
 Lanes: pid 45688 GPUs 0,1:8888 rel1004_tp2_c8; pid 45689 GPUs 2,3:8889 rel1004_tp2_c64; pid 45690 GPUs 4-7:8890
-rel1004_tp4_c64. Kill: `kill -- -<pid>`, then sglang:: children. Progress /shared_nfs/kk/dsv41/agentx/lane_<port>.txt.
+rel1004_tp4_c64. Kill: `kill -- -<pid>`, then sglang:: children. Progress /shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx/lane_<port>.txt.
 **Repro (one lane; set TP/GPUS/PORT/POINTS per point):**
 ```bash
-cd /shared_nfs/kk/dsv41/agentx && PYTHONPATH=/sgl-workspace/mori SRC=/sgl-workspace/sglang/python \
+cd /shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx && PYTHONPATH=/sgl-workspace/mori SRC=/sgl-workspace/sglang/python \
   SGLANG_OPT_HIP_OPUS_SPARSE_PREFILL=1 OPUS=0 EP_SIZE=1 DURATION=3600 \
   EXTRA_ARGS="--fp8-gemm-backend aiter --enforce-shared-experts-fusion" \
   EXTRA_ARGS_rep="--fp8-gemm-backend aiter --enforce-shared-experts-fusion --enable-decoder-swa-bounded-replay --cuda-graph-backend-prefill disabled" \

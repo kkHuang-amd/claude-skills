@@ -10,7 +10,7 @@ import argparse, glob, gzip, json, re
 from collections import defaultdict
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--sgl", default="/shared_nfs/kk/dsv41/atomport/prof_bsweep/prof_sgl_ctx65536_bs{bs}/*TP-0.trace.json.gz")
+ap.add_argument("--sgl", default="/shared_nfs/kk/results/DeepSeek-V4.1-Flash/atomport/prof_bsweep/prof_sgl_ctx65536_bs{bs}/*TP-0.trace.json.gz")
 ap.add_argument("--atom", default="/shared_nfs/kk/atom_run/prof_bsweep/bs{bs}/*.json.gz")
 ap.add_argument("--sgl-steps", type=int, default=40)
 ap.add_argument("--atom-step-kernel", default="rejection_synthetic_sample_kernel")

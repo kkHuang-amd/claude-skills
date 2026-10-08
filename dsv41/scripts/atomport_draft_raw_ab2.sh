@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Follow-up to atomport_draft_raw_ab.sh: (1) knob=1 + SGLANG_DEBUG_DSPARK_RAW_PARITY=1 on a real-acceptance c1 server,
 # run decode traffic, grep the in-graph vs eager metadata parity log; (2) knob=0 simulated c1 baseline, same proxy
-# (3 reps OSL 1024 + OSL 8192) as the knob=1 run. Output: /shared_nfs/kk/dsv41/atomport/draft_raw_ab/summary2.txt
+# (3 reps OSL 1024 + OSL 8192) as the knob=1 run. Output: /shared_nfs/kk/results/DeepSeek-V4.1-Flash/atomport/draft_raw_ab/summary2.txt
 set -uo pipefail
-D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd); O=/shared_nfs/kk/dsv41/atomport/draft_raw_ab; A=/shared_nfs/kk/dsv41/agentx
+D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd); O=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/atomport/draft_raw_ab; A=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx
 S=$O/summary2.txt; say(){ echo "[$(date +%T)] $*" >> $S; }
 export PYTHONPATH=/sgl-workspace/pydeps-flydsl-0341:/sgl-workspace/aiter-5750:/sgl-workspace/mori
 export SRC=/sgl-workspace/sglang-rolao-opt/python SGLANG_OPT_HIP_OPUS_SPARSE_PREFILL=1

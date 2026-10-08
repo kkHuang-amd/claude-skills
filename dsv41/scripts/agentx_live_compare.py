@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Compare aiperf live progress blocks of AgentX runs at the same profiling time (for runs cut before the final JSON).
-Usage: agentx_live_compare.py MM:SS <run.nohup> [<run.nohup> ...]   (e.g. /shared_nfs/kk/dsv41/agentx/env1001_c8.nohup)
+Usage: agentx_live_compare.py MM:SS <run.nohup> [<run.nohup> ...]   (e.g. /shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx/env1001_c8.nohup)
 Prints per run the block closest to MM:SS: done/err, (tput_in+tput_out)/2 per GPU (TP2), out tok/s, ttft p50/p95,
 intvty p50 (1/TPOT, ~ the final p50 interactivity), e2e p50.
 """

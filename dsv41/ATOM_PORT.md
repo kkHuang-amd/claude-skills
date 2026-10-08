@@ -2,7 +2,7 @@
 
 Owner node: mi355-4 (all PIDs / GPU ids / ports / "server up" below refer to mi355-4).
 
-Full pre-condensation history: /shared_nfs/kk/dsv41/doc_backup_20260929/ATOM_PORT.md.
+Full pre-condensation history: /shared_nfs/kk/results/DeepSeek-V4.1-Flash/doc_backup_20260929/ATOM_PORT.md.
 
 ## CONTINUE HERE
 
@@ -48,7 +48,7 @@ Full pre-condensation history: /shared_nfs/kk/dsv41/doc_backup_20260929/ATOM_POR
   gap must be step cost or scheduling). Client scripts/decode_bs_sweep.py (warm prefix cache, then bs concurrent
   decode; ctx 8192,65536 x bs 1,2,4,6,8, OSL 2048, temp = server default). Servers: SGLang c8-base a5e40eca5e SERVER_ONLY
   GPUs 4,5 port 8888 PID 1054569 (tag bsweep_sgl_c8); ATOM rootfs MODE=server CONC=8 GPUs 6,7 port 8000 PID 1054570
-  (log /shared_nfs/kk/atom_run/bsweep_atom_c8.log). Rows -> /shared_nfs/kk/dsv41/atomport/decode_bs_sweep.tsv.
+  (log /shared_nfs/kk/atom_run/bsweep_atom_c8.log). Rows -> /shared_nfs/kk/results/DeepSeek-V4.1-Flash/atomport/decode_bs_sweep.tsv.
   Decision: step gap at bs 5-8 -> GPU profile both at those bs; no gap -> look at ATOM scheduling.
   RESULT (09:10, ctx 64k and 128k agree, 2 reps each, spread <=0.3 s): per-request decode tok/s ours vs ATOM:
   bs1 +10%, bs2 ~0 (-3/+3), bs4 -10/-12%, bs6 -12%, bs8 +7/+10% (ATOM drops sharply 6->8: 294 -> 218).
@@ -62,7 +62,7 @@ Full pre-condensation history: /shared_nfs/kk/dsv41/doc_backup_20260929/ATOM_POR
   **STEP 2 DONE (2026-10-01 11:05) -- profile attribution, bs 1/2/4/6 @ ctx 64k, both engines.**
   Tools: decode_bs_sweep.py --profile-dir (SGLang /start_profile GPU 40 steps; ATOM needs `--torch-profiler-dir`
   via ATOM_EXTRA_ARGS -- the env var alone is overridden by arg_utils default None), bs_scaling_compare.py (per-step
-  groups + kernel growth). Traces: /shared_nfs/kk/dsv41/atomport/prof_bsweep/prof_{sgl,sglt0}_ctx65536_bs*,
+  groups + kernel growth). Traces: /shared_nfs/kk/results/DeepSeek-V4.1-Flash/atomport/prof_bsweep/prof_{sgl,sglt0}_ctx65536_bs*,
   /shared_nfs/kk/atom_run/prof_bsweep/{bs*,t0_bs*}. ATOM steps = count(rejection_synthetic_sample_kernel).
   Validity: SGLang kernel sum matches unprofiled step (11.45 busy vs 3.51/269 = 13.0 ms wall incl. gap) -> graph
   kernel durations are real on this stack. Cross-engine ABSOLUTE times are confounded (ATOM profiler traces CPU and
@@ -135,7 +135,7 @@ Full pre-condensation history: /shared_nfs/kk/dsv41/doc_backup_20260929/ATOM_POR
   **STEP 4 RUNNING (11:30): AgentX-text routing check.** Eager+probe servers (SGLang 4,5:8888 wrapper 1109712;
   ATOM 6,7:8000 wrapper 1109713), scripts/moe_route_probe/agentx_route.sh = same aiperf agentx-mvp c8 command,
   600 s + --unsafe-override (scenario wants >=900 s), warmup 1/lane; probe snapshot diff -> distinct experts per
-  verify size. Outputs /shared_nfs/kk/dsv41/atomport/agentx_route_sgl, /shared_nfs/kk/atom_run/agentx_route.
+  verify size. Outputs /shared_nfs/kk/results/DeepSeek-V4.1-Flash/atomport/agentx_route_sgl, /shared_nfs/kk/atom_run/agentx_route.
   Decision: ATOM collapses on AgentX too -> c8 P90 gap is largely a synthetic-acceptance artifact (report to
   benchmark owners); no collapse -> re-attribute c8 under AgentX load.
   **STEP 4 RESULT (12:00): ATOM COLLAPSES ON AGENTX TOO (stronger than on random ids).** 640 s, 0 errors both
@@ -186,7 +186,7 @@ Full pre-condensation history: /shared_nfs/kk/dsv41/doc_backup_20260929/ATOM_POR
   SRC sglang-c8-base a5e40eca5e). Lane A GPUs 4,5:8888 PID 1249425 s6042_c64 (PDI4, chunk 4096, mem 0.85); lane B
   GPUs 6,7:8889 PID 1249613 s6042_c32 (PDI4, chunk 16384, mem 0.80) = night0930_c64 / night0930_c32 configs.
   Progress: lane_{8888,8889}.txt (old lane files -> lane_*.s6042_c1to16.*). Readout (writes nothing):
-    cd /shared_nfs/kk/dsv41/agentx && python3 /tmp/sum.py s6042_c32 night0930_c32 s6042_c64 night0930_c64
+    cd /shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx && python3 /tmp/sum.py s6042_c32 night0930_c32 s6042_c64 night0930_c64
     (/tmp/sum.py prints TTT=throughput.per_gpu.total_tput_tps, P90=latency.intvty.p90, p50, TTFT, ok; if /tmp was
     wiped: d['request_metrics']['throughput']['per_gpu']['total_tput_tps'], ...['latency']['intvty']['p90'])
   ATOM refs (results/agentx.md): c32 / c64 TTT are what CURRENT BEST beat by +6.3% / +15.2%.
@@ -207,7 +207,7 @@ Full pre-condensation history: /shared_nfs/kk/dsv41/doc_backup_20260929/ATOM_POR
   **C NEXT -- START HERE IN THE NEW SESSION (user 2026-10-01 07:15).** Copy-paste launch (both lanes, ~70 min; per-port
   aiperf venvs already fixed in agentx_colleague_run.sh, so parallel launch is safe):
   ```bash
-  cd /shared_nfs/kk/dsv41/agentx && export PYTHONPATH=/sgl-workspace/pydeps-flydsl-0341:/sgl-workspace/aiter-5750:/sgl-workspace/mori \
+  cd /shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx && export PYTHONPATH=/sgl-workspace/pydeps-flydsl-0341:/sgl-workspace/aiter-5750:/sgl-workspace/mori \
     SRC=/sgl-workspace/sglang-pdi-time/python SGLANG_OPT_HIP_OPUS_SPARSE_PREFILL=1 SGLANG_PREFILL_DECODE_PREFIX_KTOK_SCALE=870 \
     EXTRA_ARGS="--fp8-gemm-backend aiter --enforce-shared-experts-fusion" OPUS=0 TP=2 EP_SIZE=1 DURATION=3600
   S=/workspace/claude-skills/dsv41/scripts/agentx_lane.sh
@@ -238,7 +238,7 @@ Full pre-condensation history: /shared_nfs/kk/dsv41/doc_backup_20260929/ATOM_POR
   lanes via scripts/agentx_lane.sh. Lane A GPUs 4,5 port 8888 PID 989613: c64 (PDI4, chunk 4096, mem 0.85) -> c16
   (PDI16, 16384, 0.80) -> c2 -> c2_r2 (PDI16, 16384, 0.70). Lane B GPUs 6,7 port 8889 PID 989614: c8 -> c1 -> c8_r2
   (PDI16, 16384, 0.70), then c32 (PDI4, 16384, 0.80) via requeue wrapper PID 996215 (first c32 died in 1 s: venv race).
-  Tags night0930_c*; progress lane_{8888,8889}.txt in /shared_nfs/kk/dsv41/agentx. ETA lane A ~02:30, lane B ~03:45 +08.
+  Tags night0930_c*; progress lane_{8888,8889}.txt in /shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx. ETA lane A ~02:30, lane B ~03:45 +08.
   VENV TRAP: benchmark_lib.sh resets AIPERF_DEPS_READY=0 and rm -rf's $AIPERF_VENV on EVERY run -> parallel lanes
   delete each other's aiperf. Fixed in agentx_colleague_run.sh: AIPERF_VENV=$AIPERF_RUNTIME_DIR/venv_p$PORT (applies
   from each lane's 2nd point; the running c64/c8 share the old venv, nothing deletes it now).
@@ -400,7 +400,7 @@ M 1..16384 (sorted ids/weights/expert tiles/num_valid, moe_buf zeroed). Fix: SGL
 at c1 (~0.22 ms/step). Unit test TestAiterMoeSortingDispatchPolicy (policy 0 vs 2 bitwise), file 6/6 on GPU 6.
 Upstream candidate: fix the auto heuristic in aiter moe_sorting_opus.h. A custom single-launch sort+quant kernel was
 considered and dropped (bit-exact MX quant re-implementation risk; the policy switch gets most of the sort win).
-**RUNNING (13:07 +08, PID 816672, scripts/router_fuse_ab.sh, summary /shared_nfs/kk/dsv41/atomport/router_fuse/summary.txt):**
+**RUNNING (13:07 +08, PID 816672, scripts/router_fuse_ab.sh, summary /shared_nfs/kk/results/DeepSeek-V4.1-Flash/atomport/router_fuse/summary.txt):**
 SIM c1 proxy x3 + GPU-only profile for base (5ec406) / fuse (policy 0) / fuse+sortMP (policy 2), step spans of all
 three; then GSM8K 1319 x3 (fuse+sortMP, EVAL_ONLY CONC=32); then AgentX c1, c2 (PREFIX rf_c16k, PDI16, chunk 16384).
 ETA ~16:00 +08. **Step-span results (13:30):** kernels/step base 1138 / fuse 1057 / fuse+sortMP 1098 (MP = 2 kernels);
@@ -413,7 +413,7 @@ GSM8K fuse+sortMP 0.897 / 0.901 / 0.900 (baseline ~0.899). **AgentX c1 A+D: 11,3
 First attempt aborted 13:05 (the fuse server may have imported the D edit mid-start). DO NOT edit
 /sgl-workspace/sglang-router-fuse/python until it finishes.
 **(1) c32 A DONE: 97,158.2 / P90 69.5, 0 errors (vs ATOM +6.8% / +4.7%, vs old 4096 +3.5% / +1.2%); c64 A DONE: 121,940.9 / P90 31.5 (vs ATOM +19.1% / +36.4%; vs old 4096 +4.1% / -20.7%: P90 trade-off); free mem touched 0.00 GiB once. B c32 DONE 92,657.2 / 66.0 -> A wins at c32 (+4.9% / +5.3%). B c64 DONE 116,273.6 / 39.3 (A +4.9% TTT but -19.8% P90). DECISION: per-concurrency chunk = 16384 at c<=32 (c32 mem 0.80), 4096 at c64 (mem 0.85). Series done 12:36, GPUs free.**
-**(1) RUNNING (started 07:25 +08, wrapper PID 730744, /shared_nfs/kk/dsv41/agentx/run_c32c64_chunk_0930.sh):**
+**(1) RUNNING (started 07:25 +08, wrapper PID 730744, /shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx/run_c32c64_chunk_0930.sh):**
 A = sw5ec406_c16k_m080_c{32,64}_pdi4 (chunk 16384, mem 0.80; confirmed in server_args; post-capture free 25.96 GB
 vs 10.97 at 0.85), then B = sw5ec406_c4k_c{32,64}_pdi4 (chunk 4096, mem 0.85 re-baseline on 5ec406). VRAM every 30 s ->
 vram_c32c64_0930.log. ETA ~11:55 +08. Decision: A both OK and TTT >= B-1% and P90 not worse -> 16384 at c32/c64,
@@ -438,14 +438,14 @@ metadata in graph) + `--enforce-shared-experts-fusion` + local tuned FMoE CSV. B
 Remaining gap to ATOM = low-concurrency P90 (c1/c2/c8 -13/-14/-17%).
 **RUNNING:** PDI sweep PREFIX atomport_best_pdi, reduced by user to c8 PDI32/4 + c2 PDI32 (c2 PDI4, c1 PDI4
 cancelled). c2 PDI32 = PID 575737 (orphaned point subshell; series loop killed, so no END line in series.txt),
-ETA ~11:10 +08; result in /shared_nfs/kk/dsv41/agentx/atomport_best_pdi_c2_pdi32/.
+ETA ~11:10 +08; result in /shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx/atomport_best_pdi_c2_pdi32/.
 Done so far: c8 PDI32 28,643.3 / P90 212.3 (vs PDI16 +0.3% / +6.5%; TTFT p50 0.45 -> 0.54 s, p90 1.42 -> 1.78 s;
 vs ATOM -2.1% / -11.5%); c8 PDI4 28,586.2 / 200.0 (+0.1% / +0.4%; TTFT p50 0.39 s, p90 1.17 s); c2 PDI32 10,421.0 / 282.0
 (-0.5% / +0.9% = noise). PDI sweep DONE: larger PDI helps P90 only at c8; c2 unaffected.
 **Env reproducibility (2026-09-29):** scripts/setup_atomport_env.sh rebuilds this env in a fresh container
 (RUNBOOK "ATOM-port worktree"); a copy in /sgl-workspace/verify_ap is file-identical. Server from that copy (EVAL_ONLY CONC=32, GPUs 4,5): ready in
 380 s incl. first JIT build, aiter imported from the copy, 0 untuned 385/129 warnings, GSM8K 0.895 (1 run; live env
-0.901-0.908) -> reproducible (scripts/verify_atomport_env_server.sh, /shared_nfs/kk/dsv41/atomport/verify_env/summary.txt).
+0.901-0.908) -> reproducible (scripts/verify_atomport_env_server.sh, /shared_nfs/kk/results/DeepSeek-V4.1-Flash/atomport/verify_env/summary.txt).
 **Next (new session, user 2026-09-29):** attribute the c1/c2 gap to ATOM (P90 292.8 vs 337, 279.6 vs 324; TTT
 -4.8% / -7.0%). Known: PDI is irrelevant at c1/c2; proxy c1 (ctx 2k) P90 ~336 but AgentX c1 P90 292.8 -> the loss is
 AgentX-specific (long/growing contexts, radix hits, prefill of new turns, real traffic mix), not the fixed per-step
@@ -459,7 +459,7 @@ aiter `/sgl-workspace/aiter-5750` (+ untracked `aiter/configs/model_configs/dsv4
 + local tuner patch), flydsl `/sgl-workspace/pydeps-flydsl-0341`, ATOM reference `/workspace/atom-survey` @ 4685e3cf.
 **Repro (best config, c1 server; drop SERVER_ONLY to run AgentX; EVAL_ONLY=true for GSM8K):**
 ```bash
-cd /shared_nfs/kk/dsv41/agentx && PYTHONPATH=/sgl-workspace/pydeps-flydsl-0341:/sgl-workspace/aiter-5750:/sgl-workspace/mori \
+cd /shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx && PYTHONPATH=/sgl-workspace/pydeps-flydsl-0341:/sgl-workspace/aiter-5750:/sgl-workspace/mori \
 SRC=/sgl-workspace/sglang-rolao-opt/python SGLANG_OPT_HIP_OPUS_SPARSE_PREFILL=1 \
 EXTRA_ARGS="--fp8-gemm-backend aiter --enforce-shared-experts-fusion" \
 SERVER_ONLY=1 OPUS=0 TP=2 EP_SIZE=1 GPUS=4,5 CONC=1 PREFILL_DECODE_INTERVAL=16 TAG=<tag> \
@@ -514,7 +514,7 @@ GSM8K 1319 5-shot with the best config (CONC=32 eval server): 0.901-0.908 over 6
   no longer needed for accuracy; possible follow-up: per-layer gain fold into the shared topk weight.
 - **FMoE tuning of the fused shapes (2026-09-28):** 385/7 tokens 1-4096 and DSpark draft 129/4 tokens 1-512
   (5120/1152, a8w4 per_1x32) had no tuned config. Tuned 23/23 shapes on GPU 6 (all ksplit 0, err 0.0%), CSV
-  /shared_nfs/kk/dsv41/moe_tune/ -> deployed into aiter-5750 model_configs/ (backup
+  /shared_nfs/kk/results/DeepSeek-V4.1-Flash/moe_tune/ -> deployed into aiter-5750 model_configs/ (backup
   patches/aiter_local_dsv41_tp2_sef_fp8fp4_tuned_fmoe.csv). Tuner needed a local fix: generate_v2_stage1_data
   quantized E x 2I x H weights on CPU per token (42 min without progress) -> `with torch.device(device):`
   (patches/aiter_local_moe_tune_gpu_datagen.patch). Span 1176 -> 1135 kernels, 8.701 -> 8.389 ms; GSM8K unchanged.

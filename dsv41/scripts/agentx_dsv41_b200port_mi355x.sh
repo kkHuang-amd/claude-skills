@@ -8,7 +8,7 @@
 #   local branch via PYTHONPATH + validated ROCm env (RUNBOOK.md); cookbook ROCm prefill graph
 #   (--cuda-graph-backend-prefill breakable, max bs = chunk); OPUS prefill on (OPUS=0 to disable).
 #   TP=2 EP_SIZE=1 CONC=4 GPUS=4,5 PORT=8888 DURATION=3600 TAG=<name> PDI= OPUS=1 QR=NONE MEM= CHUNK=
-# Result dir: /shared_nfs/kk/dsv41/agentx/<TAG>/ ; driven by agentx_series.sh SCRIPT=agentx_dsv41_b200port_mi355x.sh
+# Result dir: /shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx/<TAG>/ ; driven by agentx_series.sh SCRIPT=agentx_dsv41_b200port_mi355x.sh
 set -eo pipefail
 source /workspace/claude-skills/agentx/agentx_env.sh
 export AIPERF_PYTHON_VERSION=${AIPERF_PYTHON_VERSION:-3.11}
@@ -20,7 +20,7 @@ export MODEL="deepseek-ai/DeepSeek-V4.1-Flash" MODEL_PREFIX="dsv41flash"
 export MODEL_PATH=${MODEL_PATH:-$( [ -d /shared_nfs/models/deepseek-ai/DeepSeek-V4.1-Flash ] && echo /shared_nfs/models/deepseek-ai/DeepSeek-V4.1-Flash || echo /shared_nfs/deepseek-ai/DeepSeek-V4.1-Flash)}
 export IS_AGENTIC=1 KV_OFFLOADING="none" TOTAL_CPU_DRAM_GB=0 EVAL_ONLY=${EVAL_ONLY:-false} SPEC_DECODING=mtp
 TAG=${TAG:-b200port_tp${TP}_c${CONC}_$(date +%m%d_%H%M)}
-export RESULT_DIR=/shared_nfs/kk/dsv41/agentx/$TAG AGENTIC_OUTPUT_DIR=/shared_nfs/kk/dsv41/agentx/$TAG
+export RESULT_DIR=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx/$TAG AGENTIC_OUTPUT_DIR=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx/$TAG
 export RESULT_FILENAME="dsv41flash_fp4_sglang_tp${TP}-ep${EP_SIZE}_spec-dspark_agentic_c${CONC}"
 check_env_vars MODEL TP EP_SIZE CONC KV_OFFLOADING TOTAL_CPU_DRAM_GB RESULT_DIR DURATION
 check_env_vars EVAL_ONLY SPEC_DECODING

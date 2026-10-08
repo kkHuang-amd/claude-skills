@@ -5,9 +5,9 @@
 #   2b) fused tree default policy 2 (router fusion + multi-phase moe_sorting), same; step spans of all three
 #   3) fused tree (both) EVAL_ONLY CONC=32: GSM8K 1319 x3 (scripts/run_gsm8k.sh)
 #   4) fused tree (both) AgentX c1, c2 (PDI 16, chunk 16384) via agentx_series.sh, PREFIX rf_c16k
-# Output: /shared_nfs/kk/dsv41/atomport/router_fuse/summary.txt
+# Output: /shared_nfs/kk/results/DeepSeek-V4.1-Flash/atomport/router_fuse/summary.txt
 set -uo pipefail
-D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd); O=/shared_nfs/kk/dsv41/atomport/router_fuse; A=/shared_nfs/kk/dsv41/agentx
+D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd); O=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/atomport/router_fuse; A=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx
 mkdir -p $O; S=$O/summary.txt; say(){ echo "[$(date +%T)] $*" >> $S; }
 BASE=/sgl-workspace/sglang-rolao-opt/python; FUSE=/sgl-workspace/sglang-router-fuse/python
 export PYTHONPATH=/sgl-workspace/pydeps-flydsl-0341:/sgl-workspace/aiter-5750:/sgl-workspace/mori
@@ -43,7 +43,7 @@ start rf_sim_fusemp $FUSE CONC=1 PREFILL_DECODE_INTERVAL=16 && proxy_and_prof fu
 kill_servers
 python3 $D/atomport_step_spans.py "base=$O/prof_base/*TP-0*" "fuse=$O/prof_fuse/*TP-0*" "fuse+sortMP=$O/prof_fusemp/*TP-0*" >> $S 2>&1
 if start rf_eval_fuse $FUSE EVAL_ONLY=true CONC=32; then
-  for r in 1 2 3; do SRC=$FUSE PORT=8888 TAG=rf_fuse_r$r bash $D/run_gsm8k.sh >> $S 2>&1; grep -oE 'Accuracy: [0-9.]+' /shared_nfs/kk/dsv41/gsm8k_rf_fuse_r$r.log | tail -1 | sed "s/^/gsm8k r$r /" >> $S; done
+  for r in 1 2 3; do SRC=$FUSE PORT=8888 TAG=rf_fuse_r$r bash $D/run_gsm8k.sh >> $S 2>&1; grep -oE 'Accuracy: [0-9.]+' /shared_nfs/kk/results/DeepSeek-V4.1-Flash/gsm8k_rf_fuse_r$r.log | tail -1 | sed "s/^/gsm8k r$r /" >> $S; done
 fi
 kill_servers
 say "AgentX c1,c2 start"

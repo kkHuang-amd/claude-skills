@@ -8,9 +8,9 @@
 #   EP=1           --enable-expert-parallel (SGLang runs TP4+EP4)      KV_FP8=1  --kv-cache-dtype fp8   BLOCK_SIZE=(unset)
 #   PREFIX_CACHE=0 (default, = SGLang radix off)   AITER_MLA=1 (0 disables AITER MLA/OPUS prefill)
 #   GPUS=4,5,6,7 PORT=8000 MODEL=/shared_nfs/models/deepseek-ai/DeepSeek-V4.1-Flash
-# Log: /shared_nfs/kk/dsv41/vllm/server_<TAG>.log ; image versions -> /shared_nfs/kk/dsv41/vllm/versions.txt
+# Log: /shared_nfs/kk/results/DeepSeek-V4.1-Flash/vllm/server_<TAG>.log ; image versions -> /shared_nfs/kk/results/DeepSeek-V4.1-Flash/vllm/versions.txt
 set -euo pipefail
-OUT=/shared_nfs/kk/dsv41/vllm; mkdir -p "$OUT"; TAG=${TAG:-$(date +%m%d_%H%M)}
+OUT=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/vllm; mkdir -p "$OUT"; TAG=${TAG:-$(date +%m%d_%H%M)}
 # never clobber a previous run: a reused TAG gets a time suffix
 [ -e "$OUT/server_${TAG}.log" ] && TAG=${TAG}_$(date +%H%M%S)
 MODEL=${MODEL:-$( [ -d /shared_nfs/models/deepseek-ai/DeepSeek-V4.1-Flash ] && echo /shared_nfs/models/deepseek-ai/DeepSeek-V4.1-Flash || echo /shared_nfs/deepseek-ai/DeepSeek-V4.1-Flash)}

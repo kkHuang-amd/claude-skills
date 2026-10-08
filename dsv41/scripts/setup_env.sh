@@ -5,7 +5,7 @@ set -euo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 SRC=${SRC:-/sgl-workspace/sglang-dsv41}; AITER=${AITER:-/sgl-workspace/aiter}
 AITER_PIN=b4d9154d125e09efbe098d986e40fea3549c1244   # v0.1.22.post1 = vLLM nightly-rocm100-3df4ae153 aiter; SGL_PIN=e2e824dc58
-SP=$(python3 -c 'import site;print(site.getsitepackages()[0])'); LOGD=/shared_nfs/kk/dsv41; mkdir -p "$LOGD"
+SP=$(python3 -c 'import site;print(site.getsitepackages()[0])'); LOGD=/shared_nfs/kk/results/DeepSeek-V4.1-Flash; mkdir -p "$LOGD"
 say(){ echo "[setup] $*"; }
 
 # 1. sglang branch

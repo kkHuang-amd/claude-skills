@@ -2,7 +2,7 @@
 
 Paths are relative to `/sgl-workspace/sglang-dsv41/python/sglang` unless stated. Full design Q&A (current-path
 call chain, index semantics, OPUS contract, vLLM approach, overhead table, test plan):
-`/shared_nfs/kk/dsv41/doc_backup_20260929/OPUS_PORT.md` (sections Q1-Q5, Design, Implementation steps).
+`/shared_nfs/kk/results/DeepSeek-V4.1-Flash/doc_backup_20260929/OPUS_PORT.md` (sections Q1-Q5, Design, Implementation steps).
 
 ## CONTINUE HERE
 **Status: DONE; superseded in practice.** The current best config uses the RolaoDenthu opt-branch's own OPUS

@@ -11,7 +11,7 @@ ap.add_argument("--repeat", type=int, default=3)
 ap.add_argument("--temperature", type=float, default=None)  # None = omit (server default, like AgentX)
 ap.add_argument("--model", default="/shared_nfs/deepseek-ai/DeepSeek-V4.1-Flash")
 ap.add_argument("--tag", default="x")
-ap.add_argument("--out", default="/shared_nfs/kk/dsv41/atomport/atom_proxy.tsv")
+ap.add_argument("--out", default="/shared_nfs/kk/results/DeepSeek-V4.1-Flash/atomport/atom_proxy.tsv")
 a = ap.parse_args()
 
 for rep in range(a.repeat):

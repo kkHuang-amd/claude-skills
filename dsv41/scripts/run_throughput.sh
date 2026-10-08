@@ -4,13 +4,13 @@
 #   BACKEND=sglang|sglang-oai|vllm (use sglang-oai vs vllm for cross-engine: same /v1/completions client)
 #   RANGE=1 (fixed lengths, lock-step waves) | <1 for variable ISL/OSL (desynchronized arrivals)
 #   TAG=<name> PORT=30000 CONCS="1 8 32" DATASETS="random-ids random" PROMPTS_PER_CONC=4
-# Logs/JSONL -> /shared_nfs/kk/dsv41/perf_<TAG>/ ; rows appended to results/perf.md
+# Logs/JSONL -> /shared_nfs/kk/results/DeepSeek-V4.1-Flash/perf_<TAG>/ ; rows appended to results/perf.md
 # PR reference (4xMI350X, output tok/s, DSpark off -> on): random bs1 155.73->641.88;
 #   real bs1 155.88->335.11, bs8 951.67->1446.53, bs32 2182.16->2241.87
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 TAG=${TAG:-$(date +%m%d_%H%M)}; PORT=${PORT:-30000}; K=${PROMPTS_PER_CONC:-4}
-OUT=/shared_nfs/kk/dsv41/perf_${TAG}; mkdir -p "$OUT"
+OUT=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/perf_${TAG}; mkdir -p "$OUT"
 SHAREGPT=${SHAREGPT:-/shared_nfs/hf-hub-cache/datasets--anon8231489123--ShareGPT_Vicuna_unfiltered/snapshots/192ab2185289094fc556ec8ce5ce1e8e587154ca/ShareGPT_V3_unfiltered_cleaned_split.json}
 export PYTHONPATH=${SRC:-/sgl-workspace/sglang-dsv41/python}${PYTHONPATH:+:$PYTHONPATH}
 R=$HERE/results/perf.md

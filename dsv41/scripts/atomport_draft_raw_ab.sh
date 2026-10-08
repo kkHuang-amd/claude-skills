@@ -3,9 +3,9 @@
 #   1) EVAL_ONLY c1 server, knob=1: greedy dump twice (run-to-run determinism)
 #   2) EVAL_ONLY c1 server, knob=0: greedy dump once -> cmp vs 1)
 #   3) simulated-acceptance c1 server, knob=1: proxy 3 reps + py-spy 10 s + GPU span profile
-# Output: /shared_nfs/kk/dsv41/atomport/draft_raw_ab/ ; progress/verdict lines in summary.txt there.
+# Output: /shared_nfs/kk/results/DeepSeek-V4.1-Flash/atomport/draft_raw_ab/ ; progress/verdict lines in summary.txt there.
 set -uo pipefail
-D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd); O=/shared_nfs/kk/dsv41/atomport/draft_raw_ab; A=/shared_nfs/kk/dsv41/agentx
+D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd); O=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/atomport/draft_raw_ab; A=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx
 mkdir -p $O; S=$O/summary.txt; say(){ echo "[$(date +%T)] $*" >> $S; }
 export PYTHONPATH=/sgl-workspace/pydeps-flydsl-0341:/sgl-workspace/aiter-5750:/sgl-workspace/mori
 export SRC=/sgl-workspace/sglang-rolao-opt/python SGLANG_OPT_HIP_OPUS_SPARSE_PREFILL=1
@@ -34,6 +34,6 @@ PID=$(ps -eo pid,args | grep 'sglang::scheduler_TP0' | grep -v grep | awk '{prin
 sleep 6; py-spy record --nonblocking -r 1000 -d 10 --format raw -o $O/pyspy_on.txt --pid $PID > /dev/null 2>&1; sleep 15
 tail -n 1 $O/pyspy_bench.log >> $S
 python3 $D/atomport_proxy_bench.py --port 8888 --ctx 2048 --conc 1 --repeat 1 --tag prof_draftraw_on --profile-dir $O/prof_on >> $S 2>&1
-python3 $D/atomport_step_spans.py "tuned=/shared_nfs/kk/dsv41/atomport/sef_tuned_prof/*TP-0*" "raw_on=$O/prof_on/*TP-0*" >> $S 2>&1
+python3 $D/atomport_step_spans.py "tuned=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/atomport/sef_tuned_prof/*TP-0*" "raw_on=$O/prof_on/*TP-0*" >> $S 2>&1
 kill_servers
 say "DONE"

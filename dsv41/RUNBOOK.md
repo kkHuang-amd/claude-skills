@@ -20,7 +20,7 @@ bash $D/scripts/setup_env.sh        # ~5 min first time (sgl-kernel build), seco
 1. Clones `kevin-mii/sglang` `dsv41-amd-main` to `/sgl-workspace/sglang-dsv41` (+ `upstream` remote); validated `e2e824dc58`.
 2. Checks the aiter pin, applies `patches/aiter_5561_*` (race fix; #5802 conflicts and is unused at `BOUND=0`).
 3. Rebuilds sgl-kernel (AOT, `/tmp` copy; needs `sort_output`) and **replaces `site-packages/sgl_kernel`** with the
-   egg's copy (else shadowed); original -> `/shared_nfs/kk/dsv41/sgl_kernel_backup_orig`.
+   egg's copy (else shadowed); original -> `/shared_nfs/kk/results/DeepSeek-V4.1-Flash/sgl_kernel_backup_orig`.
 4. Checks the model: `/shared_nfs/models/deepseek-ai/DeepSeek-V4.1-Flash` (fallback `/shared_nfs/deepseek-ai/...`).
 
 The branch runs via `PYTHONPATH`; installed editable sglang (`/sgl-workspace/sglang`, main) stays untouched.
@@ -28,7 +28,7 @@ The branch runs via `PYTHONPATH`; installed editable sglang (`/sgl-workspace/sgl
 ## 2. Launch (TP4)
 
 ```bash
-cd /shared_nfs/kk/dsv41
+cd /shared_nfs/kk/results/DeepSeek-V4.1-Flash
 nohup bash $D/scripts/launch_server.sh > server.log 2>&1 &                                  # DSpark off, GPU0-3 :30000
 DSPARK=1 GPUS=4,5,6,7 PORT=30001 nohup bash $D/scripts/launch_server.sh > server_dspark.log 2>&1 &
 grep -E 'ready to roll|Traceback|Error' server.log | tail -3      # ~5-15 min
@@ -69,9 +69,9 @@ Never `pkill -f`/`pgrep -f` a pattern that appears in your own command line.
 
 ## 5. Revert
 
-sgl-kernel: copy `/shared_nfs/kk/dsv41/sgl_kernel_backup_orig/sgl_kernel` back over `/opt/venv/lib/python3.10/site-packages/sgl_kernel`.
+sgl-kernel: copy `/shared_nfs/kk/results/DeepSeek-V4.1-Flash/sgl_kernel_backup_orig/sgl_kernel` back over `/opt/venv/lib/python3.10/site-packages/sgl_kernel`.
 Pre-upgrade aiter (acf8fdf93): stash@{0} + aiter_pre_upgrade_full.diff; JIT: /sgl-workspace/aiter_jit_backup_acf8fdf93.
-Older local aiter edits: aiter_preexisting_local.diff (both in /shared_nfs/kk/dsv41/).
+Older local aiter edits: aiter_preexisting_local.diff (both in /shared_nfs/kk/results/DeepSeek-V4.1-Flash/).
 
 ## ATOM-port worktree (current best config)
 
@@ -100,7 +100,7 @@ SGLANG_HIP_SPEC_EVENT_WAIT experiment in overlap_utils.py, which is intentionall
 was ready in 380 s (first JIT build included) and scored GSM8K 0.895 (scripts/verify_atomport_env_server.sh).
 
 ```bash
-cd /shared_nfs/kk/dsv41/agentx && PYTHONPATH=/sgl-workspace/pydeps-flydsl-0341:/sgl-workspace/aiter-5750:/sgl-workspace/mori \
+cd /shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx && PYTHONPATH=/sgl-workspace/pydeps-flydsl-0341:/sgl-workspace/aiter-5750:/sgl-workspace/mori \
   SRC=/sgl-workspace/sglang-rolao-opt/python SGLANG_OPT_HIP_OPUS_SPARSE_PREFILL=1 \
   EXTRA_ARGS="--fp8-gemm-backend aiter --enforce-shared-experts-fusion" SERVER_ONLY=1 OPUS=0 TP=2 EP_SIZE=1 GPUS=4,5 \
   CONC=1 PREFILL_DECODE_INTERVAL=16 TAG=<tag> \

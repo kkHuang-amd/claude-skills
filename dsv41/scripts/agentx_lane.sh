@@ -3,9 +3,9 @@
 # free between points (agentx_series.sh waits on node-wide VRAM, so two series lanes would block each other).
 #   GPUS=4,5 PORT=8888 POINTS="tag:conc:pdi:chunk:mem[:var] ..." bash agentx_lane.sh   (other env, e.g. SRC/EXTRA_ARGS, inherited)
 #   Optional var: that point runs with EXTRA_ARGS=$EXTRA_ARGS_<var> instead of the inherited EXTRA_ARGS.
-# Progress -> /shared_nfs/kk/dsv41/agentx/lane_<PORT>.txt ; each point -> <tag>/ and <tag>.nohup
+# Progress -> /shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx/lane_<PORT>.txt ; each point -> <tag>/ and <tag>.nohup
 set -uo pipefail
-D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd); OUT=/shared_nfs/kk/dsv41/agentx; S=$OUT/lane_${PORT}.txt
+D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd); OUT=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx; S=$OUT/lane_${PORT}.txt
 say(){ echo "[$(date +%F' '%T)] $*" >> "$S"; }
 port_busy(){ ss -ltn | grep -q ":${PORT} "; }
 for pt in $POINTS; do

@@ -110,6 +110,6 @@ case "$got" in *"$AP_AITER_DIR/aiter/__init__.py $AP_SGL_DIR/python/sglang/__ini
   && ok "AgentX deps ($INFMAX_CONTAINER_WORKSPACE, $AIPERF_VENV)" \
   || echo "TODO AgentX deps missing -> follow /workspace/claude-skills/agentx/SKILL.md (GSM8K/proxy work without them)"
 
-echo "LAUNCH: cd /shared_nfs/kk/dsv41/agentx && PYTHONPATH=$PP SRC=$AP_SGL_DIR/python SGLANG_OPT_HIP_OPUS_SPARSE_PREFILL=1" \
+echo "LAUNCH: cd /shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx && PYTHONPATH=$PP SRC=$AP_SGL_DIR/python SGLANG_OPT_HIP_OPUS_SPARSE_PREFILL=1" \
   "EXTRA_ARGS=\"--fp8-gemm-backend aiter --enforce-shared-experts-fusion\" SERVER_ONLY=1 OPUS=0 TP=2 EP_SIZE=1 GPUS=4,5" \
   "CONC=1 PREFILL_DECODE_INTERVAL=16 TAG=<tag> setsid nohup bash $D/scripts/agentx_colleague_run.sh > <tag>.nohup 2>&1 < /dev/null &"

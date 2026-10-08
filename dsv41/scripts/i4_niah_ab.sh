@@ -3,13 +3,13 @@
 # SGLANG_DSV41_PREFILL_LOGITS_BF16 = 1 then 0, i4_niah_eval.py on each. Prefix cache off so every prompt prefills.
 #   bash i4_niah_ab.sh                       # GPUs 0-3, port 8888
 #   SIDES="1 0" GPUS=0,1,2,3 PORT=8888 NIAH_ARGS="--lengths 32000,64000,120000 --n 20"
-# Output: /shared_nfs/kk/dsv41/i4_niah/<TAG>_bf16<v>/ (server.log, niah.out, niah.jsonl).
+# Output: /shared_nfs/kk/results/DeepSeek-V4.1-Flash/i4_niah/<TAG>_bf16<v>/ (server.log, niah.out, niah.jsonl).
 # Refuses while any sglang server / lane runs.
 set -uo pipefail
 D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 TAG=${TAG:-i4niah_$(hostname | sed 's/.*-//')_$(date +%m%d_%H%M)}
 for v in ${SIDES:-1 0}; do
-    OUT=/shared_nfs/kk/dsv41/i4_niah/${TAG}_bf16$v; mkdir -p "$OUT"
+    OUT=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/i4_niah/${TAG}_bf16$v; mkdir -p "$OUT"
     if pgrep -f 'agentx_lane.sh|tp4_moe_tune.sh|gemm_moe_tune.py' >/dev/null || pgrep -f '^sglang::' >/dev/null; then
         echo "REFUSING: lane / MoE tuning / sglang server running"; exit 1
     fi

@@ -2,11 +2,11 @@
 # PR #39857 measurement method for bs1: random-ids 4096/1024, ignore_eos, seed 42, 1 discarded warm-up +
 # RUNS timed runs, /flush_cache before each, metric = decode tok/s "first to last streamed event" = 1000/TPOT.
 #   BACKEND=sglang|sglang-oai|vllm (cross-engine: sglang-oai vs vllm)
-#   TAG=<name> PORT=30000 RUNS=6 ; logs -> /shared_nfs/kk/dsv41/prstyle_<TAG>/ ; row -> results/perf_prstyle.md
+#   TAG=<name> PORT=30000 RUNS=6 ; logs -> /shared_nfs/kk/results/DeepSeek-V4.1-Flash/prstyle_<TAG>/ ; row -> results/perf_prstyle.md
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 TAG=${TAG:-$(date +%m%d_%H%M)}; PORT=${PORT:-30000}; RUNS=${RUNS:-6}
-OUT=/shared_nfs/kk/dsv41/prstyle_${TAG}; mkdir -p "$OUT"
+OUT=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/prstyle_${TAG}; mkdir -p "$OUT"
 export PYTHONPATH=${SRC:-/sgl-workspace/sglang-dsv41/python}${PYTHONPATH:+:$PYTHONPATH}
 vals=()
 for i in $(seq 0 "$RUNS"); do

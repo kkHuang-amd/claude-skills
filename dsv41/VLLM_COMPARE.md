@@ -5,7 +5,7 @@
 2026-09-27 ATOM gap survey in NOTES.md). Final outcome: SGLang decode is faster than vLLM at every load (TPOT
 -11..-16%). The c32 TTFT gap was a benchmark artifact: lock-step waves plus SGLang's batch-wide simulated acceptance.
 With `--enable-mixed-chunk` (DSpark off) or per-request simulated acceptance (DSpark), SGLang beats vLLM on TTFT.
-GSM8K is at parity. Full pre-condensation text: `/shared_nfs/kk/dsv41/doc_backup_20260929/VLLM_COMPARE.md`.
+GSM8K is at parity. Full pre-condensation text: `/shared_nfs/kk/results/DeepSeek-V4.1-Flash/doc_backup_20260929/VLLM_COMPARE.md`.
 Leftover (not pursued): report the vLLM OPUS + prefix-cache crash upstream.
 
 ## Comparison protocol (decided 2026-09-24)
@@ -32,7 +32,7 @@ Leftover (not pursued): report the vLLM OPUS + prefix-cache crash upstream.
 - vLLM DSV4.1 code: `vllm/models/deepseek_v41/{amd,common,nvidia}/`; AMD: `amd/model.py`, `amd/rocm.py`, `amd/dspark.py`.
 - vLLM GOTCHA: prefix caching ON (default) + GSM8K -> `HSA_STATUS_ERROR_MEMORY_FAULT` on all 4 GPUs right after
   the first `Using AITER OPUS for large sparse MLA prefill` (prefix hit 82%). `--no-enable-prefix-caching` -> 0 faults.
-  Hypothesis: -1 / negative CSR entries after a prefix hit (OPUS_PORT.md). Log: /shared_nfs/kk/dsv41/vllm/server_nodspark.log.
+  Hypothesis: -1 / negative CSR entries after a prefix hit (OPUS_PORT.md). Log: /shared_nfs/kk/results/DeepSeek-V4.1-Flash/vllm/server_nodspark.log.
 
 ## Final numbers (4xMI355X TP4+EP4, fp8 KV, random-ids ISL4096/OSL1024 unless noted, 2026-09-24)
 Accuracy (real acceptance): DSpark off GSM8K SGLang 0.908 vs vLLM 0.901; DSpark on vLLM 0.904 (AL 3.54),
@@ -64,7 +64,7 @@ c32 after fixes (SGLang branch opus-prefill; vLLM unchanged):
 | DSpark sim, OPUS | 2485 | 3340 | TTFT 2.1x worse, tok/s +2.8% |
 | DSpark sim, OPUS + `--enable-mixed-chunk` | 2214 (mean) | 3354 | e2e std only 34 -> 119 ms |
 | DSpark, OPUS, per-request sim acceptance (experiment, rolled back) | 885 | 3160 | vLLM 1175 / 3250: TTFT better, tok/s -3%, TPOT 9.15 vs 8.67 |
-Raw: /shared_nfs/kk/dsv41/{perf,prstyle}_{sgl_dspark_sim3.51_oai,vllm_dspark_sim3.51}/. c8 random-ids vLLM
+Raw: /shared_nfs/kk/results/DeepSeek-V4.1-Flash/{perf,prstyle}_{sgl_dspark_sim3.51_oai,vllm_dspark_sim3.51}/. c8 random-ids vLLM
 DSpark (32 prompts) looks noisy.
 
 ## Optimization inventory (vLLM AMD path -> SGLang status)

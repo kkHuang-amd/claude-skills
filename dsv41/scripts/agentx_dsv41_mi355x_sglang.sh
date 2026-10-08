@@ -9,7 +9,7 @@
 #   MEM=0.85 (weights ~160 GB/GPU at TP2 with the 203 GB engram table on host)
 #   PDI=<n> (--prefill-decode-interval; unset = off)  PDI_AUTO=1 -> 4 at CONC 64, 16 otherwise (B200 recipe uses 16)
 #   EVAL_ONLY=true -> real acceptance + run_eval instead of replay (accuracy check)
-# Result dir: /shared_nfs/kk/dsv41/agentx/<TAG>/ ; one row -> results/agentx.md via agentx_summary.py
+# Result dir: /shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx/<TAG>/ ; one row -> results/agentx.md via agentx_summary.py
 set -eo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 source /workspace/claude-skills/agentx/agentx_env.sh
@@ -22,7 +22,7 @@ export MODEL="deepseek-ai/DeepSeek-V4.1-Flash" MODEL_PREFIX="dsv41flash"
 export MODEL_PATH=${MODEL_PATH:-$( [ -d /shared_nfs/models/deepseek-ai/DeepSeek-V4.1-Flash ] && echo /shared_nfs/models/deepseek-ai/DeepSeek-V4.1-Flash || echo /shared_nfs/deepseek-ai/DeepSeek-V4.1-Flash)}
 export IS_AGENTIC=1 KV_OFFLOADING="none" TOTAL_CPU_DRAM_GB=0 EVAL_ONLY=${EVAL_ONLY:-false}
 TAG=${TAG:-tp${TP}_c${CONC}_$(date +%m%d_%H%M)}
-export RESULT_DIR=/shared_nfs/kk/dsv41/agentx/$TAG AGENTIC_OUTPUT_DIR=/shared_nfs/kk/dsv41/agentx/$TAG
+export RESULT_DIR=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx/$TAG AGENTIC_OUTPUT_DIR=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx/$TAG
 export RESULT_FILENAME="dsv41flash_fp4_sglang_tp${TP}-ep${EP_SIZE}_spec-dspark_agentic_c${CONC}"
 check_env_vars MODEL TP EP_SIZE CONC KV_OFFLOADING TOTAL_CPU_DRAM_GB RESULT_DIR DURATION EVAL_ONLY
 export GPU_COUNT="$TP"

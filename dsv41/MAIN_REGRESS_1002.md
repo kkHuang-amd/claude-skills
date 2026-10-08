@@ -49,7 +49,7 @@ Compare cut runs with `scripts/agentx_live_compare.py MM:SS <a.nohup> <b.nohup>`
 Was: AgentX started 2026-10-02 10:25 +08, two lanes like env1001:
 lane A GPUs 4,5:8888 wrapper PID 23691: main42055_c64 (PDI4, 4096, 0.85) -> main42055_c2 (PDI16, 16384, 0.70);
 lane B GPUs 6,7:8889 wrapper PID 23692: main42055_c8 (PDI16, 16384, 0.70) -> main42055_c32 (PDI4, 16384, 0.80).
-Progress lane_{8888,8889}.txt in /shared_nfs/kk/dsv41/agentx; kill: `kill -- -<pid>` then the sglang:: children.
+Progress lane_{8888,8889}.txt in /shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx; kill: `kill -- -<pid>` then the sglang:: children.
 **Next:** when a point ends, compare with env1001_c* (ENV_1001.md Results) and fill Results below.
 **GSM8K method trap:** EVAL_ONLY=true without SERVER_ONLY runs InferenceX lm_eval (chat template) -> 0.974, NOT comparable with
 the 0.89-0.91 history, which is `sglang.test.few_shot_gsm8k` (scripts/run_gsm8k.sh) on a SERVER_ONLY=1 EVAL_ONLY=true server.
@@ -59,7 +59,7 @@ csrc/cpp_itfs/torch_utils.py (torch.Stream) edits; flydsl 0.3.4.1 global. /sgl-w
 ATOM-port worktrees do not exist in this container. Node check hostreg_devptr_check.py: same=True (engram devptr patch not needed).
 **Repro (GSM8K; drop EVAL_ONLY for AgentX, set CONC/PDI/chunk/mem per point):**
 ```bash
-cd /shared_nfs/kk/dsv41/agentx && PYTHONPATH=/sgl-workspace/mori SRC=/sgl-workspace/sglang/python \
+cd /shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx && PYTHONPATH=/sgl-workspace/mori SRC=/sgl-workspace/sglang/python \
   SGLANG_OPT_HIP_OPUS_SPARSE_PREFILL=1 EXTRA_ARGS="--fp8-gemm-backend aiter --enforce-shared-experts-fusion" \
   EVAL_ONLY=true OPUS=0 TP=2 EP_SIZE=1 GPUS=4,5 PORT=8888 CONC=32 PREFILL_DECODE_INTERVAL=4 CHUNKED_PREFILL_SIZE=16384 \
   MEM_FRACTION_STATIC=0.80 TAG=main42055_gsm8k setsid nohup bash /workspace/claude-skills/dsv41/scripts/agentx_colleague_run.sh > main42055_gsm8k.nohup 2>&1 < /dev/null &

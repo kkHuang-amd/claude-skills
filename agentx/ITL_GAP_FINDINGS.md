@@ -27,7 +27,7 @@
 > `/shared_nfs/kk/tree-backup/20260903-postswap/` with a `REBUILD.md`. New
 > logs, traces and scratch files go under **`/shared_nfs/kk/`**
 > (`logs/`, `traces/`, `tmp/`) — xfs, 53 TB free, survives an image swap.
-> Arm artifacts stay in `/workspace/results/`.
+> Arm artifacts stay in `/shared_nfs/kk/results/DeepSeek-V4-Pro/`.
 >
 > **STATE 2026-09-04 02:10Z: nothing in flight, node idle (2.38 GB, no
 > processes). Tree VERIFIED HERE: sglang `efaeb6f664`, aiter `c16d44b93` + 15
@@ -175,7 +175,7 @@ one-command fix. Add it to every future hicache script.
 **Node state:** clean and idle, 0 processes, 2.2 GB across 8 GPUs. `sglang` on
 `33979a814b` with 19 other-session files still uncommitted. Scripts:
 `interval20_c128.sh` (copy this one), `vram_sampler.sh`, `tbo_debug_probe.sh`.
-Arm artifacts in `/workspace/results/interval20-c128/`.
+Arm artifacts in `/shared_nfs/kk/results/DeepSeek-V4-Pro/interval20-c128/`.
 
 **Still open:** the fp8 path's unbounded `torch.empty(total_tokens, max_seq_len)`
 at `dsv4/indexer.py:160` — this arm's min free VRAM was **0.98 GB** with 6 late
@@ -229,7 +229,7 @@ This corrects a wrong intermediate conclusion of mine from the same session.
 Trap to not repeat: `SGLANG_TBO_DEBUG=1` shows TARGET_VERIFY batches being
 *prepared* at graph-capture time (128 of them, `idx` 1..16 × 8 ranks). That is
 model-agnostic batch prep which DSV4 then declines to use. It is **not** evidence
-of decode TBO. Probe artifacts: `/workspace/results/tbo-debug-probe/`, driver
+of decode TBO. Probe artifacts: `/shared_nfs/kk/results/DeepSeek-V4-Pro/tbo-debug-probe/`, driver
 script `tbo_debug_probe.sh` (~8 min, replays a recorded `sglang_command.txt`
 verbatim + gsm8k 64-way, no aiperf — much cheaper than a short agentic arm,
 because server startup is only ~3 min of a 92 min arm).
@@ -655,8 +655,8 @@ alone, no re-benchmark needed. Only `KV_OFFLOADING` is `required_env`; every
 other field defaults to empty, exactly as in prior arms' JSONs:
 
 ```bash
-cd /workspace/InferenceX && RESULT_DIR=/workspace/results/<arm> \
- AGENTIC_OUTPUT_DIR=/workspace/results/<arm> \
+cd /workspace/InferenceX && RESULT_DIR=/shared_nfs/kk/results/DeepSeek-V4-Pro/<arm> \
+ AGENTIC_OUTPUT_DIR=/shared_nfs/kk/results/DeepSeek-V4-Pro/<arm> \
  RESULT_FILENAME="dsv4_fp4_sglang_tp8-pp1-dcp1-pcp1-ep1-dpatrue_disagg-false_spec-mtp_agentic_c192" \
  MODEL="deepseek-ai/DeepSeek-V4-Pro" MODEL_PREFIX=dsv4 TP=8 EP_SIZE=1 DP_ATTENTION=true \
  CONC=192 DURATION=3600 KV_OFFLOADING=dram KV_OFFLOAD_BACKEND=hicache \
@@ -913,7 +913,7 @@ and the FP4 path in the new image is already partly hardened.
   than deleted because they are not ours.
 - `/workspace/handoff-20260903-image-swap/` — **deleted**, consumed. Its seven
   script copies were byte-identical to `claude-skills/agentx/`.
-- `/workspace/results/` — unchanged, still the arm artifacts.
+- `/shared_nfs/kk/results/DeepSeek-V4-Pro/` — unchanged, still the arm artifacts.
 
 ### Next action
 
@@ -970,7 +970,7 @@ concurrently on different streams, key `_LOGITS_POOL` by `(device, stream)`.
 
 ### b) The late Triton device loads are pre-loaded at init
 
-The 10 late loads were **not** a mystery — `/workspace/results/*/server.log`
+The 10 late loads were **not** a mystery — `/shared_nfs/kk/results/DeepSeek-V4-Pro/*/server.log`
 names them, and it is exactly two kernels, `_prefill_lengths_kernel` and
 `_build_prefill_indices_kernel` (`unified_kv_kernels/runtime.py`), with one pair
 recorded loading at **0.00 GiB free**. Prefill is not graph-captured, so they

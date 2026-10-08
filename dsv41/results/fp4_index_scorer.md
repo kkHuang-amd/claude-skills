@@ -16,7 +16,7 @@ on 1x MI355X.
 | 10-07 | crsuse2-m2m-259 | 5b2f7d1d1 | 64 | 1 | 16384 | 512 | 64 | 24.2 | 88.8 | ≤7.6e-6 | 〃 |
 | 10-07 | crsuse2-m2m-259 | 5b2f7d1d1 | 64 | 4 | 4096 | 1 | 32 | 3.9 | 3.8 | ≤1.9e-6 | 〃 |
 
-Logs: /shared_nfs/kk/dsv41/fp4_index_port/. Script: scripts/fp4_rowgroup_page64_check.py.
+Logs: /shared_nfs/kk/results/DeepSeek-V4.1-Flash/fp4_index_port/. Script: scripts/fp4_rowgroup_page64_check.py.
 
 ## P0.3: SGLang production scorer (A) vs row-group (B), V4.1 shapes (heads 32, dim 128, page 64)
 
@@ -28,7 +28,7 @@ B is `flydsl_pa_mqa_logits_fp4_rowgroup` on the request table with a prebuilt pl
 
 "GPU" is CUDA-graph replay (20 calls per graph); "eager" is back-to-back Python calls. Rel err A vs B ≤ 1.1e-7 everywhere.
 The A schedule build (eager), which B does not need, costs 45-64 µs per step per ratio.
-Node crsuse2-m2m-259, 2026-10-07, aiter 5b2f7d1d1. Log: `/shared_nfs/kk/dsv41/fp4_index_port/p03_scorer_vs_sglang_graph.log`.
+Node crsuse2-m2m-259, 2026-10-07, aiter 5b2f7d1d1. Log: `/shared_nfs/kk/results/DeepSeek-V4.1-Flash/fp4_index_port/p03_scorer_vs_sglang_graph.log`.
 Script: scripts/fp4_scorer_vs_sglang_bench.py.
 
 | case | ratio | rows | keys<= | GPU A us | GPU B us | A/B | eager A | eager B |
@@ -63,7 +63,7 @@ Script: scripts/fp4_scorer_vs_sglang_bench.py.
 ## P0.3 cold-cache rerun (aiter #6145 method: 2 GiB read before each call, per-call events, median of 20)
 
 Node crsuse2-m2m-259, 2026-10-07. `COLD=1` in the same script, with 3 more decode/verify cases.
-Log: `/shared_nfs/kk/dsv41/fp4_index_port/p03_scorer_vs_sglang_cold.log`.
+Log: `/shared_nfs/kk/results/DeepSeek-V4.1-Flash/fp4_index_port/p03_scorer_vs_sglang_cold.log`.
 
 | case | ratio | rows | keys<= | cold A us | cold B us | A/B |
 |---|---|---|---|---|---|---|
@@ -105,7 +105,7 @@ Log: `/shared_nfs/kk/dsv41/fp4_index_port/p03_scorer_vs_sglang_cold.log`.
 Node crsuse2-m2m-259, 2026-10-07. Config = the TP4_GAP_1006.md lane, served from worktree `/sgl-workspace/sglang-fp4idx`
 (main 16a23a672b plus env-gated spans) on aiter e7d2453f2.
 - Load: `prefill_cost_probe.py`, max_new_tokens=1, chunk 16384.
-- Script: `scripts/fp4idx_prefill_probe.sh`. Summary: `/shared_nfs/kk/dsv41/fp4_index_port/p03b_259_1007_0337/summary.txt`.
+- Script: `scripts/fp4idx_prefill_probe.sh`. Summary: `/shared_nfs/kk/results/DeepSeek-V4.1-Flash/fp4_index_port/p03b_259_1007_0337/summary.txt`.
 - Values are medians over warm (no JIT) forwards. "score" is the FP4 logits call; "indexer" also covers q, top-k
   and candidates. All values are rank-0 GPU stream time.
 
@@ -127,7 +127,7 @@ already held 6201.
 
 ## P0.4: JIT compiles and first-call cost across shapes (1x MI355X, aiter 5b2f7d1d1)
 
-Node crsuse2-m2m-259, 2026-10-07. Script: `scripts/fp4_scorer_jit_sweep.sh`. Log: `/shared_nfs/kk/dsv41/fp4_index_port/p04_jit_sweep.log`.
+Node crsuse2-m2m-259, 2026-10-07. Script: `scripts/fp4_scorer_jit_sweep.sh`. Log: `/shared_nfs/kk/results/DeepSeek-V4.1-Flash/fp4_index_port/p04_jit_sweep.log`.
 
 Setup:
 - Each mode runs in its own process: first with EMPTY FlyDSL/Triton caches (cold), then a new process on the same
@@ -167,5 +167,5 @@ How it was computed:
 | 32 | 32k | 20.5 | 449 | 2.2% | 190 | 259 | 1.3% |
 | 64 | 32k | 25.6 | 586 | 2.3% | 364 | 222 | 0.9% |
 
-Logs: `/shared_nfs/kk/dsv41/fp4_index_port/p03v_verify_shapes.log` and `p03v_run*.out`;
-`/shared_nfs/kk/dsv41/profile_tp4/p03v_259_*`.
+Logs: `/shared_nfs/kk/results/DeepSeek-V4.1-Flash/fp4_index_port/p03v_verify_shapes.log` and `p03v_run*.out`;
+`/shared_nfs/kk/results/DeepSeek-V4.1-Flash/profile_tp4/p03v_259_*`.

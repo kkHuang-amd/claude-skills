@@ -9,7 +9,7 @@ must be added to reproduce our current DSV4.1-Flash numbers (SGLang rolao/dsv41/
 19:26 (runs, GSM8K 0.899). Experiment trees removed; stack kept as patches (see Follow-up).
 **Next:** optional -- turn the local stack into a branch/PR on kkHuang-amd/aiter (not done, local only), or re-check
 with #5722/#5660/#5519/#5579/#5575 if a workload outside AgentX c1/c2 (e.g. c32/c64, prefill-heavy) regresses.
-**Repro:** `setsid nohup bash /workspace/claude-skills/dsv41/scripts/minscope_ab.sh > /shared_nfs/kk/dsv41/atomport/minscope/run.nohup 2>&1 < /dev/null &`
+**Repro:** `setsid nohup bash /workspace/claude-skills/dsv41/scripts/minscope_ab.sh > /shared_nfs/kk/results/DeepSeek-V4.1-Flash/atomport/minscope/run.nohup 2>&1 < /dev/null &`
 
 ## Setup
 
@@ -81,7 +81,7 @@ DeepSeek-V4.1 features on ROCm") run?
 - Launch: colleague recipe unchanged except no later optimizations: EXTRA_ARGS empty (no --fp8-gemm-backend aiter, no
   --enforce-shared-experts-fusion), no OPUS sparse prefill env (does not exist at 3e8187fa88), chunk 4096 (recipe
   default); all recipe flags parse at 3e8187fa88 (`--tp` is the unique prefix of `--tp-size`).
-- Script `scripts/orig41_ab.sh` (PID 945123, started 19:28), summary `/shared_nfs/kk/dsv41/atomport/orig41/summary.txt`:
+- Script `scripts/orig41_ab.sh` (PID 945123, started 19:28), summary `/shared_nfs/kk/results/DeepSeek-V4.1-Flash/atomport/orig41/summary.txt`:
   GSM8K 1319 x3 on an EVAL_ONLY CONC=32 server, then AgentX c1, c2 (PDI 16, PREFIX orig41).
 - Reference for the same era: rolao all-opts (09-26) c1 9,818.6 / 267.5, c2 9,832.8 / 258.2.
 
@@ -91,5 +91,5 @@ DeepSeek-V4.1 features on ROCm") run?
 - AgentX c1/c2: STOPPED by user at 19:45 (c1 ~15 min in, no result). Answer to the question: YES, the original DSV4.1
   SGLang runs on the unmodified image aiter with correct accuracy (untuned MoE/GEMM shapes, so perf not measured).
 - Cleanup 19:50: sglang-orig41 / sglang-minscope worktrees and the aiter-image / aiter-minscope copies removed.
-  The minimal-scope stack is kept as patches: /shared_nfs/kk/dsv41/aiter_minscope_patches/000{1..5}-*.patch
+  The minimal-scope stack is kept as patches: /shared_nfs/kk/results/DeepSeek-V4.1-Flash/aiter_minscope_patches/000{1..5}-*.patch
   (git am onto acf8fdf93 to rebuild it).

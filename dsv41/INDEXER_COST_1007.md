@@ -207,7 +207,7 @@ viewing the same pooled block.
   2. DONE: in-server spans (below).
 
 **In-server A/B** (2026-10-08, crsuse2-m2m-259, TP4 lane config, 16k chunk). Both sides run sglang-i4 + aiter-i4 with
-the block-max fix; only `SGLANG_DSV41_PREFILL_LOGITS_BF16` differs. Runs `/shared_nfs/kk/dsv41/fp4_index_port/
+the block-max fix; only `SGLANG_DSV41_PREFILL_LOGITS_BF16` differs. Runs `/shared_nfs/kk/results/DeepSeek-V4.1-Flash/fp4_index_port/
 i4_bf16{0_259_1008_0039,1_259_1008_0023}/summary.txt`. Warm medians with n >= 3; the 82k/98k/115k rows are n=2 with JIT
 stalls and are left out. ms, fp32 -> bf16:
 
@@ -294,7 +294,7 @@ flips are acceptable.
 - **Why decode is in scope:** the change also routes target-verify rows above the GEMV row limit to the fused kernel,
   so decode is touched.
 - **Decode TPOT A/B, done.** `tp4_decode_profile.sh` PROFILE=0 CONC=32 LOAD_CONC=16,32,16,32 ISL=32768 OSL=1024
-  MEM=0.80, one server per side, 2 samples per conc; logs `/shared_nfs/kk/dsv41/profile_tp4/i1_tpot_{base,i1}/`.
+  MEM=0.80, one server per side, 2 samples per conc; logs `/shared_nfs/kk/results/DeepSeek-V4.1-Flash/profile_tp4/i1_tpot_{base,i1}/`.
   Clean TPOT ms:
 
   | conc | main | fused (i1) |
@@ -324,7 +324,7 @@ fake-quant (`_rope_fq4`).
 
 ## Log (append-only; date, node, what)
 
-- 2026-10-07 crsuse2-m2m-259: created from P0.3b data (`/shared_nfs/kk/dsv41/fp4_index_port/p03b_259_1007_0337/`).
+- 2026-10-07 crsuse2-m2m-259: created from P0.3b data (`/shared_nfs/kk/results/DeepSeek-V4.1-Flash/fp4_index_port/p03b_259_1007_0337/`).
 - 2026-10-07 crsuse2-m2m-259: I2 updated with P0.4. Row-group also compiles per key width; I3 is parked.
 - 2026-10-07 crsuse2-m2m-259: I5 sized; see results/fp4_index_scorer.md "P3 sizing".
 - 2026-10-07 crsuse2-m2m-259: I1 split measured. The pack and rope kernels are launch-bound (one program per head row). Started the fused prefill kernel.
@@ -340,3 +340,10 @@ fake-quant (`_rope_fq4`).
 - 2026-10-08 crsuse2-m2m-259: I4 in-server A/B (bf16 vs fp32, both with the block-max fix): fwd -1.7% at 131k, -0.9% at 66k, ~0 at <=33k. Next: NIAH accuracy A/B.
 - 2026-10-08 crsuse2-m2m-259: NIAH A/B stopped after one length (bf16=1 22k: 10/20; no fp32 side). I4 is parked because the B200 gap is decode; next work is decode multi-stream overlap (TP4_GAP_1006.md).
 - 2026-10-08 crsuse2-m2m-259: block-max fix pushed to HaiShaw/sglang perf/v41-candidate-blockmax-fastpath (0c5ae950a9).
+- 2026-10-08 crsuse2-m2m-255 (user request, m2m-259 session not running): I4 bf16 logits pushed FROM THE SAVED PATCHES
+  (patches/*_i4_bf16_logits_0001.patch, 10-08 00:0x; the 259 worktrees may be newer -- please diff and amend if so):
+  aiter kkHuang-amd/aiter perf/v41-indexer-bf16-logits @ cc1773508c (on that fork's main 6264f8f5cc; includes the
+  lru_cache -> cache edit); sglang HaiShaw/sglang perf/v41-indexer-bf16-logits @ 5343fb6bb4 (on b91919ffe2; timing
+  patch 0002 NOT included; env moved to environ.py as SGLANG_DSV41_PREFILL_LOGITS_BF16 = EnvBool(False)). Check on
+  m2m-255 GPU 4 (both branches): bf16 == round(fp32) 0 mismatches at ctx 16k r2 / 64k r2 / 128k r1; top-k fp32 -> bf16
+  0.56 -> 0.38 ms (64k), 2.25 -> 1.14 ms (128k r1). NIAH accuracy A/B still not done.

@@ -255,7 +255,7 @@ to `min(total_tokens)` with `total_requests` as tie-breaker (`:125-130`), fed by
 `total_requests` at
 `InferenceX/benchmarks/single_node/agentic/dsv4_fp4_mi355x_sglang_mtp.sh:241`.
 
-- Baseline: `/workspace/results/megamoe-eplb-c128-b200aligned/`.
+- Baseline: `/shared_nfs/kk/results/DeepSeek-V4-Pro/megamoe-eplb-c128-b200aligned/`.
 - **Pass criteria:** `#full token` skew measurably below 2.27x on the new
   `server.log` via `kv_skew.py`. **Verify the outcome, not the flag** — this
   project has already lost a day to a flag that silently did nothing.

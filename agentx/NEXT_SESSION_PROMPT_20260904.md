@@ -138,7 +138,7 @@ are orthogonal. ATOM's `run 33074134043` is unreachable.
 
 ## Where things live
 
-- Arm artifacts: `/workspace/results/<arm>/` (25 GB, `/workspace` has 512 GB
+- Arm artifacts: `/shared_nfs/kk/results/DeepSeek-V4-Pro/<arm>/` (25 GB, `/workspace` has 512 GB
   free).
 - **Logs, traces, scratch: `/shared_nfs/kk/`** (`logs/`, `traces/`, `tmp/`) —
   xfs, 53 TB, survives an image swap. `/sgl-workspace` does NOT.

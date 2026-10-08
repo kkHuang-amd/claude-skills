@@ -32,15 +32,15 @@ Table: results/agentx.md. GSM8K ~0.90 (0.901-0.908, CONC=32 eval server).
 
 ## History (closed)
 
-Details: /shared_nfs/kk/dsv41/doc_backup_20260929/SKILL.md (CONTINUE HERE history), NOTES.md.
+Details: /shared_nfs/kk/results/DeepSeek-V4.1-Flash/doc_backup_20260929/SKILL.md (CONTINUE HERE history), NOTES.md.
 - 09-29 TP2 best config faults deterministically at prefill graph capture (4096) on a 2nd node: engram `_HostTable`
   cudaHostRegister's an mmap but engram_gather got the HOST VA; on ROCm dev VA != host VA on some nodes. Fix: use
   hipHostGetDevicePointer (patches/sglang_local_engram_host_devptr_0001.patch), GSM8K 0.901. The 09-24 TP2
-  "MoE" fault was very likely the same bug. Report: /shared_nfs/kk/dsv41/atomport/verify_env/report_crsuse2-m2m-176.md.
+  "MoE" fault was very likely the same bug. Report: /shared_nfs/kk/results/DeepSeek-V4.1-Flash/atomport/verify_env/report_crsuse2-m2m-176.md.
 - 09-24 fresh-container TP4 repro (opus-prefill 048ffae315): PERF=1 c1/c8/c32 145/927/2344 tok/s, DSpark on (SIM_AL=3.51)
   366/1679/3333. Never bench two servers at once (inflated TTFT, c8 -11% tok/s).
 - 09-24 aiter -> v0.1.22.post1 (b4d9154d1) + #5561 + local edits (#5802 dropped); TP4 GSM8K 0.907, 145/924/2350 tok/s.
-  Old state: /sgl-workspace/aiter_jit_backup_acf8fdf93, stash@{0}, /shared_nfs/kk/dsv41/aiter_pre_upgrade_full.diff.
+  Old state: /sgl-workspace/aiter_jit_backup_acf8fdf93, stash@{0}, /shared_nfs/kk/results/DeepSeek-V4.1-Flash/aiter_pre_upgrade_full.diff.
 - TP2 aiter MoE graph-capture fault (old container) did not reproduce in the fresh one (NOTES "AgentX TP2 bring-up").
 - 09-25 c16/c64 "Write access to a read-only page" faults = int32 KV-store `loc` overflow; fixed by upstream #41159
   (patches/sglang_local_kvstore_int64_0001.patch).
@@ -48,7 +48,7 @@ Details: /shared_nfs/kk/dsv41/doc_backup_20260929/SKILL.md (CONTINUE HERE histor
 - 09-26 colleague recipe reproduced: c16 PDI16 45,804.7/112.5 (colleague 45,518.84/110.02), c64 PDI4 99,666.6/33.6
   (96,837.78/32.15); OPUS +2.0%/+4.6% TTT. Old TP2 gap was the recipe (engram per_rank huge pages etc.).
 - 09-26 rolao all-opts (2b875bd95a) sweep, c1 9,818.6/267.5 .. c64 PDI4 111,506.4/38.0, GSM8K 0.893 (results/agentx.md).
-- OPUS share patches: patches/sglang_share_opus_prefill_000{1,2}.patch (+ /shared_nfs/kk/dsv41/share/), `git am` clean on e2e824dc58 and pr/41021.
+- OPUS share patches: patches/sglang_share_opus_prefill_000{1,2}.patch (+ /shared_nfs/kk/results/DeepSeek-V4.1-Flash/share/), `git am` clean on e2e824dc58 and pr/41021.
 
 ## Folder rules (MUST follow -- keep this dir tidy)
 
@@ -72,7 +72,7 @@ dsv41/
   results/         small curated tables (*.md), one per benchmark type; a row per run, never raw logs.
 ```
 
-- Raw logs, traces, dumps, JSONL -> `/shared_nfs/kk/dsv41/`, never here. Result rows link to them.
+- Raw logs, traces, dumps, JSONL -> `/shared_nfs/kk/results/DeepSeek-V4.1-Flash/`, never here. Result rows link to them.
 - New script: in `scripts/`, header = purpose + env knobs + output location. Prefer a knob over a near-duplicate.
 - Scripts resolve paths relative to themselves (`$(dirname "$0")/..`); use `grep -E`, NOT `rg` (agent shell only).
 - No other subfolders without updating this section first. Update CONTINUE HERE whenever status changes.
@@ -83,7 +83,7 @@ dsv41/
   idempotent ATOM-port best-config env (sglang rolao worktree, aiter-5750 + patch + tuned CSV, flydsl 0.3.4.1).
 - `agentx_colleague_run.sh` **current** AgentX launcher (shim for `agentx_colleague_mi355x_sglang.sh`); knobs `TAG CONC OPUS
   TP EP_SIZE GPUS PREFILL_DECODE_INTERVAL CHUNKED_PREFILL_SIZE MEM_FRACTION_STATIC REPLAY SRC EXTRA_ARGS SERVER_ONLY EVAL_ONLY`;
-  out /shared_nfs/kk/dsv41/agentx/<TAG>/. Defaults = best config (2026-10-05): SRC /sgl-workspace/sglang, REPLAY=1,
+  out /shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx/<TAG>/. Defaults = best config (2026-10-05): SRC /sgl-workspace/sglang, REPLAY=1,
   OPUS sparse prefill, `--fp8-gemm-backend aiter --enforce-shared-experts-fusion`, per-CONC PDI/chunk/mem
   (c<16 16/16384/0.70, c16 16/16384/0.80, c32 4/16384/0.80, c>=64 4/4096/0.85). Only CONC/TP/GPUS/PORT/TAG are needed:
   `TP=2 GPUS=0,1 CONC=64 TAG=x bash scripts/agentx_colleague_run.sh`. Max 2 servers per node at once (REL_REGRESS_1005.md).
@@ -123,7 +123,7 @@ Known PR issues: intermittent RCCL graph-capture abort; AITER tolerances unvalid
 - Weights 510 GB (experts 296 + ENGRAM 203). TP2 needs `SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE=1`; use engram `per_rank`
   (`shared` = 0% huge pages, ~10x slower lookups).
 - `AITER_BF16_FP8_MOE_BOUND=0` (missing in cookbook), else `Unsupported kernel config for moe heuristic dispatch`.
-- aiter #5561 (LDS-DMA race; GSM8K 0.885 -> 0.905) required. Local aiter edits: /shared_nfs/kk/dsv41/aiter_preexisting_local.diff.
+- aiter #5561 (LDS-DMA race; GSM8K 0.885 -> 0.905) required. Local aiter edits: /shared_nfs/kk/results/DeepSeek-V4.1-Flash/aiter_preexisting_local.diff.
 - aiter merges `aiter/configs/model_configs/*tuned_fmoe*.csv` of the IMPORTED aiter; restart the server after changes.
 - AgentX lib: `install_agentic_deps` rm -rf's the shared venv (set AIPERF_DEPS_READY=1; never parallel);
   `wait_for_amd_gpu_clean` checks ALL 8 GPUs.

@@ -17,7 +17,7 @@ c64 -> PDI 16 (P90-oriented; c128 and others unchanged = PDI 4 for CONC >= 32).
 **QUEUE DONE (2026-10-06 21:35 UTC, all 6 PASS 0 err; rows in results table):** DP2 + TP MoE + replay, fix tree,
 GPUs 0,1, one server at a time, `scripts/dp2tp_queue.sh` RUNS="32:32 64:4 64:16 64:32 128:4 128:16" (conc:PDI), tags
 `dp2tp_replay_c<C>_pdi<P>`, 105 min timeout per run. Progress + one RESULT line per run (TTT, P90, p50, TTFT, requests,
-crash count) in `/shared_nfs/kk/dsv41/agentx/dp2tp_queue.txt`; ends with "QUEUE DONE" (~7 h, ~20:45 UTC). Next session:
+crash count) in `/shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx/dp2tp_queue.txt`; ends with "QUEUE DONE" (~7 h, ~20:45 UTC). Next session:
 read that file, append rows to the results table below, compare c64 vs tp2r_c64 142,243.2 / 52.0. c128 has no TP2
 reference in results/agentx.md. Cleanup kills only port holders / sglang:: / aiperf / router in this container.
 **Script defaults (2026-10-06 21:40 +08, user request):** agentx_colleague_mi355x_sglang.sh detects the DP late-layer
@@ -179,7 +179,7 @@ User: focus on DP (DP2 attention + TP MoE, DP_MOE=tp), no DEP.**
   SGLANG_SHARED_EXPERT_TP1=0, SGLANG_DP_USE_GATHERV=0 (script now honors env overrides for all four).
   Repro (decode graph on, probes on); watch: `bash scripts/watch_crash_or_done.sh <tag>/server.log 'bonus out of|HSA_STATUS|Fatal Python' 4200`
   (exit 2 = crash, 0 = launcher finished, 1 = timeout):
-  `cd /shared_nfs/kk/dsv41/agentx && SGLANG_DSPARK_DEBUG_IDS=1 DP_ATTENTION=true DP_MOE=tp TP=2 CONC=32 GPUS=0,1 PORT=8888 TAG=<tag> setsid nohup bash /workspace/claude-skills/dsv41/scripts/agentx_colleague_run.sh > <tag>.nohup 2>&1 < /dev/null &`
+  `cd /shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx && SGLANG_DSPARK_DEBUG_IDS=1 DP_ATTENTION=true DP_MOE=tp TP=2 CONC=32 GPUS=0,1 PORT=8888 TAG=<tag> setsid nohup bash /workspace/claude-skills/dsv41/scripts/agentx_colleague_run.sh > <tag>.nohup 2>&1 < /dev/null &`
   Eager control: add `EXTRA_ARGS="--cuda-graph-backend-decode disabled"`.
   Pass criteria: decode graph ON, 3600 s, 0 errors, no "bonus out of"; then compare TTT/P90 with tp2r_c32.
 - **Local uncommitted SGLang changes** (/sgl-workspace/sglang, base affa261e3d):
@@ -193,7 +193,7 @@ User: focus on DP (DP2 attention + TP MoE, DP_MOE=tp), no DEP.**
   nan_to_num_ on the gathered buffer). Probe slots: 0+ layer entry, 80+ local pre-gather, 160+ moe_out (post-combine),
   240+ mlp_out own slice, 320+ shared_local, 400+ other-slice partial.
 - Problem 1 (bounded replay under DP) patched locally for the a2a (DEP) case only, untested on GPU.
-- Logs: /shared_nfs/kk/dsv41/agentx/failed_dep2_1005/dp2tp_* (crash repros), dp2tp_nograph2/ (eager, completed).
+- Logs: /shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx/failed_dep2_1005/dp2tp_* (crash repros), dp2tp_nograph2/ (eager, completed).
 **Only completed DP number:** dep2_c32 (DEP2 MegaMoE, option D, prefill graph off, no replay) 84,320.5 / 52.1 =
 -20.3% / -44.4% vs TP2 Replay tp2r_c32 (105,800.1 / 93.7), -28.5% / -65.2% vs vLLM B200 DEP2 c32 (117,908.2 / 149.5).
 
@@ -232,7 +232,7 @@ stream-interval 1, DSpark + SGLANG_RAGGED_VERIFY_MODE=static, vision_n_layers=0)
 **Repro (DP_MOE=megamoe default = DEP2; DP_MOE=tp = DP2 + TP MoE; SERVER_ONLY=1 keeps the server up; problem 3
 needs HIP_LAUNCH_BLOCKING=1 added):**
 ```bash
-cd /shared_nfs/kk/dsv41/agentx && DP_ATTENTION=true DP_MOE=tp TP=2 CONC=32 GPUS=0,1 PORT=8888 TAG=dp2tp_dbg \
+cd /shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx && DP_ATTENTION=true DP_MOE=tp TP=2 CONC=32 GPUS=0,1 PORT=8888 TAG=dp2tp_dbg \
   setsid nohup bash /workspace/claude-skills/dsv41/scripts/agentx_colleague_run.sh > dp2tp_dbg.nohup 2>&1 < /dev/null &
 ```
 Pass criteria for a DP arm: completes 3600 s with 0 errors, then TTT / P90 vs tp2r_c32 and vLLM DEP2 c32.
@@ -275,12 +275,12 @@ Pass criteria for a DP arm: completes 3600 s with 0 errors, then TTT / P90 vs tp
 
 - **17:00 cleanup + perf rerun + aiter repro (mi355-4):**
   - Debug probes removed; clean diff = 7 files / 70 lines, saved `dsv41/patches/dp2tp_fix_clean_1006.patch`
-    (full debug diff kept at /shared_nfs/kk/dsv41/patches/dp2tp_debug_full_1006.patch). `SGLANG_AITER_CAPTURE_COPY_IN`
+    (full debug diff kept at /shared_nfs/kk/results/DeepSeek-V4.1-Flash/patches/dp2tp_debug_full_1006.patch). `SGLANG_AITER_CAPTURE_COPY_IN`
     now defaults to 1. Clean perf run `TAG=dp2tp_fix_c32` PASSED: 96,931 / 70.7 (results row).
   - AR was never on the registered path: the copy-in run logs ZERO "Registering N cuda graph addresses", the crashing
     run 3200 (target) + 120 (draft) per rank -> all registrations came from AG + RS. Slots advance per flush
     (`d_rank_data_base_ += n`), so sessions do not overwrite each other.
-  - Repro `/shared_nfs/kk/dsv41/aiter_repro/repro_ag_rs_graph.py` (2 GPUs, buckets 6/12/24/48 in one pool, input made
+  - Repro `/shared_nfs/kk/results/DeepSeek-V4.1-Flash/aiter_repro/repro_ag_rs_graph.py` (2 GPUs, buckets 6/12/24/48 in one pool, input made
     in-graph, AG reg -> RS reg, junk 3e38 scratch, random replay order, device-side check): **50k replays, 0 errors**
     -> not reproduced yet. `--mismatch` (rank1 eager/unreg while rank0 replays reg) HANGS instead of corrupting, so
     "one rank graph, other eager" is not the SGLang mechanism (SGLang never hung).

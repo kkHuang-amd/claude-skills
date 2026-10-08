@@ -164,7 +164,7 @@ not full. Ignore it for full-verify stats.
 
 ## 7. Scheduler-log numbers (complete run, not the trace run)
 
-`mi355x:/workspace/results/megamoe-eplb-c128-b200aligned/server.log`:
+`mi355x:/shared_nfs/kk/results/DeepSeek-V4-Pro/megamoe-eplb-c128-b200aligned/server.log`:
 
 ```
 running-req/rank   p50=12.00  mean=12.30  p90=17.00

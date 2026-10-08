@@ -10,7 +10,7 @@
 # Bracketed grep patterns only -- a bare `pkill -f aiperf` matches the caller's
 # own command line and has already killed a cleanup shell on this node once.
 set -u
-LOG="${1:-/workspace/results/dptbo-c128/run.log}"
+LOG="${1:-/shared_nfs/kk/results/DeepSeek-V4-Pro/dptbo-c128/run.log}"
 MARK="$(dirname "$LOG")/CLEANUP_DONE.txt"
 
 for _ in $(seq 1 720); do   # up to 6 h at 30 s

@@ -118,6 +118,11 @@ answer the question. Most exploration should stop at 2 or 3.
     action / files+functions / one copy-paste repro command / pass criteria.
   - When this thread gets large, I will start a fresh chat pointing at the doc.
     The doc is the source of truth; the chat is scratch.
+  - Benchmark / profile / accuracy results go under
+        /shared_nfs/kk/results/<model>/<run-tag>/
+    where <model> is the checkpoint directory name (e.g. DeepSeek-V4.1-Flash,
+    DeepSeek-V4-Pro). Never write to /workspace/results (retired 2026-10-08,
+    its runs moved there). Docs cite results by that full path.
 
 ### Multiple nodes edit the skills repo -- avoid split state
 

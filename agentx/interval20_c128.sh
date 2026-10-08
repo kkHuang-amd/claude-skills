@@ -28,7 +28,7 @@
 set -u
 
 HERE=/workspace/claude-skills/agentx
-RESULT_DIR=/workspace/results/interval20-c128
+RESULT_DIR=/shared_nfs/kk/results/DeepSeek-V4-Pro/interval20-c128
 mkdir -p "$RESULT_DIR"
 
 # Shared node. This script REFUSES rather than kills: a blind kill preamble

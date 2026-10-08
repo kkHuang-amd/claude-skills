@@ -216,7 +216,7 @@ needs one replicate.** The node was restarted since the notes below: `/tmp` is
 EMPTY (topk_v2 patch, all three launcher backups, `acc_driver.sh`, the gsm8k
 logs, the `/tmp/*_ref` dirs and the JIT caches are all gone) and the tree is now
 HEAD `cdbfe90b4a` (sglang main, `0.5.18.dev20260829`), NOT `a1f9508dd4`.
-`/workspace/results/*` and `/workspace/claude-skills/agentx/*` survived.
+`/shared_nfs/kk/results/DeepSeek-V4-Pro/*` and `/workspace/claude-skills/agentx/*` survived.
 The tree also carries someone else's uncommitted work (pyproject edits +
 untracked `*.hip` kernels) -- do not revert or stash it without asking.
 
@@ -493,7 +493,7 @@ so the two arms differ by more than "fused or not".
 **To restore the pre-topkv2 tree:** `git apply -R /tmp/topkv2_36684.patch`, then
 swap `~/.cache/sglang/jit` back with `jit.pre36684`.
 
-Seven arms on disk in `/workspace/results/overnight/`. Read the summary table with
+Seven arms on disk in `/shared_nfs/kk/results/DeepSeek-V4-Pro/overnight/`. Read the summary table with
 `python3 /workspace/claude-skills/agentx/summary_table.py`; compare any two arms
 with `arm_report.py <arm> <baseline>`.
 
@@ -545,7 +545,7 @@ without a checkpoint that stores the shared expert in FP4 -- say so rather than
 fudge the criterion.
 
 **Arm matrix** (harness: `gsm8k_arm.sh <ref_dir> <label>`, results appended to
-`/workspace/results/accuracy/STATUS.txt`, full logs `/tmp/gsm8k_<label>.log`;
+`/shared_nfs/kk/results/DeepSeek-V4-Pro/accuracy/STATUS.txt`, full logs `/tmp/gsm8k_<label>.log`;
 driver `/tmp/acc_driver.sh` runs them back-to-back and restores the tree):
 
 | # | arm | ref dir | answers |
@@ -643,7 +643,7 @@ reproduces 18,518.0 / ITL p90 50.03 / intvty p90 19.99 for
 
 ```bash
 ps -eo pid,etime,args | grep -E "[o]vernight_matrix.sh" | cut -c1-95
-tail -20 /workspace/results/overnight/STATUS.txt
+tail -20 /shared_nfs/kk/results/DeepSeek-V4-Pro/overnight/STATUS.txt
 ```
 
 - **process alive** -> do nothing, go to monitoring. Do **not** start a second one.
@@ -652,13 +652,13 @@ tail -20 /workspace/results/overnight/STATUS.txt
   automatically:
 
 ```bash
-mkdir -p /workspace/results/overnight
+mkdir -p /shared_nfs/kk/results/DeepSeek-V4-Pro/overnight
 setsid nohup bash /workspace/claude-skills/agentx/overnight_matrix.sh \
-  < /dev/null > /workspace/results/overnight/driver.log 2>&1 &
+  < /dev/null > /shared_nfs/kk/results/DeepSeek-V4-Pro/overnight/driver.log 2>&1 &
 ```
 
 **Monitor, don't poll** — one watch on the status file is enough
-(`tail -n 0 -F /workspace/results/overnight/STATUS.txt`). Each arm takes ~110 min
+(`tail -n 0 -F /shared_nfs/kk/results/DeepSeek-V4-Pro/overnight/STATUS.txt`). Each arm takes ~110 min
 and logs START / DONE-with-tok-s / FAILED. To judge a running arm's health, read
 its `benchmark.log` `Phase warmup progress` series against reference arm
 `tbo-tp8-c64/benchmark.log` (52 / 94 / 262 / 701 at 300/600/900/1200 s).
@@ -1631,7 +1631,7 @@ and was never launched.** It runs the c128 pair only, with the aiperf fix and th
 
 ```bash
 setsid nohup bash /workspace/claude-skills/agentx/overnight_matrix2.sh \
-  < /dev/null > /workspace/results/overnight/driver2.log 2>&1 &
+  < /dev/null > /shared_nfs/kk/results/DeepSeek-V4-Pro/overnight/driver2.log 2>&1 &
 ```
 
 **Doing nothing is a sound fallback and the night still lands its remaining
@@ -1725,7 +1725,7 @@ a **separate worktree on current main** (see Next actions).
 
 ### The one number that matters: b200align is +6.2 % over DP8+TBO at full length
 
-**b200align c64, 3600 s, valid** (`/workspace/results/b200align-tp8-c64-3600s/`):
+**b200align c64, 3600 s, valid** (`/shared_nfs/kk/results/DeepSeek-V4-Pro/b200align-tp8-c64-3600s/`):
 
 | | TP8 c64 | DP8+TBO c64 | **b200align** |
 |---|---|---|---|
@@ -2087,7 +2087,7 @@ by its **exact** `RESULT_FILENAME`, never `ls "$D"/*.json`.
 
 ```bash
 # 1200 s b200align (current working config)
-EP_SIZE=1 CONC=64 DURATION=1200 RESULT_DIR=/workspace/results/<name> \
+EP_SIZE=1 CONC=64 DURATION=1200 RESULT_DIR=/shared_nfs/kk/results/DeepSeek-V4-Pro/<name> \
   bash /workspace/claude-skills/agentx/agentx_b200align.sh
 ```
 Launch it under `setsid nohup ... < /dev/null &` — a session kill took down the
@@ -2145,7 +2145,7 @@ Long runs should point at a frozen copy (`.ladder_frozen.sh`,
 
 **External state:** `/workspace/InferenceX` @ `8fcfc6283` (+launchers under
 `benchmarks/single_node/agentic/`, NOT version-controlled),
-`/workspace/agentx-runtime/venv`, `/shared_nfs/hf_cache`, `/workspace/results/*`
+`/workspace/agentx-runtime/venv`, `/shared_nfs/hf_cache`, `/shared_nfs/kk/results/DeepSeek-V4-Pro/*`
 (all completed runs incl. `armB-tp8-c48` and `ladder/`, with Prometheus
 exports).
 
@@ -2248,7 +2248,7 @@ export IS_AGENTIC=1
 export KV_OFFLOADING="none" TOTAL_CPU_DRAM_GB=0
 export DURATION=3600
 export PORT=8888
-export RESULT_DIR="/workspace/results/dsv4-tp8-c32"
+export RESULT_DIR="/shared_nfs/kk/results/DeepSeek-V4-Pro/dsv4-tp8-c32"
 export RESULT_FILENAME="dsv4_fp4_sglang_tp8-pp1-dcp1-pcp1-ep1-dpafalse_disagg-false_spec-mtp_agentic_c32"
 export AGENTIC_OUTPUT_DIR="$RESULT_DIR"
 mkdir -p "$RESULT_DIR"
@@ -2261,7 +2261,7 @@ bash benchmarks/single_node/agentic/dsv4_fp4_mi355x_sglang_mtp.sh
 |---|---|
 | `cd /workspace` then `bash benchmarks/...` | only correct if the **repo itself** is at `/workspace`; otherwise `cd` into the repo and set `INFMAX_CONTAINER_WORKSPACE` |
 | `MODEL_PATH=/models/DeepSeek-V4-Pro` | does not exist here; weights are `/shared_nfs/models/DeepSeek-V4-Pro` (symlink to `/shared_nfs/huggingface_models/deepseek-ai/DeepSeek-V4-Pro`). If the path is missing **or empty** the script silently starts an 805 GiB `hf download` into it |
-| `RESULT_DIR=/workspace/results` | fine, but `RESULT_FILENAME` is **also** required — `write_agentic_result_json` writes `$AGENTIC_OUTPUT_DIR/$RESULT_FILENAME.json` and produces `.json` (a dotfile) when unset. It is set by the CI runners, not by the launcher |
+| `RESULT_DIR=/shared_nfs/kk/results/DeepSeek-V4-Pro` | fine, but `RESULT_FILENAME` is **also** required — `write_agentic_result_json` writes `$AGENTIC_OUTPUT_DIR/$RESULT_FILENAME.json` and produces `.json` (a dotfile) when unset. It is set by the CI runners, not by the launcher |
 | — | `AGENTIC_OUTPUT_DIR` defaults to `$INFMAX_CONTAINER_WORKSPACE`, i.e. the aggregate lands in the repo root. Point it at `$RESULT_DIR` |
 | `DURATION=3600` | the scenario enforces a **900 s minimum**; below that the launcher adds `--unsafe-override` and flags `submission_valid=false` |
 
@@ -2374,9 +2374,9 @@ and the aggregate JSON. Most "why is this number strange" questions are
 answerable at zero GPU cost — the §15 cache-tier finding below was.
 
 ```bash
-agentx_debug.sh serve  /workspace/results/armB-tp8-c64      # once, ~25 min
-agentx_debug.sh probe  /workspace/results/armB-tp8-c64 /tmp/p1 300 1   # ~5 min
-agentx_debug.sh probe  /workspace/results/armB-tp8-c64 /tmp/p2 300 1   # ~5 min
+agentx_debug.sh serve  /shared_nfs/kk/results/DeepSeek-V4-Pro/armB-tp8-c64      # once, ~25 min
+agentx_debug.sh probe  /shared_nfs/kk/results/DeepSeek-V4-Pro/armB-tp8-c64 /tmp/p1 300 1   # ~5 min
+agentx_debug.sh probe  /shared_nfs/kk/results/DeepSeek-V4-Pro/armB-tp8-c64 /tmp/p2 300 1   # ~5 min
 agentx_debug.sh status
 agentx_debug.sh stop
 ```

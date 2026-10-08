@@ -36,12 +36,12 @@ TTFT failed, and the optimum is between 10 and 20.
 
 `cp interval20_c128.sh interval15_c128.sh`, change two things only —
 `EXTRA_SERVER_ARGS="--prefill-decode-interval 15"` and
-`RESULT_DIR=/workspace/results/interval15-c128` — then
+`RESULT_DIR=/shared_nfs/kk/results/DeepSeek-V4-Pro/interval15-c128` — then
 
 ```bash
-mkdir -p /workspace/results/interval15-c128
+mkdir -p /shared_nfs/kk/results/DeepSeek-V4-Pro/interval15-c128
 nohup bash /workspace/claude-skills/agentx/interval15_c128.sh \
-  > /workspace/results/interval15-c128/run.log 2>&1 &
+  > /shared_nfs/kk/results/DeepSeek-V4-Pro/interval15-c128/run.log 2>&1 &
 ```
 
 ~92 min wall clock (3 min server start, ~28 min aiperf dataset config + warmup,

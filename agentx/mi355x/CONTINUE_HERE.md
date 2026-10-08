@@ -1041,8 +1041,8 @@ Recompute/verify with:
 
 ```bash
 python3 /workspace/claude-skills/agentx/analysis/decode_stats.py \
-  /workspace/results/megamoe-eplb-c128-b200aligned/server.log \
-  /workspace/results/megamoe-eplb-c256-b200aligned/server.log > /shared_nfs/kk/ref_stats_20260918.txt
+  /shared_nfs/kk/results/DeepSeek-V4-Pro/megamoe-eplb-c128-b200aligned/server.log \
+  /shared_nfs/kk/results/DeepSeek-V4-Pro/megamoe-eplb-c256-b200aligned/server.log > /shared_nfs/kk/ref_stats_20260918.txt
 python3 /shared_nfs/kk/matched_bs.py /shared_nfs/kk/ref_stats_20260918.txt /shared_nfs/kk/chain_summary.md \
   'c128-rep2=c128-b200aligned/,c128-hcasplit4-rep2/'
 ```
@@ -1271,7 +1271,7 @@ the old behaviour with no code edit.
 
 **Node state during the run (kept for reuse):** launched 15:11 UTC+8, PID
 1203690, launch log `/shared_nfs/kk/hcasplit4_c128.log`, results
-`/workspace/results/megamoe-eplb-c128-hcasplit4/`, `DURATION=3600`.
+`/shared_nfs/kk/results/DeepSeek-V4-Pro/megamoe-eplb-c128-hcasplit4/`, `DURATION=3600`.
 
 **The change:** `_kv_splits_for_stream(compress_ratio)` in `paged_decode.py`,
 threaded through `runtime.decode(kv_splits=...)` from the one call site that
@@ -1518,9 +1518,9 @@ nor any kernel work should proceed.
 
 ```bash
 cd /workspace/claude-skills/agentx
-python3 analysis/decode_stats.py /workspace/results/megamoe-eplb-c128-fakekvlen/server.log
-python3 arm_report.py /workspace/results/megamoe-eplb-c128-b200aligned \
-                      /workspace/results/megamoe-eplb-c128-fakekvlen
+python3 analysis/decode_stats.py /shared_nfs/kk/results/DeepSeek-V4-Pro/megamoe-eplb-c128-fakekvlen/server.log
+python3 arm_report.py /shared_nfs/kk/results/DeepSeek-V4-Pro/megamoe-eplb-c128-b200aligned \
+                      /shared_nfs/kk/results/DeepSeek-V4-Pro/megamoe-eplb-c128-fakekvlen
 ```
 
 ### After it finishes, in this order
@@ -1619,10 +1619,10 @@ first two is the **measured** achievable win per call.
 cd /workspace/claude-skills/agentx
 python3 analysis/mla_counterfactual.py /shared_nfs/kk/pr35619/trace_c128_pdi24_steady
 python3 analysis/copy_attrib.py        /shared_nfs/kk/pr35619/trace_c128_pdi24_steady
-python3 analysis/kv_skew.py     /workspace/results/megamoe-eplb-c128-b200aligned-totaltokens/server.log
-python3 analysis/decode_stats.py /workspace/results/megamoe-eplb-c128-b200aligned-totaltokens/server.log
-python3 arm_report.py /workspace/results/megamoe-eplb-c128-b200aligned \
-                      /workspace/results/megamoe-eplb-c128-b200aligned-totaltokens
+python3 analysis/kv_skew.py     /shared_nfs/kk/results/DeepSeek-V4-Pro/megamoe-eplb-c128-b200aligned-totaltokens/server.log
+python3 analysis/decode_stats.py /shared_nfs/kk/results/DeepSeek-V4-Pro/megamoe-eplb-c128-b200aligned-totaltokens/server.log
+python3 arm_report.py /shared_nfs/kk/results/DeepSeek-V4-Pro/megamoe-eplb-c128-b200aligned \
+                      /shared_nfs/kk/results/DeepSeek-V4-Pro/megamoe-eplb-c128-b200aligned-totaltokens
 HIP_VISIBLE_DEVICES=0 python3 analysis/mla_microbench.py --quick   # needs 1 GPU
 ```
 
@@ -1823,8 +1823,8 @@ arm, and diff it too.**
 nohup bash /shared_nfs/kk/pr35619/agentx_c128_totaltokens.sh \
       > /shared_nfs/kk/pr35619/tt_arm.log 2>&1 &
 sleep 90 && python3 /workspace/claude-skills/agentx/analysis/cmd_diff.py \
-  /workspace/results/megamoe-eplb-c128-b200aligned \
-  /workspace/results/megamoe-eplb-c128-b200aligned-totaltokens \
+  /shared_nfs/kk/results/DeepSeek-V4-Pro/megamoe-eplb-c128-b200aligned \
+  /shared_nfs/kk/results/DeepSeek-V4-Pro/megamoe-eplb-c128-b200aligned-totaltokens \
   --expect load-balance-method
 ```
 Only `--load-balance-method` differs from the reference. "16G + probe off" has
@@ -1942,8 +1942,8 @@ launcher line 241, so the default is unchanged for every other arm.
 nohup bash /shared_nfs/kk/pr35619/agentx_c128_totaltokens.sh \
       > /shared_nfs/kk/pr35619/tt_arm.log 2>&1 &
 sleep 90 && python3 /workspace/claude-skills/agentx/analysis/cmd_diff.py \
-  /workspace/results/megamoe-eplb-c128-b200aligned \
-  /workspace/results/megamoe-eplb-c128-b200aligned-totaltokens \
+  /shared_nfs/kk/results/DeepSeek-V4-Pro/megamoe-eplb-c128-b200aligned \
+  /shared_nfs/kk/results/DeepSeek-V4-Pro/megamoe-eplb-c128-b200aligned-totaltokens \
   --expect load-balance-method
 ```
 
@@ -2248,7 +2248,7 @@ python3 analysis/trace_summary.py /shared_nfs/kk/pr35619/trace_c128_pdi24_steady
 python3 analysis/trace_ranks.py   /shared_nfs/kk/pr35619/trace_c128_pdi24_steady
 python3 analysis/kernel_dump.py   /shared_nfs/kk/pr35619/trace_c128_pdi24_steady
 python3 analysis/busy_ms.py       /shared_nfs/kk/pr35619/trace_c128_pdi24_steady 10
-python3 analysis/decode_stats.py  /workspace/results/megamoe-eplb-c128-b200aligned/server.log
+python3 analysis/decode_stats.py  /shared_nfs/kk/results/DeepSeek-V4-Pro/megamoe-eplb-c128-b200aligned/server.log
 ```
 
 **Earlier result, still standing:** full-model `TARGET_VERIFY` with no
@@ -2262,8 +2262,8 @@ a prefill. Ranks 2/4/5 have no verify in this window and 0 kernels during it.
 |---|---|
 | steady-state traces (use these) | `/shared_nfs/kk/pr35619/trace_c128_pdi24_steady/` |
 | mid-ramp traces (do not conclude from) | `/shared_nfs/kk/pr35619/trace_c128_pdi24/` |
-| trace run's server.log | `/workspace/results/megamoe-eplb-c128-b200aligned-trace/server.log` |
-| complete c128 run (agg metrics) | `/workspace/results/megamoe-eplb-c128-b200aligned/` |
+| trace run's server.log | `/shared_nfs/kk/results/DeepSeek-V4-Pro/megamoe-eplb-c128-b200aligned-trace/server.log` |
+| complete c128 run (agg metrics) | `/shared_nfs/kk/results/DeepSeek-V4-Pro/megamoe-eplb-c128-b200aligned/` |
 | capture orchestrator (reusable) | `/shared_nfs/kk/pr35619/trace_c128_pdi24.sh` |
 | idle-wait + launch (reusable) | `/shared_nfs/kk/pr35619/wait_and_launch_c256.sh` |
 | findings, pushed | `agentx/exchange/mi355x-decode-trace.md`, `agentx/exchange/FINDINGS.md` |

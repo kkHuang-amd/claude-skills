@@ -152,7 +152,7 @@ oor_hit() {   # $1 = result dir
 WINNER=""
 for MF in 0.90 0.87 0.85; do
     ARM="$ARM_BASE-mf${MF/./}"
-    RESULT_DIR=/workspace/results/$ARM
+    RESULT_DIR=/shared_nfs/kk/results/DeepSeek-V4-Pro/$ARM
     mkdir -p "$RESULT_DIR"
     export MEM_FRACTION_STATIC="$MF"
     export RESULT_DIR
@@ -252,7 +252,7 @@ echo "    a point on the fusion throughput curve; do NOT quote the % delta."
 python3 "$HERE/arm_report.py" "$WINNER" hicache-fp4-int20-c128-fuse-mf090
 
 CTX_BASE="hicache-fp4-c${CONC_TARGET}"
-if [ -d "/workspace/results/$CTX_BASE" ]; then
+if [ -d "/shared_nfs/kk/results/DeepSeek-V4-Pro/$CTX_BASE" ]; then
     echo "=== CONTEXT ONLY, TWO VARIABLES (fusion AND interval 10->20) ==="
     echo "    $CTX_BASE ran the launcher default interval 10. Findings sec 6:"
     echo "    interval and prefill demand are orthogonal, so a delta here is"
@@ -261,7 +261,7 @@ if [ -d "/workspace/results/$CTX_BASE" ]; then
 fi
 
 echo "=== P0 gate (still unproven on a real arm as of sec 18) ==="
-R=/workspace/results/$WINNER
+R=/shared_nfs/kk/results/DeepSeek-V4-Pro/$WINNER
 rg -o 'Preloaded unified_kv prefill index kernels for compress ratios [^ ]*' \
     "$R/server.log" 2>/dev/null | sort -u | head -3
 LATE=$(rg -c 'device-loaded after serving started' "$R/server.log" 2>/dev/null || echo 0)

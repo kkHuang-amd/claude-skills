@@ -12,7 +12,7 @@
 # own command line and has already killed a cleanup shell on this node once.
 set -u
 HERE=/workspace/claude-skills/agentx
-MARK=/workspace/results/AB_RECLAIM_C64_DONE.txt
+MARK=/shared_nfs/kk/results/DeepSeek-V4-Pro/AB_RECLAIM_C64_DONE.txt
 : >"$MARK"
 
 kill_leftovers() {
@@ -28,7 +28,7 @@ kill_leftovers() {
 for arm in fp4-dptbo-c64-reclaim1 fp4-dptbo-c64-reclaim0; do
     script="$HERE/${arm//-/_}.sh"
     test -x "$script" || { echo "FATAL: no $script" >>"$MARK"; exit 2; }
-    dir="/workspace/results/$arm"
+    dir="/shared_nfs/kk/results/DeepSeek-V4-Pro/$arm"
     mkdir -p "$dir"
     echo "$(date '+%F %T')  START $arm" >>"$MARK"
     cd /workspace/InferenceX || exit 2

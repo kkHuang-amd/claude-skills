@@ -71,7 +71,7 @@ run_arm() {
         export SGLANG_MLA_SEG_PLAN="$seg"
         export SGLANG_MLA_SEG_MAX=16
         export SGLANG_MLA_SEG_WG_MULT=4
-        export RESULT_DIR="/workspace/results/gsm8k-segplan-${label}"
+        export RESULT_DIR="/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/gsm8k-segplan-${label}"
         bash "$SKILL_DIR/agentx_c128_hcasplit.sh"
     ) > "$alog" 2>&1 &
     local wrapper=$!

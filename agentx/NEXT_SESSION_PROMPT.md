@@ -28,7 +28,7 @@ fusion 的三次探針（mem-fraction 0.90/0.85/0.80）全部在 VRAM 99% 撞牆
 mem-fraction 只延後不解決（見 SKILL.md「The real trap」與其後的階梯表）。
 這兩件事可能同源。
 
-素材（全在 /workspace/results/，/tmp 會被清空、不要放東西）：
+素材（全在 /shared_nfs/kk/results/DeepSeek-V4-Pro/，/tmp 會被清空、不要放東西）：
 - 各 arm 目錄：server.log（含啟動時 SGLANG_* env dump、max_total_num_tokens、
   available_gpu_mem）、sglang_command.txt、結果 json
 - 逐 10 秒 VRAM 曲線：probe-fusion-mf085/ probe-fusion-mf080/

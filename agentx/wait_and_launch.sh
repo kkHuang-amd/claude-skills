@@ -13,7 +13,7 @@ set -u
 CONC=${1:?usage: wait_and_launch.sh <conc>}
 HERE=/workspace/claude-skills/agentx
 SCRIPT=$HERE/fp4_dptbo_c${CONC}.sh
-DIR=/workspace/results/fp4-dptbo-c${CONC}
+DIR=/shared_nfs/kk/results/DeepSeek-V4-Pro/fp4-dptbo-c${CONC}
 MARK=$DIR/WAITER.txt
 
 test -x "$SCRIPT" || { echo "FATAL: no $SCRIPT"; exit 2; }

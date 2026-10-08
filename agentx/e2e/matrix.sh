@@ -7,7 +7,7 @@
 #
 # usage: TAG=<label> [POINTS="c1 c4 c16 c256"] [POINT_SET=ci36401947630 | POINTS_DIR=<dir>]
 #        [SKIP_SMOKE=1] bash matrix.sh
-#   results: /workspace/results/e2e-<point>-<TAG>/, log: .../e2e-matrix-<TAG>.status
+#   results: /shared_nfs/kk/results/DeepSeek-V4-Pro-0813/e2e-<point>-<TAG>/, log: .../e2e-matrix-<TAG>.status
 # Inherits PYTHONPATH/SGL_DIR from the caller (which sglang is under test).
 #
 # The scripts and the point set are snapshotted to $BASE/e2e-matrix-<TAG>.code/
@@ -16,7 +16,7 @@
 set -uo pipefail
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${TAG:?set TAG}"
-BASE=${RESULTS_BASE:-/workspace/results}
+BASE=${RESULTS_BASE:-/shared_nfs/kk/results/DeepSeek-V4-Pro-0813}
 if [ -z "${AGENTX_SNAPSHOT:-}" ]; then
   SNAP=$BASE/e2e-matrix-$TAG.code
   SRC_POINTS=${POINTS_DIR:-$SKILL_DIR/points/${POINT_SET:-ci36401947630}}

@@ -11,7 +11,7 @@ export INFMAX_CONTAINER_WORKSPACE="$INFX"
 export AIPERF_HTTP_X_SMG_ROUTING_KEY_FROM_CORRELATION_ID=true
 export AIPERF_HTTP_TCP_USER_TIMEOUT=1000000
 export AIPERF_DATASET_WEKA_LIVE_ASSISTANT_RESPONSES=0
-RESULT_DIR="${RESULT_DIR:-/workspace/results/runbook-agentx-c64-notbo}"
+RESULT_DIR="${RESULT_DIR:-/shared_nfs/kk/results/DeepSeek-V4-Pro/runbook-agentx-c64-notbo}"
 mkdir -p "$RESULT_DIR/aiperf_artifacts"
 
 PYTHONPATH="$INFX" "$AIPERF_RUNTIME_DIR/venv/bin/aiperf" profile \

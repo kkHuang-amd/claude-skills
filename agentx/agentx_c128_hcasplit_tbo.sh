@@ -35,5 +35,5 @@
 set -eo pipefail
 
 export EXTRA_SERVER_ARGS="${EXTRA_SERVER_ARGS:---enable-two-batch-overlap}"
-export RESULT_DIR="${RESULT_DIR:-/workspace/results/megamoe-eplb-c128-hcasplit4-tbo}"
+export RESULT_DIR="${RESULT_DIR:-/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/megamoe-eplb-c128-hcasplit4-tbo}"
 exec bash /workspace/claude-skills/agentx/agentx_c128_hcasplit.sh

@@ -21,7 +21,7 @@ MODEL_NAME=deepseek-ai/DeepSeek-V4-Pro
 CONC=64
 BACKEND_PORT=8889
 ROUTER_PORT=8888
-D=/workspace/results/ladder/rungB-router
+D=/shared_nfs/kk/results/DeepSeek-V4-Pro/ladder/rungB-router
 PIDFILE=/tmp/agentx_router.pids
 
 _assert_clean() {

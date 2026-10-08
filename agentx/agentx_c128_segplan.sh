@@ -44,5 +44,5 @@ set -eo pipefail
 export SGLANG_MLA_SEG_PLAN="${SGLANG_MLA_SEG_PLAN:-1}"
 export SGLANG_MLA_SEG_MAX="${SGLANG_MLA_SEG_MAX:-16}"
 export SGLANG_MLA_SEG_WG_MULT="${SGLANG_MLA_SEG_WG_MULT:-4}"
-export RESULT_DIR="${RESULT_DIR:-/workspace/results/megamoe-eplb-c128-segplan}"
+export RESULT_DIR="${RESULT_DIR:-/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/megamoe-eplb-c128-segplan}"
 exec bash /workspace/claude-skills/agentx/agentx_c128_hcasplit.sh

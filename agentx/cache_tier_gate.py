@@ -42,7 +42,7 @@ def theoretical(d):
 
 
 def check(arm):
-    d = arm if arm.startswith("/") else "/workspace/results/" + arm
+    d = arm if arm.startswith("/") else "/shared_nfs/kk/results/DeepSeek-V4-Pro/" + arm
     c = sorted(glob.glob(os.path.join(d, "dsv4_fp4_sglang_*_c*.json")))
     if not c:
         print("%-22s NO RESULT JSON" % arm)

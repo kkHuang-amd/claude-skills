@@ -42,7 +42,7 @@ export CHUNK_PER_RANK=16384
 export MORI_SHMEM_HEAP_SIZE=24G
 export MEM_FRACTION_STATIC=0.85
 
-export RESULT_DIR=/workspace/results/mori-mxfp8-ep8-c64-recvbound
+export RESULT_DIR=/shared_nfs/kk/results/DeepSeek-V4-Pro/mori-mxfp8-ep8-c64-recvbound
 export RESULT_FILENAME="dsv4_fp4_sglang_tp8-pp1-dcp1-pcp1-ep8-dpatrue_disagg-false_spec-mtp_agentic_c64"
 export AGENTIC_OUTPUT_DIR="$RESULT_DIR"
 

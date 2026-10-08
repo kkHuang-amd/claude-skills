@@ -8,7 +8,7 @@ Quote numbers from here or benchmark.log -- never from a monitor notification.
 """
 import json, sys, os, glob, re
 
-ROOTS = ['/workspace/results/overnight', '/workspace/results']
+ROOTS = ['/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/overnight', '/shared_nfs/kk/results/DeepSeek-V4-Pro-0813']
 
 def resolve(name):
     if os.path.isdir(name):

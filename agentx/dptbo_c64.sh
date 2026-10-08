@@ -26,7 +26,7 @@ export CHUNK_PER_RANK=16384
 # the previous node's DPA+TBO rows, which ran at 0.90.
 export MEM_FRACTION_STATIC=0.85
 
-export RESULT_DIR=/workspace/results/dptbo-c64
+export RESULT_DIR=/shared_nfs/kk/results/DeepSeek-V4-Pro/dptbo-c64
 export RESULT_FILENAME="dsv4_fp4_sglang_tp8-pp1-dcp1-pcp1-ep1-dpatrue_disagg-false_spec-mtp_agentic_c64"
 export AGENTIC_OUTPUT_DIR="$RESULT_DIR"
 

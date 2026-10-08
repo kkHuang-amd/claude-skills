@@ -150,7 +150,7 @@ oor_hit() {   # $1 = result dir
 WINNER=""
 for MF in 0.90 0.87 0.85; do
     ARM="$ARM_BASE-mf${MF/./}"
-    RESULT_DIR=/workspace/results/$ARM
+    RESULT_DIR=/shared_nfs/kk/results/DeepSeek-V4-Pro/$ARM
     mkdir -p "$RESULT_DIR"
     export MEM_FRACTION_STATIC="$MF"
     export RESULT_DIR
@@ -246,7 +246,7 @@ echo "=== SINGLE VARIABLE: fusion on vs off, same image, same tree ==="
 python3 "$HERE/arm_report.py" "$WINNER" hicache-fp4-int20-c128-postswap
 
 echo "=== P0 gate (still unproven on a real arm as of sec 18) ==="
-R=/workspace/results/$WINNER
+R=/shared_nfs/kk/results/DeepSeek-V4-Pro/$WINNER
 rg -o 'Preloaded unified_kv prefill index kernels for compress ratios [^ ]*' \
     "$R/server.log" 2>/dev/null | sort -u | head -3
 LATE=$(rg -c 'device-loaded after serving started' "$R/server.log" 2>/dev/null || echo 0)

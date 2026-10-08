@@ -38,7 +38,7 @@
 set -u
 
 HERE=/workspace/claude-skills/agentx
-RESULT_DIR=/workspace/results/hicache-fp4-c192
+RESULT_DIR=/shared_nfs/kk/results/DeepSeek-V4-Pro/hicache-fp4-c192
 mkdir -p "$RESULT_DIR"
 
 # Shared node. REFUSES rather than kills: a blind kill preamble destroyed

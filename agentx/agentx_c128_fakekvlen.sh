@@ -107,7 +107,7 @@ export SGLANG_MLA_KVLEN_STATS="${SGLANG_MLA_KVLEN_STATS:-0}"
 # Matches the reference arm. `total_tokens` is closed (see CONTINUE_HERE).
 export LOAD_BALANCE_METHOD="${LOAD_BALANCE_METHOD:-total_requests}"
 
-export RESULT_DIR="${RESULT_DIR:-/workspace/results/megamoe-eplb-c128-fakekvlen}"
+export RESULT_DIR="${RESULT_DIR:-/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/megamoe-eplb-c128-fakekvlen}"
 export RESULT_FILENAME="dsv4_fp4_sglang_tp${TP}-pp1-dcp1-pcp1-ep${EP_SIZE}-dpa${DP_ATTENTION}_disagg-false_spec-mtp_agentic_c${CONC}"
 export AGENTIC_OUTPUT_DIR="$RESULT_DIR"
 mkdir -p "$RESULT_DIR"

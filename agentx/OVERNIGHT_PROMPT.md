@@ -19,7 +19,7 @@ Paste this whole file as your first message in the new session.
 
 ```bash
 ps -eo pid,etime,args | grep -E "[o]vernight_matrix.sh" | cut -c1-95
-tail -20 /workspace/results/overnight/STATUS.txt
+tail -20 /shared_nfs/kk/results/DeepSeek-V4-Pro/overnight/STATUS.txt
 ```
 
 - 有 process → 什麼都別做，直接進監控。
@@ -30,7 +30,7 @@ tail -20 /workspace/results/overnight/STATUS.txt
 **2. 監控，但不要輪詢。** 用一個 Monitor 盯 `STATUS.txt` 的新行即可：
 
 ```bash
-tail -n 0 -F /workspace/results/overnight/STATUS.txt
+tail -n 0 -F /shared_nfs/kk/results/DeepSeek-V4-Pro/overnight/STATUS.txt
 ```
 
 每個 arm 約 110 分鐘。arm 進行中若要判斷健康，看該 arm 目錄下的
@@ -44,7 +44,7 @@ tail -n 0 -F /workspace/results/overnight/STATUS.txt
 
 | arm | 對照對象 |
 |---|---|
-| `c64-chunk16384` | 既有 `/workspace/results/b200align-tp8-c64-3600s`（18,518.0） |
+| `c64-chunk16384` | 既有 `/shared_nfs/kk/results/DeepSeek-V4-Pro/b200align-tp8-c64-3600s`（18,518.0） |
 | `c256-chunk8192-gd` | `c256-chunk8192`（唯一差別是 delayer guard） |
 | `c256-chunk16384` | `c256-chunk8192` |
 | `c128-chunk16384` | `c128-chunk8192` |

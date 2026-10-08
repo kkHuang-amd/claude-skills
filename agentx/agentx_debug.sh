@@ -13,9 +13,9 @@
 #   agentx_debug.sh stop
 #
 # Typical loop (server stays up across probes):
-#   agentx_debug.sh serve /workspace/results/armB-tp8-c64
-#   agentx_debug.sh probe /workspace/results/armB-tp8-c64 /tmp/p1 300 1
-#   agentx_debug.sh probe /workspace/results/armB-tp8-c64 /tmp/p2 300 1
+#   agentx_debug.sh serve /shared_nfs/kk/results/DeepSeek-V4-Pro/armB-tp8-c64
+#   agentx_debug.sh probe /shared_nfs/kk/results/DeepSeek-V4-Pro/armB-tp8-c64 /tmp/p1 300 1
+#   agentx_debug.sh probe /shared_nfs/kk/results/DeepSeek-V4-Pro/armB-tp8-c64 /tmp/p2 300 1
 #   agentx_debug.sh stop
 #
 # Probe numbers are for TRENDS AND BUGS ONLY. duration<900 makes AIPerf stamp
@@ -116,7 +116,7 @@ cmd_runs() {
     # Discover every run under RESULTS_ROOT and classify it, so a FRESH session
     # (which has none of the previous session's PIDs or background watchers)
     # can tell what finished, what died, and what is still going.
-    local root="${RESULTS_ROOT:-/workspace/results}"
+    local root="${RESULTS_ROOT:-/shared_nfs/kk/results/DeepSeek-V4-Pro}"
     printf '%-34s %-10s %-9s %s\n' DIR STATE AGE DETAIL
     for d in "$root"/*/; do
         [ -d "$d" ] || continue

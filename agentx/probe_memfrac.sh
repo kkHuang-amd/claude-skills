@@ -4,7 +4,7 @@
 # Both fusion failures so far happened inside warmup, so warmup is the gate.
 SK=/workspace/claude-skills/agentx
 probe(){
-  F=$1; NAME="probe-fusion-mf${F/./}"; DIR=/workspace/results/$NAME; LOG=/workspace/results/$NAME.log; SRV=$DIR/server.log
+  F=$1; NAME="probe-fusion-mf${F/./}"; DIR=/shared_nfs/kk/results/DeepSeek-V4-Pro/$NAME; LOG=/shared_nfs/kk/results/DeepSeek-V4-Pro/$NAME.log; SRV=$DIR/server.log
   bash $SK/wait_vram.sh >/dev/null || { echo "$F: VRAM never freed, aborting"; return 1; }
   mkdir -p $DIR
   setsid nohup bash $SK/vram_sampler.sh $DIR/vram.csv 10 >/dev/null 2>&1 &

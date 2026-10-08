@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Overnight 3600 s matrix. Sequential, resumable, unattended.
-# Start with:  setsid nohup bash /workspace/claude-skills/agentx/overnight_matrix.sh </dev/null >/workspace/results/overnight/driver.log 2>&1 &
+# Start with:  setsid nohup bash /workspace/claude-skills/agentx/overnight_matrix.sh </dev/null >/shared_nfs/kk/results/DeepSeek-V4-Pro/overnight/driver.log 2>&1 &
 # Arms are ordered so that every COMPLETED arm answers a question on its own.
 set -u
 SKILL_DIR=/workspace/claude-skills/agentx
-OUT=/workspace/results/overnight
+OUT=/shared_nfs/kk/results/DeepSeek-V4-Pro/overnight
 STATUS=$OUT/STATUS.txt
 mkdir -p $OUT
 RESFILE_TPL='dsv4_fp4_sglang_tp8-pp1-dcp1-pcp1-ep1-dpatrue_disagg-false_spec-mtp_agentic-b200align_c%s.json'

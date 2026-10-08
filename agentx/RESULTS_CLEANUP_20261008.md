@@ -1,0 +1,213 @@
+# /workspace/results cleanup (2026-10-08, crsuse2-m2m-255, requested by user)
+
+Kept: entries still referenced by skills docs (27, ~21 GiB), then moved to /shared_nfs/kk/results/<model>/ (DeepSeek-V4-Pro, DeepSeek-V4-Pro-0813) and the doc paths rewritten. Deleted: everything else (178 entries, ~73 GiB),
+including all 90 profiler traces (*.trace.json.gz, *.json.gz). All runs were DeepSeek-V4-Pro / V4-Pro-0813 (no DSV4.1).
+
+## Kept
+- RESULTS_OVERNIGHT.md
+- accuracy
+- armB-tp8-c48
+- armB-tp8-c64
+- b200align-tp8-c64-3600s
+- bisect_c4.driver.log
+- dsv4-c256-bf16kv-run2
+- dsv4-c512-fp8kv-chunk16k-pdi20
+- dsv4-c512-fp8kv-pdi10
+- e2e-c1-sglc73f
+- e2e-c1-sglc73f-049
+- e2e-matrix-head41cbe-049.status
+- e2e-matrix-sglc73f-049.driver.log
+- e2e-matrix-sglc73f-049.status
+- e2e-matrix-sglc73f.driver.log
+- e2e-matrix-sglc73f.status
+- e2e-smoke-c1b
+- ladder
+- megamoe-sweep-515f5b.STATUS.txt
+- megamoe-sweep-515f5b.driver.log
+- mori-c64-bf16fix
+- mori-c64-bound1
+- mori-c64-mxfp8
+- overnight
+- run_b1_c1_after_bisect.sh
+- run_c4_fix_then_head.sh
+- smoke-bcgfp8
+
+## Deleted (name, size)
+- .armB-failed-972192 684K
+- .tbo-c64-stale-343418 0
+- .tbo-failed-472887 266K
+- .tbo-stale-360473 65K
+- OVERNIGHT_20260830.log 1.5K
+- OVERNIGHT_20260830.txt 1.5K
+- SKILL.md.bak-preclose 123K
+- SKILL.md.bak-premori-doc 127K
+- VOID-c64-ep8-oom-20260830 54M
+- VOID-mori-c64-bound1-errno98-20260831 196K
+- VOID-mori-c64-bound1-errno98-20260831.chain.log 512
+- VOID-mori-c64-bound1-errno98-20260831.log 226K
+- armA-tp4-c10 368M
+- b200align-chattemplate-broken-0456 1.9M
+- b200align-noincr-0641 1.2M
+- b200align-oom-0424 1.1M
+- b200align-routerstream-0610 1.1M
+- b200align-topkv2-c64-1200s 151K
+- b200align-tp8-c64-1200s 1.7G
+- b200align-tp8-c64-aborted-0335 66K
+- b200align_mtp.sh.bak-premori 18K
+- c128-chunk16384-newmain 1.5G
+- c128-chunk16384-newmain.log 542K
+- c256_relaunch.log 512
+- c512_chain.log 512
+- c64-chunk16384-newmain 1.3G
+- c64-chunk16384-newmain-fusion 396M
+- c64-chunk16384-newmain-fusion.log 259K
+- c64-chunk16384-newmain-rep 1.3G
+- c64-chunk16384-newmain-rep.log 456K
+- c64-chunk16384-newmain.log 499K
+- c64-chunk16384-specv2-2x 3.0K
+- chain_bf16_to_fp8.log 512
+- ci_logs 1.1M
+- dsv4-c128-bf16kv-dp8-hicache 8.0M
+- dsv4-c256-bf16kv-dp8-hicache 5.2M
+- dsv4-c256-fp8kv-portclash-071635 481K
+- dsv4-c256-fp8kv-run1 2.0G
+- dsv4-c256-lbauto-dp8-hicache 2.1G
+- dsv4-c256-lbauto-dp8-hicache.log 0
+- dsv4-c512-fp8kv-chunk16k-full 11M
+- dsv4-c512-fp8kv-chunk16k-mf078 35M
+- dsv4-c512-fp8kv-chunk16k-mf078-full 2.9G
+- dsv4-c512-fp8kv-chunk16k-mf078-r1 20M
+- dsv4-c512-fp8kv-chunk16k-mf078-r2 21M
+- dsv4-c512-fp8kv-pdi10-nosplitk 2.8G
+- dsv4-c512-fp8kv-run1 2.7G
+- dsv4-fixed-128k1k-mi355x-c128-kvbf16 13K
+- dsv4-fixed-128k1k-mi355x-c128-kvfp8 13K
+- dsv4-fixed-128k1k-mi355x-c128-kvfp8-hicache 14K
+- dsv4-fixed-128k1k-mi355x-c128-kvfp8-hicache-0813 2.9M
+- dsv4-fixed-128k1k-mi355x-c128-kvfp8-hicache-PROFILE 290M
+- dsv4-fixed-128k1k-mi355x-c128-kvfp8-hicache-postaudit 2.3M
+- dsv4-fixed-128k1k-mi355x-c128-postaudit-PROFILE 195M
+- e2e-c1-fix41931-049 1.1G
+- e2e-c1-fix41931-049.driver.log 512
+- e2e-c1-fix41931-049.void-stopped 1.1M
+- e2e-c1-head41cbe-049 1.1G
+- e2e-c1-head41cbe-049.driver.log 512
+- e2e-c1-sglc73f-049-smoke 92M
+- e2e-c1-sglc73f-049-smoke.driver.log 512
+- e2e-c1-sglc73f-049.driver.log 512
+- e2e-c1-sglc73f-smoke 92M
+- e2e-c1-sglc73f-smoke.driver.log 512
+- e2e-c1-sglc73f.driver.log 512
+- e2e-c128dp-fix41931-049 1.7G
+- e2e-c128dp-fix41931-049.driver.log 512
+- e2e-c128ep8-fix41931-049 1.7G
+- e2e-c128ep8-fix41931-049.driver.log 512
+- e2e-c16-fix41931-049 1.3G
+- e2e-c16-fix41931-049-r2 1.3G
+- e2e-c16-fix41931-049-r2.driver.log 512
+- e2e-c16-fix41931-049.driver.log 512
+- e2e-c16-sglc73f 1.3G
+- e2e-c16-sglc73f-049 1.4G
+- e2e-c16-sglc73f-049.driver.log 512
+- e2e-c16-sglc73f.driver.log 512
+- e2e-c256-fix41931-049 2.4G
+- e2e-c256-fix41931-049.driver.log 512
+- e2e-c256-fix41931-049.void-015519 62M
+- e2e-c256-sglc73f 2.0G
+- e2e-c256-sglc73f.driver.log 512
+- e2e-c32-fix41931-049 1.6G
+- e2e-c32-fix41931-049-smoke 373M
+- e2e-c32-fix41931-049-smoke.driver.log 512
+- e2e-c32-fix41931-049.driver.log 512
+- e2e-c384-fix41931-049 2.3G
+- e2e-c384-fix41931-049.driver.log 512
+- e2e-c4-fix41931-049 1.1G
+- e2e-c4-fix41931-049-r2 1.1G
+- e2e-c4-fix41931-049-r2.driver.log 512
+- e2e-c4-fix41931-049.driver.log 512
+- e2e-c4-head41cbe-049 1.1G
+- e2e-c4-head41cbe-049.driver.log 512
+- e2e-c4-sglc73f 1.1G
+- e2e-c4-sglc73f-049 1.1G
+- e2e-c4-sglc73f-049-r2 1.1G
+- e2e-c4-sglc73f-049-r2.driver.log 512
+- e2e-c4-sglc73f-049.driver.log 512
+- e2e-c4-sglc73f.driver.log 512
+- e2e-c4-sglc73f.void-094208 782M
+- e2e-c48-fix41931-049 1.7G
+- e2e-c48-fix41931-049.driver.log 512
+- e2e-matrix-fix41931-049-all.driver.log 512
+- e2e-matrix-fix41931-049-c1.driver.log 512
+- e2e-matrix-fix41931-049-c256b.driver.log 512
+- e2e-matrix-fix41931-049-c4.driver.log 512
+- e2e-matrix-fix41931-049-r2.code 24K
+- e2e-matrix-fix41931-049-r2.driver.log 512
+- e2e-matrix-fix41931-049-r2.status 512
+- e2e-matrix-fix41931-049-rest1.driver.log 1.0K
+- e2e-matrix-fix41931-049-rest2.driver.log 512
+- e2e-matrix-fix41931-049.code 42K
+- e2e-matrix-fix41931-049.driver.log 512
+- e2e-matrix-fix41931-049.status 3.5K
+- e2e-matrix-head41cbe-049-c4.driver.log 512
+- e2e-matrix-head41cbe-049.code 24K
+- e2e-matrix-head41cbe-049.driver.log 512
+- e2e-matrix-sglc73f-049-c4c16.driver.log 512
+- e2e-matrix-sglc73f-049-r2.code 24K
+- e2e-matrix-sglc73f-049-r2.driver.log 512
+- e2e-matrix-sglc73f-049-r2.status 512
+- e2e-matrix-sglc73f-049.code 24K
+- e2e-smoke-c1 217K
+- fp8_chain.log 1.0K
+- megamoe-eplb-fp8kv-c128-main515f5b 1.8G
+- megamoe-eplb-fp8kv-c256-main515f5b 1.9G
+- megamoe-eplb-fp8kv-c256-pr35619 1.9G
+- megamoe-eplb-fp8kv-c256-pr35619.aborted-012356 175K
+- megamoe-eplb-fp8kv-c384-main515f5b 43M
+- megamoe-eplb-fp8kv-c384-pdi10-pr35619 2.3G
+- megamoe-eplb-fp8kv-c384-pdi15-pr35619 2.2G
+- megamoe-eplb-fp8kv-c384-pr35619 2.1G
+- megamoe-eplb-fp8kv-c512-pdi15-pr35619 2.4G
+- megamoe-eplb-fp8kv-c512-pr35619 2.5G
+- megamoe-tp8-c32 1.1G
+- megamoe-tp8-c32-eplb-085 889M
+- megamoe-tp8-c32-eplb-089 5.9M
+- megamoe-tp8-c32-heap16 1.1G
+- megamoe-tp8-c64-eplb 1.2G
+- mori-c64-bound1.chain.log 512
+- mori-c64-bound1.log 519K
+- mori-smoke-c64 1.5K
+- mori-smoke-c64.log 162K
+- mori-smoke2-c64 414M
+- mori-smoke2-c64.log 341K
+- pr_repro_eplb 1.4M
+- pr_repro_eplb_v2 1.4M
+- pr_repro_noeplb 1.4M
+- probe-fusion-expandable 372M
+- probe-fusion-expandable.log 261K
+- probe-fusion-mf080 332M
+- probe-fusion-mf080.log 260K
+- probe-fusion-mf085 344M
+- probe-fusion-mf085.log 258K
+- probe-fusion-vram.csv 3.0K
+- probe2-fusion-emptycache 357M
+- probe2-fusion-emptycache.log 258K
+- probe2-vram.csv 5.5K
+- queue_c4_rerun.log 512
+- queue_c4_rerun.sh 512
+- rebaseline-notopkv2-noguard-c64-1200s 626M
+- ref-nocudagraph 1.5K
+- refs 2.0K
+- run_bisect_v2_after_b1c1.sh 512
+- run_rest_points.log 0
+- smoke-tp8-c2 46M
+- splitk_pair_chain.log 1.0K
+- tbo-tp8-c64 1.3G
+- topkv2-delayerfix-c64-1200s 663M
+- topkv2-nodelayerfix-c64-1200s 608M
+- tracecap-dp-tbo 104M
+- tracecap-nograph 18M
+- tracecap-nospec 128M
+- tracecap-serve.log 512
+- tracecap-short 23M
+- tracecap2-serve.log 512
+- watch_c256.sh 1.0K

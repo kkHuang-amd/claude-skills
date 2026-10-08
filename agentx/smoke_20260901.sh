@@ -13,7 +13,7 @@ export TP=8 EP_SIZE=1 DP_ATTENTION="false"
 export CONC=32 DURATION=300 PORT=8888
 export IS_AGENTIC=1 KV_OFFLOADING="none" TOTAL_CPU_DRAM_GB=0
 export AIPERF_WARMUP_REQUESTS_PER_LANE=1
-export RESULT_DIR="/workspace/results/smoke-tp8-c32"
+export RESULT_DIR="/shared_nfs/kk/results/DeepSeek-V4-Pro/smoke-tp8-c32"
 export RESULT_FILENAME="dsv4_fp4_sglang_tp8-pp1-dcp1-pcp1-ep1-dpafalse_disagg-false_spec-mtp_agentic_c32"
 export AGENTIC_OUTPUT_DIR="$RESULT_DIR"
 

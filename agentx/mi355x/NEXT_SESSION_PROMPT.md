@@ -60,7 +60,7 @@ reuse — **verified**, `router.log` in the reference run carries `cache_aware`.
     `PREFILL_DECODE_INTERVAL=24`. Always confirm from the run's
     `sglang_command.txt`, never from script intent.
 - Reference arm to compare against:
-  `/workspace/results/megamoe-eplb-c128-b200aligned/` (complete c128 run, with
+  `/shared_nfs/kk/results/DeepSeek-V4-Pro/megamoe-eplb-c128-b200aligned/` (complete c128 run, with
   `server.log`, `router.log` and the agg json).
 - **Expect a TTFT regression.** This fights prefix reuse; it is an ITL↔TTFT
   trade of the same family as the pdi knob, not a free win. Report both, plus

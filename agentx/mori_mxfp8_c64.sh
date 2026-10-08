@@ -32,7 +32,7 @@ export MORI_SHMEM_HEAP_SIZE=24G
 # at c64 already OOR'd at 0.90 on the previous node with 388 MB to spare.
 export MEM_FRACTION_STATIC=0.85
 
-export RESULT_DIR=/workspace/results/mori-mxfp8-ep8-c64
+export RESULT_DIR=/shared_nfs/kk/results/DeepSeek-V4-Pro/mori-mxfp8-ep8-c64
 export RESULT_FILENAME="dsv4_fp4_sglang_tp8-pp1-dcp1-pcp1-ep8-dpatrue_disagg-false_spec-mtp_agentic_c64"
 export AGENTIC_OUTPUT_DIR="$RESULT_DIR"
 

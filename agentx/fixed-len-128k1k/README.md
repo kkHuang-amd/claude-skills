@@ -84,7 +84,7 @@ export MODEL_PATH="/shared_nfs/models/DeepSeek-V4-Pro" # local weights; omit to 
 export TP=8 EP_SIZE=1 DP_ATTENTION=true
 export CONC=128 ISL=131072 OSL=1024 RANDOM_RANGE_RATIO=1.0
 export PORT=8888
-export RESULT_DIR=/workspace/results/dsv4-fixed-128k1k-mi355x-c128
+export RESULT_DIR=/shared_nfs/kk/results/DeepSeek-V4-Pro/dsv4-fixed-128k1k-mi355x-c128
 export RESULT_FILENAME=dsv4_fixed128k1k_mi355x_dp8_c128
 mkdir -p "$RESULT_DIR"
 
@@ -102,7 +102,7 @@ export MODEL_PATH=/path/to/DeepSeek-V4-Pro
 export TP=8 EP_SIZE=8 DP_ATTENTION=true                # CONFIRM EP_SIZE — see §7
 export CONC=128 ISL=131072 OSL=1024 RANDOM_RANGE_RATIO=1.0
 export PORT=8888
-export RESULT_DIR=/workspace/results/dsv4-fixed-128k1k-b200-c128
+export RESULT_DIR=/shared_nfs/kk/results/DeepSeek-V4-Pro/dsv4-fixed-128k1k-b200-c128
 export RESULT_FILENAME=dsv4_fixed128k1k_b200_dp8_c128
 mkdir -p "$RESULT_DIR"
 

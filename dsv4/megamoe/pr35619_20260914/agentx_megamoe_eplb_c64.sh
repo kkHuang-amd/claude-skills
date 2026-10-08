@@ -29,7 +29,7 @@ export SGLANG_AITER_MEGA_RANK_SYNC="${SGLANG_AITER_MEGA_RANK_SYNC:-1}"
 export SGLANG_AITER_MEGA_EPLB_PREFILL_ONLY="${SGLANG_AITER_MEGA_EPLB_PREFILL_ONLY:-1}"
 export SGLANG_AITER_MEGA_EPLB_FUSED_MAP_RECORD="${SGLANG_AITER_MEGA_EPLB_FUSED_MAP_RECORD:-1}"
 
-export RESULT_DIR="${RESULT_DIR:-/workspace/results/megamoe-eplb-c${CONC}-d${DURATION}}"
+export RESULT_DIR="${RESULT_DIR:-/shared_nfs/kk/results/DeepSeek-V4-Pro/megamoe-eplb-c${CONC}-d${DURATION}}"
 export SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR="$RESULT_DIR/eplb"
 export RESULT_FILENAME="dsv4_fp4_sglang_tp${TP}-pp1-dcp1-pcp1-ep${EP_SIZE}-dpa${DP_ATTENTION}_disagg-false_spec-mtp_agentic-megamoe-eplb_c${CONC}"
 export AGENTIC_OUTPUT_DIR="$RESULT_DIR"

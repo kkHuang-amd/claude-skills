@@ -27,7 +27,7 @@ results in `ITL_GAP_FINDINGS.md`.
 swap. `/workspace` (ext4) and `/shared_nfs` (xfs) did. Both source trees and all
 uncommitted work were exported to `/workspace/handoff-20260903-image-swap/`
 before the swap. Scripts, tools and every arm's artifacts are safe under
-`/workspace/claude-skills/agentx/` and `/workspace/results/`.
+`/workspace/claude-skills/agentx/` and `/shared_nfs/kk/results/DeepSeek-V4-Pro/`.
 
 ## Task 1: rebuild the tree (do this before anything else)
 
@@ -94,9 +94,9 @@ either one pins how much the image alone moved. ~92 min: 3 min server start,
 ~28–37 min aiperf dataset config + warmup, 60 min measurement, ~5 min export.
 
 ```bash
-mkdir -p /workspace/results/<arm>
+mkdir -p /shared_nfs/kk/results/DeepSeek-V4-Pro/<arm>
 nohup bash /workspace/claude-skills/agentx/<script>.sh \
-  > /workspace/results/<arm>/run.log 2>&1 &
+  > /shared_nfs/kk/results/DeepSeek-V4-Pro/<arm>/run.log 2>&1 &
 ```
 
 Pre-swap reference, `interval20-c128`: 29,130 tok/s/GPU, ITL p90 58.78 ms, TTFT

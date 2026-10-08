@@ -21,5 +21,5 @@
 set -eo pipefail
 
 export SGLANG_MLA_HCA_KV_SPLITS="${SGLANG_MLA_HCA_KV_SPLITS:-8}"
-export RESULT_DIR="${RESULT_DIR:-/workspace/results/megamoe-eplb-c128-hcasplit8}"
+export RESULT_DIR="${RESULT_DIR:-/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/megamoe-eplb-c128-hcasplit8}"
 exec bash /workspace/claude-skills/agentx/agentx_c128_hcasplit.sh

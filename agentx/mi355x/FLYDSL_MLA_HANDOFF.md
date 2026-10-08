@@ -1079,7 +1079,7 @@ no crash.
 `/shared_nfs/kk/gsm8k_flydsl_ab.sh` (`ARMS="off on"`, results and logs in
 `/shared_nfs/kk/flydsl_gate/`). `gsm8k_segplan.sh` no longer exists on this
 node; the CLI was recovered from
-`/workspace/results/megamoe-eplb-c128-hcasplit4/sglang_command.txt` and the env
+`/shared_nfs/kk/results/DeepSeek-V4-Pro/megamoe-eplb-c128-hcasplit4/sglang_command.txt` and the env
 from the launcher's MegaMoE+DP+EPLB branches, deliberately **without**
 `SGLANG_SIMULATE_ACC_*`, which fakes the MTP accept length and would invalidate
 an accuracy run. The off arm reproducing 0.936 against the historical 0.937 is

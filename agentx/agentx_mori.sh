@@ -10,7 +10,7 @@
 # partner is another mori arm, or the megamoe arms (also ep8 + mori-based a2a).
 #
 # Usage:
-#   DURATION=300 CONC=64 RESULT_DIR=/workspace/results/mori-smoke bash agentx_mori.sh
+#   DURATION=300 CONC=64 RESULT_DIR=/shared_nfs/kk/results/DeepSeek-V4-Pro/mori-smoke bash agentx_mori.sh
 set -eo pipefail
 SKILL_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 
@@ -23,5 +23,5 @@ export SGLANG_MORI_RECV_BOUND="${SGLANG_MORI_RECV_BOUND:-1}"  # the PR's knob
 export MORI_SHMEM_HEAP_SIZE="${MORI_SHMEM_HEAP_SIZE:-16G}"
 export CONC="${CONC:-64}"
 export DURATION="${DURATION:-3600}"
-export RESULT_DIR="${RESULT_DIR:-/workspace/results/mori-c${CONC}-bound${SGLANG_MORI_RECV_BOUND}}"
+export RESULT_DIR="${RESULT_DIR:-/shared_nfs/kk/results/DeepSeek-V4-Pro/mori-c${CONC}-bound${SGLANG_MORI_RECV_BOUND}}"
 exec bash "$SKILL_DIR/agentx_b200align.sh"

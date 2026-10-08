@@ -33,7 +33,7 @@ SKILL_DIR=/workspace/claude-skills/agentx
 STATUS="$KK/smoke_kvfp8_status.txt"
 ALOG="$KK/smoke_kvfp8_arm.log"
 GLOG="$KK/smoke_kvfp8_gsm8k.log"
-RESULT_DIR=/workspace/results/smoke-kvfp8
+RESULT_DIR=/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/smoke-kvfp8
 VRAM_BASELINE=400000000
 
 log() { echo "[kvfp8 $(date -u +%H:%M:%S)] $*" | tee -a "$STATUS"; }

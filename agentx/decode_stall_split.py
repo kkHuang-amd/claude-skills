@@ -78,7 +78,7 @@ def parse(path):
 
 
 def analyse(arm):
-    path = "/workspace/results/%s/server.log" % arm
+    path = "/shared_nfs/kk/results/DeepSeek-V4-Pro/%s/server.log" % arm
     per = parse(path)
     if not per:
         print("%s: no parsable batch lines" % arm)

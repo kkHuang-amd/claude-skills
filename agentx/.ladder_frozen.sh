@@ -26,7 +26,7 @@ source "$SKILL_DIR/agentx_env.sh"
 MODEL_PATH=/shared_nfs/models/DeepSeek-V4-Pro
 MODEL_NAME=deepseek-ai/DeepSeek-V4-Pro
 CONC=64
-OUT_ROOT=/workspace/results/ladder
+OUT_ROOT=/shared_nfs/kk/results/DeepSeek-V4-Pro/ladder
 PIDFILE=/tmp/agentx_ladder.pid
 
 _common_env() {

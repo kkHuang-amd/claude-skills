@@ -23,10 +23,10 @@
 E=/workspace/claude-skills/agentx/e2e; cd /workspace     # 不可在 /sgl-workspace 下
 TAG=<label> POINTS="c1" [POINT_SET=ci36401947630 | POINTS_DIR=<task 專用 point 目錄>] [SKIP_SMOKE=1] \
 PYTHONPATH=<sglang>/python SGL_DIR=<sglang> \
-  setsid nohup bash $E/matrix.sh < /dev/null > /workspace/results/e2e-matrix-<label>.driver.log 2>&1 &
+  setsid nohup bash $E/matrix.sh < /dev/null > /shared_nfs/kk/results/DeepSeek-V4-Pro-0813/e2e-matrix-<label>.driver.log 2>&1 &
 ```
 
-matrix 啟動時把腳本與 point set 快照到 `/workspace/results/e2e-matrix-<TAG>.code/`
+matrix 啟動時把腳本與 point set 快照到 `/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/e2e-matrix-<TAG>.code/`
 再從快照 re-exec，所以：不用再手動做 `.frozen.sh`；多個節點可同時從本目錄啟動；
 run 進行中可以改本目錄的腳本；每個結果都留有實際執行的程式碼。
 

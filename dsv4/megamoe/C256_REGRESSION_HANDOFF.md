@@ -11,7 +11,7 @@ i.e. a null result, and on the favourable side of it. All three pass criteria me
 ~51,300 no-regression floor.
 
 ```
-RESULT_DIR  /workspace/results/megamoe-eplb-c256-postmerge
+RESULT_DIR  /shared_nfs/kk/results/DeepSeek-V4-Pro-0813/megamoe-eplb-c256-postmerge
 log         /shared_nfs/kk/pr35619/postmerge_c256.log
 ```
 
@@ -89,7 +89,7 @@ confirmed in the launch, along with `--load-balance-method total_requests` and a
 clean tree (28 `sglang-MegaMoE/python` refs, 0 wrong-tree).
 
 ```
-RESULT_DIR  /workspace/results/megamoe-eplb-c128-b200aligned
+RESULT_DIR  /shared_nfs/kk/results/DeepSeek-V4-Pro-0813/megamoe-eplb-c128-b200aligned
 log         /shared_nfs/kk/pr35619/b200aligned_c128.log
 ```
 
@@ -181,7 +181,7 @@ export PYTHONPATH=/sgl-workspace/sglang-MegaMoE/python${PYTHONPATH:+:$PYTHONPATH
 cd /shared_nfs/kk/pr35619
 CONC=256 ENABLE_EPLB=1 MEM_FRACTION_STATIC_DP_MEGAMOE=0.85 \
 MORI_SHMEM_HEAP_SIZE=17179869184 DURATION=3600 \
-RESULT_DIR=/workspace/results/megamoe-eplb-c256-b200aligned \
+RESULT_DIR=/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/megamoe-eplb-c256-b200aligned \
 nohup bash agentx_dp8_c128_megamoe.sh > /shared_nfs/kk/pr35619/b200aligned_c256.log 2>&1 &
 ```
 
@@ -220,7 +220,7 @@ chunk/rank 8192, `DURATION=3600`, AgentX `semianalysis_cc_traces_weka_062126`.
 
 Regenerate the table with `python3 /workspace/claude-skills/agentx/summary_table.py`
 (all four rows are registered in its `ROWS`). Raw results live in
-`/workspace/results/{megamoe-eplb-dp8-ep8-c256-mf085,dp8-noep-c256-d3600,megamoe-eplb-dp8-ep8-c128-mf085,dp8-noep-c128-d3600}/`.
+`/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/{megamoe-eplb-dp8-ep8-c256-mf085,dp8-noep-c256-d3600,megamoe-eplb-dp8-ep8-c128-mf085,dp8-noep-c128-d3600}/`.
 
 **Do not compare against `megamoe-eplb-c256-slotguard-probe2` (44,501).** That was a
 `DURATION=900` probe; AgentX is duration-based, so a 900 s profile is not comparable
@@ -303,11 +303,11 @@ cd /shared_nfs/kk/pr35619
 # MegaMoE + EPLB, c256  (the arm under test)
 CONC=256 ENABLE_EPLB=1 MEM_FRACTION_STATIC_DP_MEGAMOE=0.85 \
 MORI_SHMEM_HEAP_SIZE=17179869184 DURATION=3600 \
-RESULT_DIR=/workspace/results/megamoe-eplb-c256-postmerge \
+RESULT_DIR=/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/megamoe-eplb-c256-postmerge \
 nohup bash agentx_dp8_c128_megamoe.sh > /shared_nfs/kk/pr35619/postmerge_c256.log 2>&1 &
 
 # plain DP c256 control, only if the MegaMoE arm moved
-CONC=256 DURATION=3600 RESULT_DIR=/workspace/results/dp8-noep-c256-postmerge \
+CONC=256 DURATION=3600 RESULT_DIR=/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/dp8-noep-c256-postmerge \
 nohup bash agentx_dp8_c128.sh > /shared_nfs/kk/pr35619/postmerge_c256_dp.log 2>&1 &
 ```
 
@@ -319,7 +319,7 @@ outside that budget; see the mori sizing section in `agentx/SKILL.md`).
 ## Reading the result
 
 ```bash
-D=/workspace/results/megamoe-eplb-c256-postmerge
+D=/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/megamoe-eplb-c256-postmerge
 rg -o 'completed=[0-9,]+, cancelled=[0-9]+, errors=[0-9]+' /shared_nfs/kk/pr35619/postmerge_c256.log | tail -1
 rg -c 'rebalance start' $D/server.log
 python3 /workspace/claude-skills/agentx/summary_table.py   # after adding a ROWS entry

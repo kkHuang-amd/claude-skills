@@ -16,23 +16,23 @@ GPU 已釋放；沒有任何背景工作。fix branch `fix/dsv4-compressor-tgemm
 **雜訊檢查（14:35 加入）：** B0 之後先在 049 重跑 c73f c4（075 同 code 只有 3,425，而 049 是 3,640）；同 code 差距 ≥ gap/2 就停止 bisect，不做。
 判準：tok/s/GPU ≥ mid+band 為 good、≤ mid-band 為 bad，中間就重跑一次、取平均和 mid 比；mid、band 由 Phase A c4 與 B0 c4 算出。
 **決策紀錄：** `BISECT_C4.log`（本目錄）。**斷線恢復：** 直接重新啟動同一個指令（結果依 TAG 快取，已完成的會跳過）：
-`cd /workspace && setsid nohup bash /workspace/claude-skills/agentx/regression/bisect_c4.sh < /dev/null > /workspace/results/bisect_c4.driver.log 2>&1 &`
+`cd /workspace && setsid nohup bash /workspace/claude-skills/agentx/regression/bisect_c4.sh < /dev/null > /shared_nfs/kk/results/DeepSeek-V4-Pro-0813/bisect_c4.driver.log 2>&1 &`
 （有 flock，不會重複執行；用 `flock -n /tmp/bisect_c4.lock true && echo idle` 檢查。**不要 `pkill -f bisect_c4`**：會連同自己的 shell 一起殺掉。）
-**Done (crsuse2-m2m-049):** c1 `TAG=sglc73f-049`（舊複製腳本）、c4/c16 同 TAG（`e2e/matrix.sh` 快照）。結果 `/workspace/results/e2e-{c1,c4,c16}-sglc73f-049/`。
+**Done (crsuse2-m2m-049):** c1 `TAG=sglc73f-049`（舊複製腳本）、c4/c16 同 TAG（`e2e/matrix.sh` 快照）。結果 `/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/e2e-{c1,c4,c16}-sglc73f-049/`。
 **Next:** 和使用者討論：(1) 同事的 c4 gap 是否就是請求數的雙峰；(2) 推動 #41931 merge（附 B1 c1 數據）；(3) 長期是否要做 aiter K=7168 bf16->fp32 tuned 列（方案 B）以保留 fp32 精度；(4) 合併 agentx 目錄（等 075）。
-**Status file:** `/workspace/results/e2e-matrix-sglc73f-049.status`（用 wc -l 輪詢，NFS 不要 tail -F）
+**Status file:** `/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/e2e-matrix-sglc73f-049.status`（用 wc -l 輪詢，NFS 不要 tail -F）
 **Repro (resume; done points skipped):**
 ```bash
 R=/workspace/claude-skills/agentx/regression; cd /workspace
 TAG=sglc73f-049 POINTS=c1 PYTHONPATH=/sgl-workspace/sglang-ci/python SGL_DIR=/sgl-workspace/sglang-ci \
   setsid nohup bash $R/.agentx_e2e_matrix.frozen.sh < /dev/null \
-  > /workspace/results/e2e-matrix-sglc73f-049.driver.log 2>&1 &
+  > /shared_nfs/kk/results/DeepSeek-V4-Pro-0813/e2e-matrix-sglc73f-049.driver.log 2>&1 &
 ```
 **Compare:**
 ```bash
 R=/workspace/claude-skills/agentx/regression
-python3 $R/compare_ci.py /workspace/results/e2e-c1-sglc73f/*_agentic.json /workspace/results/e2e-c1-sglc73f-049/*_agentic.json   # vs 075
-python3 $R/compare_ci.py $R/ci_baseline_36401947630/conc1_kvnone_ep1-dpafalse/*.json /workspace/results/e2e-c1-sglc73f-049/*_agentic.json  # vs CI
+python3 $R/compare_ci.py /shared_nfs/kk/results/DeepSeek-V4-Pro-0813/e2e-c1-sglc73f/*_agentic.json /shared_nfs/kk/results/DeepSeek-V4-Pro-0813/e2e-c1-sglc73f-049/*_agentic.json   # vs 075
+python3 $R/compare_ci.py $R/ci_baseline_36401947630/conc1_kvnone_ep1-dpafalse/*.json /shared_nfs/kk/results/DeepSeek-V4-Pro-0813/e2e-c1-sglc73f-049/*_agentic.json  # vs CI
 ```
 **Pass criteria:** gates OK（errors 0、duration ≥95 %、ISL 差 ≤3 %）；P90 intvty 差 < 6.6 %
 （c1 主看 intvty；c1 的 tok/s/GPU 對速度不敏感）。
@@ -98,7 +98,7 @@ c73f7077eb 不含 #41019，HEAD 含。
 ### B0 啟動 + 修正方案調查（2026-10-02，crsuse2-m2m-049）
 
 **B0 running：** `TAG=head41cbe-049 POINTS=c1 SKIP_SMOKE=1`，sglang `/sgl-workspace/sglang` @`41cbe65de0`
-（editable，不設 PYTHONPATH），11:04:43 開始，預計 ~12:15。status `/workspace/results/e2e-matrix-head41cbe-049.status`。
+（editable，不設 PYTHONPATH），11:04:43 開始，預計 ~12:15。status `/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/e2e-matrix-head41cbe-049.status`。
 
 **Alan 的 commit**（akao-amd/sglang `064155bc`）：在 `bf16_fp32.py` 加一條 gfx1250 專用分支，直接呼叫
 aiter Triton/gluon `gemm_a16w16(x, y, dtype=fp32)`（fp32 累加、fp32 輸出，保住 #41019 要的精度）。
@@ -145,7 +145,7 @@ M=1024 慢 4–8×（會拖慢 prefill／大 batch）。精度：C 的 err ~0（
 `TAG=fix41931-049 POINTS=c1 SKIP_SMOKE=1`，12:22:13 開始，matrix pid 40350 @049，預計 ~13:32。
 判讀：B1 vs B0 看 ITL mean 與 P90 intvty；預期回到 Phase A（ITL ~4.35 ms、intvty ~219）。
 **改為 c4（user, 12:25）：** B1 c1 已停（`e2e-c1-fix41931-049.void-stopped`）。HEAD 的 c4 還沒有數字，
-所以兩個 c4 串在一起跑：`/workspace/results/run_c4_fix_then_head.sh`（chain pid 44515 @049，12:27:37 開始）
+所以兩個 c4 串在一起跑：`/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/run_c4_fix_then_head.sh`（chain pid 44515 @049，12:27:37 開始）
 1. B1 c4：`TAG=fix41931-049`，fix branch（editable `/sgl-workspace/sglang`），預計 ~13:40
 2. B0 c4：`TAG=head41cbe-049`，worktree `/sgl-workspace/sglang-head` @41cbe65de0（PYTHONPATH），預計 ~14:50
 比較：三者都對 049 Phase A c4（3,640.3 / 191.7）。microbench 估這個 GEMM 在 c4（M≈28）只造成約 1 %；
@@ -175,7 +175,7 @@ bisect 腳本仍在跑 c73f c4 重跑（`sglc73f-049-r2`，14:45 開始）。由
 - c4 B1 vs PA：median **0.989**、p50 **+1.4 %**，但 slow tail **-3.0 %**；每個請求的比值很分散（p10 0.85、p90 1.16）。
   => c4 同一個請求在不同 run 之間的 ITL 可以差 ±15 %（受併發重疊、prefill 插隊影響）；慢尾由「哪些請求剛好被干擾」決定。
 **判斷：** B1 的 slow tail -3 % 很可能是 c4 的時序雜訊，不是殘餘的回歸；用 c73f c4 重跑（`sglc73f-049-r2`）配對 PA 驗證：
-PA 自己的 slow tail 若也會飄約 3 %，就是雜訊。另外排 B1 c1（乾淨的指標）直接確認修正：`/workspace/results/run_b1_c1_after_bisect.sh`（等 bisect lock 釋放後啟動，TAG=fix41931-049，預計 ~17:20 完成）。
+PA 自己的 slow tail 若也會飄約 3 %，就是雜訊。另外排 B1 c1（乾淨的指標）直接確認修正：`/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/run_b1_c1_after_bisect.sh`（等 bisect lock 釋放後啟動，TAG=fix41931-049，預計 ~17:20 完成）。
 | crsuse2-m2m-049 | 2026-10-02 | c4 | **c73f 重跑**（同 Phase A code） | 3,355.6（PA -7.8 %） | 182.0（-5.1 %） | OK，559 succ | **同 code 就差 8 %**：c4 的 tok/s 與 intvty 雜訊大於要找的 gap |
 
 ### c4 是雙峰分布（16:00）——tok/s「gap」來自 workload 路徑，不是 code

@@ -3,7 +3,7 @@
 TTT = total_throughput (input+output tok/s). Interactivity = 1000/median_ITL_ms."""
 import json, glob, os, re, sys
 
-ROOT = sys.argv[1] if len(sys.argv) > 1 else "/workspace/results/dsv4-fixed_seq_len/runs"
+ROOT = sys.argv[1] if len(sys.argv) > 1 else "/shared_nfs/kk/results/DeepSeek-V4-Pro/dsv4-fixed_seq_len/runs"
 COLS = ["Input_len","output_len","TP,DP,EP","Concurrency","TTT (tok/s)",
         "Median E2EL (ms)","Median TTFT (ms)","Median ITL (ms)","Interactivity (tok/s/user)"]
 

@@ -398,7 +398,7 @@ mechanism turned out to be neither of the two candidates.**
 ### 22.1 Configuration actually run
 
 Common base for all four rungs (full argv in each
-`/workspace/results/ladder/rung*/sglang_command.txt`): TP8, `dsv4` backend,
+`/shared_nfs/kk/results/DeepSeek-V4-Pro/ladder/rung*/sglang_command.txt`): TP8, `dsv4` backend,
 page 256, `swa-full-tokens-ratio 0.15`, `kv-cache-dtype fp8_e4m3`, MTP EAGLE
 3/1/4 + `SGLANG_SIMULATE_ACC_LEN=2.49`, HiCache DRAM 1.5 write_through,
 `max-running-requests 128`, `cuda-graph-max-bs 128`.
@@ -569,7 +569,7 @@ published arm, and it was invisible until DP was measured alone.**
   effect, and the `gsp_*` values that *are* in effect are not recorded at all.
   Read the invoked argv, not the JSON, when checking a gsp point's shape.
 
-**Artifacts:** `/workspace/results/ladder/rung{A,B,C,D}/` — `sglang_command.txt`,
+**Artifacts:** `/shared_nfs/kk/results/DeepSeek-V4-Pro/ladder/rung{A,B,C,D}/` — `sglang_command.txt`,
 `server.log`, `point{1,5}.json`, `point{1,5}.metrics.{pre,post}.txt`. Bench
 stdout in `/tmp/ladder_bench_<rung>_<point>.log`, driver logs
 `/tmp/ladder_all.log` (A,B) and `/tmp/ladder_cd3.log` (C,D).
@@ -618,7 +618,7 @@ while restoring balance. Until that runs, the honest claim is only: *routing on
 a prefix-stable key fixes DP's cache split, and with keys ≈ ranks the resulting
 imbalance costs more than the cache gain.*
 
-Artifacts: `/workspace/results/ladder/rungB-router/` (`server.log`,
+Artifacts: `/shared_nfs/kk/results/DeepSeek-V4-Pro/ladder/rungB-router/` (`server.log`,
 `router.log`, `windows.txt`, `{p1,nokey,key}.json`). Per-rank and per-window
 hit rates are recomputed from `server.log`'s `DP<n> ... #new-token/#cached-token`
 lines — regex must anchor as `(\d\d:\d\d:\d\d) DP(\d+)`, the rank tag sits

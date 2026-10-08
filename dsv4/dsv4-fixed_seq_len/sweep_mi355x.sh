@@ -10,7 +10,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 MODEL="${MODEL:-/dockerx/data/models/DeepSeek-V4-Pro}"
-OUT="${OUT:-/workspace/results/dsv4-fixed_seq_len/runs}"
+OUT="${OUT:-/shared_nfs/kk/results/DeepSeek-V4-Pro/dsv4-fixed_seq_len/runs}"
 PORT="${PORT:-8888}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
 CONCS="${CONCS:-2 4 8 16 32 64 128 256 512 1024}"

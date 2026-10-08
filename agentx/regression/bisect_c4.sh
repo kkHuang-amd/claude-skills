@@ -17,12 +17,12 @@
 # /sgl-workspace/sglang-bis-<sha>. Results are cached by TAG, so re-launching
 # resumes: finished points are skipped and their JSON re-read.
 # Decisions: BISECT_C4.log (this dir). Launch:
-#   setsid nohup bash bisect_c4.sh < /dev/null > /workspace/results/bisect_c4.driver.log 2>&1 &
+#   setsid nohup bash bisect_c4.sh < /dev/null > /shared_nfs/kk/results/DeepSeek-V4-Pro-0813/bisect_c4.driver.log 2>&1 &
 set -uo pipefail
 R="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 E=/workspace/claude-skills/agentx/e2e
 REPO=/sgl-workspace/sglang
-RES=/workspace/results
+RES=/shared_nfs/kk/results/DeepSeek-V4-Pro-0813
 LOG=$R/BISECT_C4.log
 GOOD_C=c73f7077eb GOOD_TAG=sglc73f-049      # 049 Phase A
 HEAD_C=41cbe65de0 HEAD_TAG=head41cbe-049    # B0

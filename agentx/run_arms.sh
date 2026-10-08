@@ -5,7 +5,7 @@
 SK=/workspace/claude-skills/agentx
 run_arm(){
   NAME=$1; C=$2
-  DIR=/workspace/results/$NAME; LOG=/workspace/results/$NAME.log
+  DIR=/shared_nfs/kk/results/DeepSeek-V4-Pro/$NAME; LOG=/shared_nfs/kk/results/DeepSeek-V4-Pro/$NAME.log
   bash $SK/wait_vram.sh >/dev/null || { echo "$NAME: VRAM never freed"; return 1; }
   mkdir -p $DIR
   setsid nohup bash $SK/vram_sampler.sh $DIR/vram.csv 30 >/dev/null 2>&1 &

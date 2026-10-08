@@ -28,7 +28,7 @@ export SGLANG_MLA_HCA_KV_SPLITS="$SPLITS"
 export SGLANG_MLA_FAKE_KVLEN=0
 export SGLANG_MLA_KVLEN_STATS=0
 
-CMD=$(cat /workspace/results/megamoe-eplb-c128-hcasplit4/sglang_command.txt)
+CMD=$(cat /shared_nfs/kk/results/DeepSeek-V4-Pro/megamoe-eplb-c128-hcasplit4/sglang_command.txt)
 echo "[gsm8k] splits=$SPLITS  starting server"
 $CMD > "$OUT.server.log" 2>&1 &
 SRV=$!

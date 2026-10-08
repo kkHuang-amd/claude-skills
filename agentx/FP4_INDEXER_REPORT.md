@@ -7,7 +7,7 @@ the working tree
 
 Raw artifacts, scripts and the running log of decisions are in
 `/workspace/claude-skills/agentx/AGENTX_20260901.md`; every number below is
-reproducible from `/workspace/results/<arm>/`.
+reproducible from `/shared_nfs/kk/results/DeepSeek-V4-Pro/<arm>/`.
 
 ---
 

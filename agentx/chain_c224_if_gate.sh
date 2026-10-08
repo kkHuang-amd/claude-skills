@@ -13,8 +13,8 @@
 # it down mid-wait.
 set -u
 HERE=/workspace/claude-skills/agentx
-PREV=/workspace/results/fp4-dptbo-c192
-MARK=/workspace/results/CHAIN_C224.txt
+PREV=/shared_nfs/kk/results/DeepSeek-V4-Pro/fp4-dptbo-c192
+MARK=/shared_nfs/kk/results/DeepSeek-V4-Pro/CHAIN_C224.txt
 : >"$MARK"
 
 for _ in $(seq 1 480); do        # up to 4 h at 30 s

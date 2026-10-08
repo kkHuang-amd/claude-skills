@@ -41,7 +41,7 @@ export MEM_FRACTION_STATIC=0.90
 # hicache stays off: PR #37353's rust-side pool-name variant was deliberately
 # not applied (it needs a rust rebuild), so the unified-radix path must not run.
 
-export RESULT_DIR=/workspace/results/dptbo-c128
+export RESULT_DIR=/shared_nfs/kk/results/DeepSeek-V4-Pro/dptbo-c128
 export RESULT_FILENAME="dsv4_fp4_sglang_tp8-pp1-dcp1-pcp1-ep1-dpatrue_disagg-false_spec-mtp_agentic_c128"
 export AGENTIC_OUTPUT_DIR="$RESULT_DIR"
 

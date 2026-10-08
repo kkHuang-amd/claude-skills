@@ -13,7 +13,7 @@ export AIPERF_RUNTIME_DIR=/workspace/agentx-runtime
 export MODEL_PATH=/shared_nfs/deepseek-ai/DeepSeek-V4-Pro
 export HF_HOME=/shared_nfs/hf_cache
 export HF_HUB_CACHE="$HF_HOME/hub"
-export RESULT_DIR="${RESULT_DIR:-/workspace/results/runbook-agentx-c64-$(date -u +%Y%m%dT%H%M%SZ)}"
+export RESULT_DIR="${RESULT_DIR:-/shared_nfs/kk/results/DeepSeek-V4-Pro/runbook-agentx-c64-$(date -u +%Y%m%dT%H%M%SZ)}"
 mkdir -p "$RESULT_DIR/aiperf_artifacts" "$RESULT_DIR/eplb" "$RESULT_DIR/traces"
 
 export GPU_ARCHS=gfx950 PYTORCH_ROCM_ARCH=gfx950

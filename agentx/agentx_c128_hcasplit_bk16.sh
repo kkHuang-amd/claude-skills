@@ -24,5 +24,5 @@
 set -eo pipefail
 
 export SGLANG_MLA_FP8_BLOCK_K="${SGLANG_MLA_FP8_BLOCK_K:-16}"
-export RESULT_DIR="${RESULT_DIR:-/workspace/results/megamoe-eplb-c128-hcasplit4-bk16}"
+export RESULT_DIR="${RESULT_DIR:-/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/megamoe-eplb-c128-hcasplit4-bk16}"
 exec bash /workspace/claude-skills/agentx/agentx_c128_hcasplit.sh

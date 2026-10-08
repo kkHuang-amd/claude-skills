@@ -31,7 +31,7 @@ An older, independent backup also exists at
 `/workspace/tree-backup-20260902-072044/` (full dirty tarballs of both repos).
 
 The scripts and tools all live under `/workspace/claude-skills/agentx/`, and
-`/workspace/results/` holds every arm's artifacts, so **none of the measurement
+`/shared_nfs/kk/results/DeepSeek-V4-Pro/` holds every arm's artifacts, so **none of the measurement
 work is at risk** — only the two source trees.
 
 ## 1. State at swap time

@@ -11,7 +11,7 @@
 # own command line and has already killed a cleanup shell on this node.
 set -u
 HERE=/workspace/claude-skills/agentx
-DIR=/workspace/results/fp4-dptbo-c96
+DIR=/shared_nfs/kk/results/DeepSeek-V4-Pro/fp4-dptbo-c96
 MARK=$DIR/WAITER.txt
 mkdir -p "$DIR"
 : >"$MARK"

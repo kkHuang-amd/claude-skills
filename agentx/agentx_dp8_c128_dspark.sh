@@ -29,7 +29,7 @@ export TOTAL_CPU_DRAM_GB="${TOTAL_CPU_DRAM_GB:-2399}"
 export DURATION="${DURATION:-3600}"
 export PORT="${PORT:-8888}"
 
-export RESULT_DIR="${RESULT_DIR:-/workspace/results/dp8-c${CONC}-20260914}"
+export RESULT_DIR="${RESULT_DIR:-/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/dp8-c${CONC}-20260914}"
 export RESULT_FILENAME="dsv4_fp4_sglang_tp${TP}-pp1-dcp1-pcp1-ep${EP_SIZE}-dpa${DP_ATTENTION}_disagg-false_spec-mtp_agentic_c${CONC}"
 export AGENTIC_OUTPUT_DIR="$RESULT_DIR"
 mkdir -p "$RESULT_DIR"

@@ -142,7 +142,7 @@ asked for.
 
 ### End-to-end confirmation with MTP **ON** — the extend variant (2026-09-04)
 
-Arm `fp4ext1`, ref `/workspace/results/hicache-fp4-int20-c128-fuse-mf090` (EAGLE, num-steps 3,
+Arm `fp4ext1`, ref `/shared_nfs/kk/results/DeepSeek-V4-Pro/hicache-fp4-int20-c128-fuse-mf090` (EAGLE, num-steps 3,
 topk 1, num-draft-tokens 4), `SGLANG_OPT_FUSE_COMPRESS_NORM_ROPE=1`:
 
 ```

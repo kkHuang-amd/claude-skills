@@ -3,10 +3,10 @@
 # Order is the user's: the c128 pair FIRST (known-good territory, the only pair left
 # standing from the overnight run), then the three c256 arms that hung at 1x headroom.
 # c256 dirs carry a -2x suffix so the hung originals stay on disk as evidence.
-#   setsid nohup bash matrix_2x.sh </dev/null >/workspace/results/overnight/driver_2x.log 2>&1 &
+#   setsid nohup bash matrix_2x.sh </dev/null >/shared_nfs/kk/results/DeepSeek-V4-Pro/overnight/driver_2x.log 2>&1 &
 set -u
 SKILL_DIR=/workspace/claude-skills/agentx
-OUT=/workspace/results/overnight
+OUT=/shared_nfs/kk/results/DeepSeek-V4-Pro/overnight
 STATUS=$OUT/STATUS.txt
 mkdir -p $OUT
 RESFILE_TPL='dsv4_fp4_sglang_tp8-pp1-dcp1-pcp1-ep1-dpatrue_disagg-false_spec-mtp_agentic-b200align_c%s.json'

@@ -9,45 +9,45 @@ import json, glob, os, re, sys
 
 # label, dir, chunk-per-rank.
 # Reset 2026-09-01 for the rebuilt node: every arm the previous list pointed at
-# was destroyed with /workspace/results and cannot be recovered. Add rows here
+# was destroyed with /shared_nfs/kk/results/DeepSeek-V4-Pro-0813 and cannot be recovered. Add rows here
 # as arms land; the previous node's numbers are NOT comparable (no EP, no MoRI).
 ROWS = [
     # 2026-09-15 c256 pair. Same launcher/stack; only the MoE path and the memory
     # budget differ (megamoe needs mem-frac 0.85 to leave 16 GiB for the mori
     # heap, the DP arm keeps 0.92). MegaMoE wins every column here, which is the
     # opposite of the c128 pair below -- see SKILL.md.
-    ("MegaMoE+EPLB EP8 DSPARK", "/workspace/results/megamoe-eplb-dp8-ep8-c256-mf085", 8192),
-    ("DPA (no EP) DSPARK", "/workspace/results/dp8-noep-c256-d3600", 8192),
+    ("MegaMoE+EPLB EP8 DSPARK", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/megamoe-eplb-dp8-ep8-c256-mf085", 8192),
+    ("DPA (no EP) DSPARK", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/dp8-noep-c256-d3600", 8192),
     # 2026-09-15 post-merge re-measure of the MegaMoE arm above, after
     # /sgl-workspace/sglang-MegaMoE took "Merge branch 'main'" (head ff7f522abd).
     # Identical launcher, env and aiter (ffa945f93 + its 2 uncommitted fixes);
     # the ONLY difference vs the row above is the merged sglang tree. Exists to
     # answer whether the merge cost throughput -- see dsv4/megamoe/
     # C256_REGRESSION_HANDOFF.md.
-    ("MegaMoE+EPLB EP8 postmerge", "/workspace/results/megamoe-eplb-c256-postmerge", 8192),
+    ("MegaMoE+EPLB EP8 postmerge", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/megamoe-eplb-c256-postmerge", 8192),
     # 2026-09-15 evening: the postmerge row above, re-measured after aligning
     # three launcher values to the B200 sibling -- prefill-decode-interval 10->20
     # (CONC>=160 branch), load-balance-method round_robin->total_requests, router
     # policy consistent_hashing->cache_aware + --balance-abs-threshold 32. This is
     # a NEW operating point: it is the baseline for anything measured after that
     # edit, and it is NOT comparable to the 53,991 / 54,919 rows above.
-    ("MegaMoE+EPLB EP8 B200-aligned", "/workspace/results/megamoe-eplb-c256-b200aligned", 8192),
+    ("MegaMoE+EPLB EP8 B200-aligned", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/megamoe-eplb-c256-b200aligned", 8192),
     # 2026-09-16: same aligned config, re-measured on the rebuilt stack --
     # /sgl-workspace/sglang main 832ec39cc0 + merged PR #35619 (ff7f522abd), aiter
     # updated 4ad998328 -> ffa945f93 and fully rebuilt (126 .so, fresh FlyDSL cache),
     # fp4-prefill @cache fix reapplied. Pairs with the row above; see
     # dsv4/megamoe/ENV_SETUP_20260916.md.
-    ("MegaMoE+EPLB EP8 aligned, rebuilt", "/workspace/results/megamoe-eplb-c256-20260916", 8192),
+    ("MegaMoE+EPLB EP8 aligned, rebuilt", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/megamoe-eplb-c256-20260916", 8192),
     # 2026-09-15: same launcher/stack as the row below, plus ENABLE_MEGAMOE=1 +
     # ENABLE_EPLB=1 at EP8. mem-frac 0.85 (not 0.92) because the 16 GiB mori
     # symmetric heap is charged outside that budget.
-    ("MegaMoE+EPLB EP8 DSPARK", "/workspace/results/megamoe-eplb-dp8-ep8-c128-mf085", 8192),
+    ("MegaMoE+EPLB EP8 DSPARK", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/megamoe-eplb-dp8-ep8-c128-mf085", 8192),
     # 2026-09-16: the row above with the three B200-aligned launcher values. At
     # c128 the CONC>=160 branch does not fire, so this is PDI 24 with NO
     # --balance-abs-threshold -- a DIFFERENT aligned config from the c256 aligned
     # arm (PDI 20 + threshold). Compare each aligned arm to its own pre-align
     # row; the two aligned arms are not a concurrency sweep of one config.
-    ("MegaMoE+EPLB EP8 B200-aligned", "/workspace/results/megamoe-eplb-c128-b200aligned", 8192),
+    ("MegaMoE+EPLB EP8 B200-aligned", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/megamoe-eplb-c128-b200aligned", 8192),
     # 2026-09-17: the row above with ONE flag changed, --load-balance-method
     # total_requests -> total_tokens. A true single-variable A/B: cmd_diff.py
     # reports 46 flags with only that one differing, and the KV pool is identical
@@ -59,17 +59,17 @@ ROWS = [
     # bs (0 to +2.4 %), so balancing is NOT an ITL lever here. TTFT 11.07 -> 9.61 s
     # (-13.2 %) with cache hit unchanged; +5.5 % throughput is INSIDE the 5.67 %
     # replicate spread and is a null. See exchange/FINDINGS.md.
-    ("MegaMoE+EPLB EP8 aligned, total_tokens", "/workspace/results/megamoe-eplb-c128-b200aligned-totaltokens", 8192),
+    ("MegaMoE+EPLB EP8 aligned, total_tokens", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/megamoe-eplb-c128-b200aligned-totaltokens", 8192),
     # 2026-09-17 layer-aware HCA split-K=4 arms. All are the c128/c256
     # b200aligned config with split-K as the only intended difference, so they
     # pair with the two aligned rows above/below. The claim for these arms is the
     # matched-bs step delta (-7.50 / -7.42 / -4.29 / -6.11 ms), NOT anything in
     # this table: every throughput move here is inside the 5.67 % spread.
-    ("MegaMoE+EPLB split-K=4", "/workspace/results/megamoe-eplb-c128-hcasplit4", 8192),
-    ("MegaMoE+EPLB split-K=4 replicate", "/workspace/results/megamoe-eplb-c128-hcasplit4-rep2", 8192),
-    ("MegaMoE+EPLB split-K=4, total_tokens", "/workspace/results/megamoe-eplb-c128-hcasplit4-totaltokens", 8192),
-    ("MegaMoE+EPLB split-K=4", "/workspace/results/megamoe-eplb-c256-hcasplit4-totalreq", 8192),
-    ("MegaMoE+EPLB split-K=4, total_tokens", "/workspace/results/megamoe-eplb-c256-hcasplit4-totaltokens", 8192),
+    ("MegaMoE+EPLB split-K=4", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/megamoe-eplb-c128-hcasplit4", 8192),
+    ("MegaMoE+EPLB split-K=4 replicate", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/megamoe-eplb-c128-hcasplit4-rep2", 8192),
+    ("MegaMoE+EPLB split-K=4, total_tokens", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/megamoe-eplb-c128-hcasplit4-totaltokens", 8192),
+    ("MegaMoE+EPLB split-K=4", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/megamoe-eplb-c256-hcasplit4-totalreq", 8192),
+    ("MegaMoE+EPLB split-K=4, total_tokens", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/megamoe-eplb-c256-hcasplit4-totaltokens", 8192),
     # 2026-09-18 MLA decode arms, both falsified, both kept for the record.
     # bk16: SGLANG_MLA_FP8_BLOCK_K=16. No-op in production -- the Triton decode
     # path runs bf16 (no kv_scales), where block_k was already 16; the 32 only
@@ -78,70 +78,70 @@ ROWS = [
     # vs 0.937) and free, but production's kv_len straggler ratio is 0.373
     # against the 0.759 the microbench assumed, so there is no imbalance left
     # for it to remove.
-    ("MegaMoE+EPLB split-K=4, block_k=16", "/workspace/results/megamoe-eplb-c128-hcasplit4-bk16", 8192),
-    ("MegaMoE+EPLB segment plan", "/workspace/results/megamoe-eplb-c128-segplan", 8192),
+    ("MegaMoE+EPLB split-K=4, block_k=16", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/megamoe-eplb-c128-hcasplit4-bk16", 8192),
+    ("MegaMoE+EPLB segment plan", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/megamoe-eplb-c128-segplan", 8192),
     # INVALID except as the MLA ceiling: clamps kv_len to 128, so the model emits
     # garbage and every column but the step time is meaningless.
-    ("MegaMoE+EPLB fake-kvlen [INVALID]", "/workspace/results/megamoe-eplb-c128-fakekvlen", 8192),
+    ("MegaMoE+EPLB fake-kvlen [INVALID]", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/megamoe-eplb-c128-fakekvlen", 8192),
     # 2026-09-16: the c128 aligned row re-measured on the same rebuilt stack as the
     # c256 "rebuilt" row above.
-    ("MegaMoE+EPLB EP8 aligned, rebuilt", "/workspace/results/megamoe-eplb-c128-20260916", 8192),
+    ("MegaMoE+EPLB EP8 aligned, rebuilt", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/megamoe-eplb-c128-20260916", 8192),
     # 2026-09-14: dsv4_fp4_mi355x_sglang_mtp.sh (DSPARK spec, no TBO, no EP) on
     # DeepSeek-V4-Pro-0813, sglang ab201bd1ba + rebuilt aiter ffa945f93 with the
     # fp4-prefill @cache fix restored. mem-frac 0.92, so it does not pair with
     # the 0.90 c128 rows below.
-    ("DPA (no EP) DSPARK", "/workspace/results/dp8-noep-c128-d3600", 8192),
-    ("DPA+TBO", "/workspace/results/dptbo-c64", 16384),
-    ("DPA+EP8+MoRI mxfp8", "/workspace/results/mori-mxfp8-ep8-c64", 16384),
+    ("DPA (no EP) DSPARK", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/dp8-noep-c128-d3600", 8192),
+    ("DPA+TBO", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/dptbo-c64", 16384),
+    ("DPA+EP8+MoRI mxfp8", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/mori-mxfp8-ep8-c64", 16384),
     ("DPA+EP8+MoRI mxfp8 +recvbound",
-     "/workspace/results/mori-mxfp8-ep8-c64-recvbound", 16384),
+     "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/mori-mxfp8-ep8-c64-recvbound", 16384),
     # c128 pair: mem-frac 0.90 (not the c64 rows' 0.85) and
     # HSA_NO_SCRATCH_RECLAIM=0, so these two compare to each other, not upward.
-    ("DPA+TBO", "/workspace/results/dptbo-c128", 16384),
-    ("DPA+TBO +FP4 indexer", "/workspace/results/fp4-dptbo-c128", 16384),
+    ("DPA+TBO", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/dptbo-c128", 16384),
+    ("DPA+TBO +FP4 indexer", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/fp4-dptbo-c128", 16384),
     # c96: same settings as the c128 FP4 arm, CONC=96 only. No c96 baseline yet,
     # so this extends the FP4 curve rather than forming a pair.
-    ("DPA+TBO +FP4 indexer", "/workspace/results/fp4-dptbo-c96", 16384),
+    ("DPA+TBO +FP4 indexer", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/fp4-dptbo-c96", 16384),
     # c64 + FP4 at mem-frac 0.90. Its partner (reclaim=0) aborted, so this row
     # has no matched baseline: the 0.85 dptbo-c64 row above differs in BOTH FP4
     # and mem-frac. Listed for completeness, not for a delta.
-    ("DPA+TBO +FP4 indexer", "/workspace/results/fp4-dptbo-c160", 16384),
+    ("DPA+TBO +FP4 indexer", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/fp4-dptbo-c160", 16384),
     # Past the knee: throughput peaks at c160 and c192 regresses 27 % with TTFT
     # 6x worse. c224 was queued behind a >=90 % cache gate, which passed (92.0 %)
     # and was the wrong indicator -- the failure mode is queueing, not cache.
     # It was killed unrun once c192 landed.
-    ("DPA+TBO +FP4 indexer", "/workspace/results/fp4-dptbo-c192", 16384),
+    ("DPA+TBO +FP4 indexer", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/fp4-dptbo-c192", 16384),
     ("DPA+TBO +FP4 indexer",
-     "/workspace/results/fp4-dptbo-c64-reclaim1", 16384),
+     "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/fp4-dptbo-c64-reclaim1", 16384),
     # TBO off, the controlled partner for dptbo-c128. Worse on all three of ITL,
     # TTFT and tok/s, which is what settled the TBO question (sec 1).
-    ("DPA, TBO off", "/workspace/results/dptbo-notbo-c128", 16384),
+    ("DPA, TBO off", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/dptbo-notbo-c128", 16384),
     # --prefill-decode-interval 10 -> 20, controlled partner for dptbo-c128.
     # Buys ITL p90 with TTFT; the operating point, not a deficit (CONTINUE HERE).
-    ("DPA+TBO, interval 20", "/workspace/results/interval20-c128", 16384),
+    ("DPA+TBO, interval 20", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/interval20-c128", 16384),
     # THE c192 FIX (sec 13). Single variable vs fp4-dptbo-c192: hicache CPU tier
     # at ratio 3.0. +58 % tok/s, -85 % TTFT, ITL flat -- and the best tok/s on
     # the board, above the old c160 "knee", which therefore was an artefact of
     # running with no CPU tier at all.
-    ("DPA+TBO +FP4 +hicache", "/workspace/results/hicache-fp4-c192", 16384),
+    ("DPA+TBO +FP4 +hicache", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/hicache-fp4-c192", 16384),
     # c256: CONC is the only difference from the c192 row above. Throughput keeps
     # rising (+7.9 %) but the CPU tier hits 100 % full and a fifth of all reuse
     # demotes to it, so ratio 3.0 -- not the engine -- is the constraint here.
     # Note `cache hit` is FLAT at 95.1 %: only the tier split moved (sec 14).
-    ("DPA+TBO +FP4 +hicache", "/workspace/results/hicache-fp4-c256", 16384),
+    ("DPA+TBO +FP4 +hicache", "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/hicache-fp4-c256", 16384),
     # Both levers at once, first time: interval 20 + hicache + FP4 at c128.
     # Scored as a PAIR against ATOM c128 -- PASS needs ITL p90 <= 61.5 ms AND
     # TTFT avg <= 10.9 s simultaneously, which interval tuning alone never hit
     # (interval20-c128 got the ITL but overshot TTFT to 13.22 s).
     ("DPA+TBO +FP4 +hicache, interval 20",
-     "/workspace/results/hicache-fp4-int20-c128", 16384),
+     "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/hicache-fp4-int20-c128", 16384),
     # BRIDGE ARM across the 2026-09-03 image swap: identical six settings to the
     # row above, new image (sglang e485dc2436, aiter + ROCm 7.2 + torch 2.9.1).
     # Everything ABOVE this line was measured on the old image. tok/s +2.11 % and
     # ITL -0.40 % vs its partner are both inside the 5.67 % replicate spread, so
     # the swap is null on both headline axes and the old rows stay quotable.
     ("DPA+TBO +FP4 +hicache, interval 20 [post-swap]",
-     "/workspace/results/hicache-fp4-int20-c128-postswap", 16384),
+     "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/hicache-fp4-int20-c128-postswap", 16384),
     # Shared-experts fusion ON. NOT single-variable vs the row above: the Wc
     # runtime commit (efaeb6f664) landed between the two arms, so fusion and
     # that change moved together. tok/s +0.07 % and ITL -0.40 % are null;
@@ -149,7 +149,7 @@ ROWS = [
     # Memory is the real result: weights 130.30 vs 133.75 GB/rank, KV pool
     # 7,412,480 vs 7,187,200, free VRAM med 15.45 vs 0.18 GB.
     ("DPA+TBO +FP4 +hicache, interval 20 +shared-experts fusion",
-     "/workspace/results/hicache-fp4-int20-c128-fuse-mf090", 16384),
+     "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/hicache-fp4-int20-c128-fuse-mf090", 16384),
     # The fusion series continued to c192/c256, same six settings, CONC only.
     # These are the two rows that matter against ATOM, because interval 20 had
     # never been run with hicache above c128: ITL p90 falls to 75.57 / 91.11 ms
@@ -157,9 +157,9 @@ ROWS = [
     # BELOW ATOM's 97.6 ms while throughput reaches 42,462 of ATOM's 44,722
     # (-5.05 %). TTFT is the axis still lost, 20.14 s vs 13.4 s. See sec 20.
     ("DPA+TBO +FP4 +hicache, interval 20 +shared-experts fusion",
-     "/workspace/results/hicache-fp4-int20-c192-fuse-mf090", 16384),
+     "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/hicache-fp4-int20-c192-fuse-mf090", 16384),
     ("DPA+TBO +FP4 +hicache, interval 20 +shared-experts fusion",
-     "/workspace/results/hicache-fp4-int20-c256-fuse-mf090", 16384),
+     "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/hicache-fp4-int20-c256-fuse-mf090", 16384),
     # 2026-09-04 -- A/B of the four decode-path PRs (#37423 / #37658 / #34624 /
     # #37580) on ONE tree: origin/main 8770c1db1f + the four merges, served by
     # PYTHONPATH from /shared_nfs/kk/tmp/combined. Config is byte-for-byte the
@@ -190,9 +190,9 @@ ROWS = [
     # Do not run a third arm on these flags. A 3600 s arm cannot resolve the
     # PRs' published +2.7 % / +2.95 % (needs ~8 runs/arm); profile at the kernel.
     ("combined 4 PRs on new main, gates OFF (paired baseline)",
-     "/workspace/results/combined-prs-c128-off-mf090", 16384),
+     "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/combined-prs-c128-off-mf090", 16384),
     ("combined 4 PRs on new main, gates ON (#37423+#37658+#34624)",
-     "/workspace/results/combined-prs-c128-on-mf090", 16384),
+     "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/combined-prs-c128-on-mf090", 16384),
     # Same pair at c192, where the pool is actually tight. The THREE c192 rows
     # (board / OFF / ON) decompose exactly, multiplicatively:
     #
@@ -219,9 +219,9 @@ ROWS = [
     # floors are all c64-derived and do NOT transfer to a c192 arm sitting next
     # to the documented capacity cliff.
     ("combined 4 PRs on new main, gates OFF (paired baseline)",
-     "/workspace/results/combined-prs-c192-off-mf090", 16384),
+     "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/combined-prs-c192-off-mf090", 16384),
     ("combined 4 PRs on new main, gates ON (#37423+#37658+#34624)",
-     "/workspace/results/combined-prs-c192-on-mf090", 16384),
+     "/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/combined-prs-c192-on-mf090", 16384),
 ]
 
 def cov_failed(d):

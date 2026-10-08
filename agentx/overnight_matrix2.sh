@@ -3,10 +3,10 @@
 # server in warmup (see SKILL.md "Matrix results as they land"). Runs only the
 # c128 pair -- the user's own arms 5 and 6 -- and drops arm 4 (c256-chunk16384),
 # which is the same configuration that has now failed twice.
-#   setsid nohup bash overnight_matrix2.sh </dev/null >/workspace/results/overnight/driver2.log 2>&1 &
+#   setsid nohup bash overnight_matrix2.sh </dev/null >/shared_nfs/kk/results/DeepSeek-V4-Pro/overnight/driver2.log 2>&1 &
 set -u
 SKILL_DIR=/workspace/claude-skills/agentx
-OUT=/workspace/results/overnight
+OUT=/shared_nfs/kk/results/DeepSeek-V4-Pro/overnight
 STATUS=$OUT/STATUS.txt
 mkdir -p $OUT
 RESFILE_TPL='dsv4_fp4_sglang_tp8-pp1-dcp1-pcp1-ep1-dpatrue_disagg-false_spec-mtp_agentic-b200align_c%s.json'

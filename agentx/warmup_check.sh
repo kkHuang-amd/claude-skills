@@ -4,8 +4,8 @@
 # arm, never the fastest arm (trap 11). Never judge health from /metrics (trap 1)
 # or decode-batch counts (trap 2).
 D=${1:?usage: warmup_check.sh <arm-dir-or-name>}
-[ -d "$D" ] || D=/workspace/results/overnight/$D
-REF=${REF:-/workspace/results/tbo-tp8-c64/benchmark.log}
+[ -d "$D" ] || D=/shared_nfs/kk/results/DeepSeek-V4-Pro/overnight/$D
+REF=${REF:-/shared_nfs/kk/results/DeepSeek-V4-Pro/tbo-tp8-c64/benchmark.log}
 LOG=$D/benchmark.log
 [ -f "$LOG" ] || { echo "no benchmark.log yet in $D (launcher still starting?)"; exit 0; }
 # NOTE: aiperf prints thousands separators once the warmup set exceeds 999

@@ -2,7 +2,7 @@
 # Stall/death detector for a running arm. Emits ONLY on: stall, server death,
 # phase change, completion. Heartbeat every 30 min so silence is never ambiguous.
 # Usage: watch_arm.sh <arm-name>
-A=${1:?arm name}; LOG=/workspace/results/$A.log; SRV=/workspace/results/$A/server.log
+A=${1:?arm name}; LOG=/shared_nfs/kk/results/DeepSeek-V4-Pro/$A.log; SRV=/shared_nfs/kk/results/DeepSeek-V4-Pro/$A/server.log
 prev=""; same=0; started=0; beat=0; phase=""
 while true; do
   sleep 300
@@ -15,7 +15,7 @@ while true; do
   [ -n "$ph" ] && [ "$ph" != "$phase" ] && { echo "PHASE: $ph  ($cur)"; phase=$ph; }
   # Completion must be recognised, or a finished arm looks exactly like a stall
   # (false STALL after every run, 2026-08-30). The result json is the ground truth.
-  if ls /workspace/results/$A/*_c[0-9]*.json >/dev/null 2>&1; then
+  if ls /shared_nfs/kk/results/DeepSeek-V4-Pro/$A/*_c[0-9]*.json >/dev/null 2>&1; then
     echo "COMPLETE: result json written; last progress $cur"; exit 0; fi
   if [ "$started" = 1 ] && [ "${alive:-0}" = 0 ]; then echo "SERVER GONE -- last progress $cur"; exit 0; fi
   if [ -n "$cur" ] && [ "$cur" = "$prev" ]; then same=$((same+1)); else same=0; fi

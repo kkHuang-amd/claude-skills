@@ -142,7 +142,7 @@ decomposition first.** It is arithmetic on the JSON, zero GPU cost.
 ### 19.3 The numbers
 
 Filled 2026-08-27 from
-`/workspace/results/armB-tp8-c48/dsv4_fp4_sglang_tp8-pp1-dcp1-pcp1-ep1-dpafalse_disagg-false_spec-mtp_agentic_c48.json`.
+`/shared_nfs/kk/results/DeepSeek-V4-Pro/armB-tp8-c48/dsv4_fp4_sglang_tp8-pp1-dcp1-pcp1-ep1-dpafalse_disagg-false_spec-mtp_agentic_c48.json`.
 
 | | our TP8 c64 (§16) | **our TP8 c48** | published TP8 c48 |
 |---|---|---|---|

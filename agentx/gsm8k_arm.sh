@@ -5,7 +5,7 @@
 set -uo pipefail
 SKILL_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REF="${1:?usage: gsm8k_arm.sh <ref_dir> <label>}"; LABEL="${2:?}"
-STATUS="${STATUS:-/workspace/results/accuracy/STATUS.txt}"
+STATUS="${STATUS:-/shared_nfs/kk/results/DeepSeek-V4-Pro/accuracy/STATUS.txt}"
 mkdir -p "$(dirname "$STATUS")"
 say() { echo "[$(date '+%F %T')] $LABEL  $*" | tee -a "$STATUS"; }
 

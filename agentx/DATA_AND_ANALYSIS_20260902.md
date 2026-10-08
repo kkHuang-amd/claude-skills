@@ -1,7 +1,7 @@
 # DeepSeek-V4-Pro / MI355X — measured data and analysis as of 2026-09-02
 
 Consolidated handoff for a session that will integrate this with other sources.
-Everything here is reproducible from `/workspace/results/<arm>/`. Companion
+Everything here is reproducible from `/shared_nfs/kk/results/DeepSeek-V4-Pro/<arm>/`. Companion
 documents: `FP4_INDEXER_REPORT.md` (the FP4 integration write-up, whose §5 on the
 OOR abort is **superseded** by §5 below) and `ITL_GAP_PROMPT.md` (the ATOM ITL
 investigation brief, whose experiment ordering is **superseded** by §6 below).

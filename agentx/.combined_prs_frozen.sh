@@ -174,7 +174,7 @@ oor_hit() {   # $1 = result dir
 WINNER=""
 for MF in 0.90 0.87 0.85; do
     ARM="$ARM_BASE-mf${MF/./}"
-    RESULT_DIR=/workspace/results/$ARM
+    RESULT_DIR=/shared_nfs/kk/results/DeepSeek-V4-Pro/$ARM
     mkdir -p "$RESULT_DIR"
     export MEM_FRACTION_STATIC="$MF"
     export RESULT_DIR
@@ -298,11 +298,11 @@ case "$WINNER" in
 esac
 echo "############################################################"
 
-R=/workspace/results/$WINNER
+R=/shared_nfs/kk/results/DeepSeek-V4-Pro/$WINNER
 
 if [ "$PR_GATES" = "on" ]; then
     OFF_ARM="combined-prs-c${CONC_TARGET}-off-mf090"
-    if [ -d "/workspace/results/$OFF_ARM" ]; then
+    if [ -d "/shared_nfs/kk/results/DeepSeek-V4-Pro/$OFF_ARM" ]; then
         echo "=== THE COMPARISON THAT COUNTS: gates ON vs OFF, same tree, same conc ==="
         echo "    Covers #37423 + #37658 + #34624. NOT #37580 (no env var, in both)."
         echo "    Replicate spread is 5.67 % -- a smaller delta is null, say 'null'."
@@ -316,7 +316,7 @@ else
     # trace mix and ISL move with concurrency (conc-and-trace-mix.md 19.6).
     # arm_report.py flags it rather than faking a number, but do not rely on that.
     BOARD_ARM="hicache-fp4-int20-c${CONC_TARGET}-fuse-mf090"
-    if [ -d "/workspace/results/$BOARD_ARM" ]; then
+    if [ -d "/shared_nfs/kk/results/DeepSeek-V4-Pro/$BOARD_ARM" ]; then
         echo "=== BASE BUMP: gates OFF vs the board's c${CONC_TARGET}, 62 commits of main ==="
         echo "    Same config, same conc, different tree. This is NOT a PR result."
         python3 "$HERE/arm_report.py" "$WINNER" "$BOARD_ARM"

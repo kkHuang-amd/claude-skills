@@ -4,7 +4,7 @@
 # the CI job log + a hand-written client_env); the client is srt_agentic.sh, as
 # CI runs it. See README.md.
 #
-# usage: POINT=c4 RESULT_DIR=/workspace/results/<name> bash run_point.sh
+# usage: POINT=c4 RESULT_DIR=/shared_nfs/kk/results/DeepSeek-V4-Pro-0813/<name> bash run_point.sh
 #   POINT_SET=ci36401947630 (default) or POINTS_DIR=<dir> picks the point set
 #   SMOKE=1  300 s plumbing check (1 warmup/lane, submission_valid=false)
 # Launch through matrix.sh (SKIP_SMOKE=1 POINTS=<pt> for one point): it runs a

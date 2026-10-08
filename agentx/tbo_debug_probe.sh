@@ -28,8 +28,8 @@
 # Reads the tree but does not write it. Safe to run only when NO arm is running.
 set -u
 
-PROBE_DIR=/workspace/results/tbo-debug-probe
-CMD_SRC=/workspace/results/dptbo-c128/sglang_command.txt
+PROBE_DIR=/shared_nfs/kk/results/DeepSeek-V4-Pro/tbo-debug-probe
+CMD_SRC=/shared_nfs/kk/results/DeepSeek-V4-Pro/dptbo-c128/sglang_command.txt
 BACKEND_PORT=8889
 
 test -f "$CMD_SRC" || { echo "FATAL: no recorded server command at $CMD_SRC"; exit 2; }

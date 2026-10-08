@@ -55,7 +55,7 @@ export MEM_FRACTION_STATIC=0.90
 # refuse to start rather than silently fall back, which is what we want.
 export EXTRA_SERVER_ARGS="--enable-deepseek-v4-fp4-indexer"
 
-export RESULT_DIR=/workspace/results/fp4-dptbo-c64-reclaim0
+export RESULT_DIR=/shared_nfs/kk/results/DeepSeek-V4-Pro/fp4-dptbo-c64-reclaim0
 export RESULT_FILENAME="dsv4_fp4_sglang_tp8-pp1-dcp1-pcp1-ep1-dpatrue_disagg-false_spec-mtp_agentic_c64"
 export AGENTIC_OUTPUT_DIR="$RESULT_DIR"
 

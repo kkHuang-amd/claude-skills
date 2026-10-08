@@ -16,8 +16,20 @@ aa5551d9b6 (main of 10-07). The bitwise check was re-run on the rebased tree (15
 - I4 microbenched (see "I4 microbench"): B dropped, A ~1% at 131k only, C (no logits rectangle, ~4-5% at 131k, effort L)
   is the only big lever. The user chose to try bf16 logits first.
 - I4 bf16 logits: prototype is exact (bitwise = rounded fp32). Microbench ~1.6% of fwd at 131k, 0.7% at 66k; the scorer is
-  compute-bound, so the C estimate dropped to ~2-3%. Next: fix the block-max kernel, then in-server spans, then a long-context A/B.
+  compute-bound, so the C estimate dropped to ~2-3%. The block-max kernel is fixed (publish 131k bf16 2.28 -> 1.42 ms).
   See "I4 bf16 logits".
+- In-server A/B done: fwd -1.7% at 131k, -0.9% at 66k, <= -0.4% below (see "In-server A/B").
+- PARKED (user, 2026-10-08): I4 does not help decode, and decode is the B200 vLLM gap. Decode indexer is 0.24 of
+  10.9 ms/step at c8; at c1, attn+indexer is MI355X 0.45 vs B200 1.05 ms. Focus moves to TP4_GAP_1006.md decode levers:
+  multi-stream overlap in the HIP decode graph (~2 ms/step at c1), then mHC/norm (~1 ms).
+- **I4 left open:**
+  - Upstream the block-max fix on its own (fp32 gain).
+  - The bf16 logits accuracy A/B is not done. The NIAH run was stopped after bf16=1 len~32k = 10/20, with no fp32 side,
+    so it is not interpretable.
+  - Before rerunning `i4_niah_ab.sh`, fix `i4_niah_eval.py`:
+    - its 4 chars/token guess is off: "32000" gave ~21.9k tokens, so scale the targets ~1.45x;
+    - it writes jsonl only at the end of each length.
+  - AgentX was not run.
 **Repro (measurement):**
 ```bash
 bash /workspace/claude-skills/dsv41/scripts/fp4idx_prefill_probe.sh
@@ -176,10 +188,38 @@ viewing the same pooled block.
   plus top-k's reads, not 10-12 ms. C is now ~2-3% at 131k at best, with effort L.
 - **bf16 total, per 16k fwd** (microbench, layers 2/8/14 at r=2 + layer 20 at r=1): 131k ctx ~4 ms (score 1.1 +
   top-k 2.5 + publish 0.4), ~1.6% of 244 ms. 66k ~1.5 ms (0.7%). <=33k ~0.3%.
+**Block-max fix** (2026-10-08, `scripts/i4_blockmax_tune.py`, `i4_blockmax_check.py`):
+- **Cause:** the masked load. `cols < length` is not provably vector-aligned, so Triton issues it per element. The
+  time was the same for fp32 and bf16 (1.84 vs 2.03 ms) and flat across tiles and warps.
+- **Ruled out:** grid order (row-major vs column-major) made no difference, so it is not HBM partition camping.
+- **Fix:** chunks fully inside the reach load unmasked; only the tail chunk masks. The tile is 512 blocks x 4 warps, with
+  its own constants (the gather kernel is unchanged).
+  - bf16 block-max: 1.84 -> 1.03 ms (3.9 TB/s);
+  - fp32: 2.03 -> 1.67 ms.
+- **Check:** 36/36 edge cases equal a torch reference (widths 1..131071, odd strides, fp32/bf16, FILL_TAIL on/off).
+- **Publish at 131k:** bf16 2.28 -> 1.42 ms, fp32 2.66 -> 2.32 ms. The fp32 gain stands on its own, so it can go upstream
+  without bf16.
 - **Next, in order:**
-  1. Fix the block-max kernel (bf16 publish 2.28 ms against a 0.82 ms one-read floor at 131k): ~1.4 ms more at 131k,
-     taking bf16 + block-max to ~2.2%.
-  2. In-server spans at 131k with the env on/off (`fp4idx_prefill_probe.sh` pointed at sglang-i4 + aiter-i4).
+  1. DONE: the block-max fix (above).
+  2. DONE: in-server spans (below).
+
+**In-server A/B** (2026-10-08, crsuse2-m2m-259, TP4 lane config, 16k chunk). Both sides run sglang-i4 + aiter-i4 with
+the block-max fix; only `SGLANG_DSV41_PREFILL_LOGITS_BF16` differs. Runs `/shared_nfs/kk/dsv41/fp4_index_port/
+i4_bf16{0_259_1008_0039,1_259_1008_0023}/summary.txt`. Warm medians with n >= 3; the 82k/98k/115k rows are n=2 with JIT
+stalls and are left out. ms, fp32 -> bf16:
+
+| ctx | fwd | indexer | score | sel_topk | sel_publish |
+|---|---|---|---|---|---|
+| 16k | 213.8 -> 212.9 | 10.37 -> 10.32 | 1.38 -> 1.35 | 1.24 -> 1.30 | 0.15 -> 0.11 |
+| 33k | 218.1 -> 217.3 (-0.4%) | 14.13 -> 13.80 | 3.82 -> 3.75 | 2.08 -> 2.03 | 0.60 -> 0.42 |
+| 66k | 227.0 -> 225.0 (-0.9%) | 22.01 -> 20.88 | 9.05 -> 8.80 | 3.97 -> 3.43 | 1.25 -> 0.87 |
+| 131k | 243.4 -> 239.3 (-1.7%) | 37.89 -> 34.76 | 20.46 -> 19.56 | 7.14 -> 5.75 | 2.38 -> 1.56 |
+
+- **The block-max fix alone (fp32):** sel_publish at 131k went from 2.81 (run i4_select_259, main) to 2.38.
+- **In-server top-k gains less than microbench:** -19% at 131k vs -44% (2.46 ms predicted, 1.39 measured). Not yet
+  explained [untested candidates: concurrent streams/clocks in the server, per-request row lengths].
+- **Verdict on speed:** bf16 + block-max passes the >=1% gate only at >= ~100k context (-1.7% at 131k). It is neutral at
+  <= 33k.
   3. A long-context accuracy A/B (not GSM8K).
 
 ### I1 measured split (2026-10-07, crsuse2-m2m-259, in-server spans, run i1_qsplit_259)
@@ -293,3 +333,6 @@ fake-quant (`_rope_fq4`).
 - 2026-10-07 crsuse2-m2m-259: I4 microbench. Streaming top-k reads twice (already ~1.5x one read), so B is dropped. Block-max runs at 60% BW; A ~1% at 131k only; C (no logits rectangle) is the only >1% lever.
 - 2026-10-07 crsuse2-m2m-259: I4 bf16. Accuracy proxy OK (0.4-0.7% set change vs 17-22% from FP4). top-k v2 bf16 variant is exact and -44% at 131k; publish block-max is not BW-bound. Next: bf16 scorer epilogue.
 - 2026-10-08 crsuse2-m2m-259: I4 bf16 scorer epilogue is bitwise = rounded fp32. The scorer is compute-bound (-5..-7%), top-k -40..-51% at >=66k. Microbench total ~1.6% at 131k. C estimate revised to ~2-3%.
+- 2026-10-08 crsuse2-m2m-259: I4 block-max. The masked per-element load was the bottleneck; the unmasked fast path gives publish at 131k bf16 2.28 -> 1.42 ms, fp32 2.66 -> 2.32. 36/36 edge checks pass.
+- 2026-10-08 crsuse2-m2m-259: I4 in-server A/B (bf16 vs fp32, both with the block-max fix): fwd -1.7% at 131k, -0.9% at 66k, ~0 at <=33k. Next: NIAH accuracy A/B.
+- 2026-10-08 crsuse2-m2m-259: NIAH A/B stopped after one length (bf16=1 22k: 10/20; no fp32 side). I4 is parked because the B200 gap is decode; next work is decode multi-stream overlap (TP4_GAP_1006.md).

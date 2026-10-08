@@ -238,3 +238,75 @@ index fda4135561..953a3962c1 100644
      ) -> torch.Tensor:
          if (
              self.vision is not None
+diff --git a/python/sglang/srt/layers/attention/dsv4/_idx_timing.py b/python/sglang/srt/layers/attention/dsv4/_idx_timing.py
+new file mode 100644
+index 0000000000..4739a39078
+--- /dev/null
++++ b/python/sglang/srt/layers/attention/dsv4/_idx_timing.py
+@@ -0,0 +1,66 @@
++"""Env-gated GPU/host timing of the DSV4.1 HIP low-ratio indexer prefill path (FP4_INDEX_PLANE_PORT.md P0.3b).
++
++SGLANG_DSV41_IDX_TIMING=<dir> enables it. Each span records a CUDA event pair (no sync) plus host
++wall time; finished spans are drained lazily and appended as JSON lines to
++<dir>/idx_timing_rank<r>.jsonl (rank 0 only). Spans inside CUDA-graph capture are skipped.
++GPU time of a span = time the stream took to pass it: kernel time plus any idle wait for the host.
++"""
++
++import json
++import os
++import time
++from contextlib import contextmanager
++
++import torch
++
++_DIR = os.environ.get("SGLANG_DSV41_IDX_TIMING", "")
++_pending = []
++_file = None
++_forward_id = 0
++
++
++def _rank() -> int:
++    if torch.distributed.is_available() and torch.distributed.is_initialized():
++        return torch.distributed.get_rank()
++    return 0
++
++
++def enabled() -> bool:
++    return bool(_DIR) and _rank() == 0
++
++
++def next_forward() -> int:
++    global _forward_id
++    _forward_id += 1
++    return _forward_id
++
++
++def _drain():
++    global _file
++    while _pending and _pending[0][2].query():
++        name, s, e, host_us, meta = _pending.pop(0)
++        if _file is None:
++            os.makedirs(_DIR, exist_ok=True)
++            _file = open(os.path.join(_DIR, f"idx_timing_rank{_rank()}.jsonl"), "a")
++        rec = {"name": name, "gpu_us": round(s.elapsed_time(e) * 1000, 1), "host_us": round(host_us, 1)}
++        rec.update(meta)
++        _file.write(json.dumps(rec) + "\n")
++    if _file is not None:
++        _file.flush()
++
++
++@contextmanager
++def span(name: str, **meta):
++    if not enabled() or torch.cuda.is_current_stream_capturing():
++        yield
++        return
++    s = torch.cuda.Event(enable_timing=True)
++    e = torch.cuda.Event(enable_timing=True)
++    s.record()
++    t0 = time.perf_counter()
++    yield
++    host_us = (time.perf_counter() - t0) * 1e6
++    e.record()
++    meta.setdefault("fwd", _forward_id)
++    _pending.append((name, s, e, host_us, meta))
++    _drain()

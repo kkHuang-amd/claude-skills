@@ -6,6 +6,7 @@
 # Load: prefill_cost_probe.py (max_new_tokens=1, cached prefix + NEW fresh tokens), then fp4idx_timing_summary.py.
 #   bash fp4idx_prefill_probe.sh      # GPUs 0-3, port 8888
 #   SRC=/sgl-workspace/sglang-fp4idx/python GPUS=0,1,2,3 PORT=8888 TAG=<name> PROBE="16384:0,16 4096:0"
+#   AITER=/sgl-workspace/aiter-i4 puts that aiter worktree ahead of the editable install (I4 bf16 logits).
 # Output: /shared_nfs/kk/dsv41/fp4_index_port/<TAG>/ (server.log, load.out, idx_timing_rank0.jsonl, summary.txt).
 # Refuses while any sglang server / lane runs.
 set -uo pipefail
@@ -15,7 +16,7 @@ OUT=/shared_nfs/kk/dsv41/fp4_index_port/$TAG; mkdir -p "$OUT"
 if pgrep -f 'agentx_lane.sh|tp4_moe_tune.sh|gemm_moe_tune.py' >/dev/null || pgrep -f '^sglang::' >/dev/null; then
     echo "REFUSING: lane / MoE tuning / sglang server running"; exit 1
 fi
-export PYTHONPATH=/sgl-workspace/mori SRC=${SRC:-/sgl-workspace/sglang-fp4idx/python} SGLANG_OPT_HIP_OPUS_SPARSE_PREFILL=1 OPUS=0
+export PYTHONPATH=/sgl-workspace/mori${AITER:+:$AITER} SRC=${SRC:-/sgl-workspace/sglang-fp4idx/python} SGLANG_OPT_HIP_OPUS_SPARSE_PREFILL=1 OPUS=0
 export EXTRA_ARGS="--fp8-gemm-backend aiter --enforce-shared-experts-fusion"
 export TP=4 EP_SIZE=1 GPUS=${GPUS:-0,1,2,3} PORT=${PORT:-8888} CONC=1
 export PREFILL_DECODE_INTERVAL=16 CHUNKED_PREFILL_SIZE=16384 MEM_FRACTION_STATIC=${MEM:-0.70}

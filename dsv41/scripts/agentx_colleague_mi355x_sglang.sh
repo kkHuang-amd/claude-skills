@@ -73,7 +73,8 @@ export SGLANG_USE_ROCM700A=0
 # Triton's HIP async-copy lowering, off in the qualified gfx950 DSv4.1-Flash
 # bring-up. Re-measure before turning it back on.
 export TRITON_HIP_USE_ASYNC_COPY=0
-export ROCM_QUICK_REDUCE_QUANTIZATION=NONE
+# QR_QUANT (not an inherited ROCM_QUICK_REDUCE_QUANTIZATION) selects quick-reduce quantization, e.g. QR_QUANT=INT8.
+export ROCM_QUICK_REDUCE_QUANTIZATION=${QR_QUANT:-NONE}
 export AITER_BF16_FP8_MOE_BOUND=0
 export TORCH_BLAS_PREFER_HIPBLASLT=1
 export HSA_NO_SCRATCH_RECLAIM=0
@@ -249,6 +250,9 @@ if [[ "$DP_ATTENTION" == true ]]; then
         export SGLANG_DP_SHARED_EXPERT_LOCAL=${SGLANG_DP_SHARED_EXPERT_LOCAL:-1}
         export SGLANG_DP_USE_GATHERV=${SGLANG_DP_USE_GATHERV:-1}
         export SGLANG_DP_USE_REDUCE_SCATTER=${SGLANG_DP_USE_REDUCE_SCATTER:-1}
+        # Decode-graph capture stages aiter AG/RS inputs through the registered IPC pool; without it the
+        # captured collectives read stale peer data on replay (NaN in the MoE). Default 0 in sglang.
+        export SGLANG_AITER_CAPTURE_COPY_IN=${SGLANG_AITER_CAPTURE_COPY_IN:-1}
     fi
 fi
 

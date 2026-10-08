@@ -70,3 +70,8 @@
 | 2026-10-07 | 259_gsm8k_i1 | 1319 | 5 | 0.908 | 0.000 | 64.627 s | /shared_nfs/kk/dsv41/gsm8k_259_gsm8k_i1.log |
 | 2026-10-07 | 259_gsm8k_base | 1319 | 5 | 0.907 | 0.000 | 32.162 s | /shared_nfs/kk/dsv41/gsm8k_259_gsm8k_base.log |
 | 2026-10-07 | 259_gsm8k_i1w | 1319 | 5 | 0.912 | 0.001 | 36.174 s | /shared_nfs/kk/dsv41/gsm8k_259_gsm8k_i1w.log |
+| 2026-10-07 | dp2tp_tbo_c32 (mi355-4; DP2 TP-MoE + TBO flag, but TBO gate did not fire -> effectively no TBO, no fusion) | 1319 | 5 | 0.907 | 0.000 | 36.689 s | /shared_nfs/kk/dsv41/gsm8k_dp2tp_tbo_c32.log |
+| 2026-10-07 | dp2tp_tbo_startfix (mi355-4; DP2 TP-MoE + V4.1 TBO running, extend_start_loc fix, no fusion) | 1319 | 5 | 0.901 | 0.000 | 36.480 s | /shared_nfs/kk/dsv41/gsm8k_dp2tp_tbo_startfix.log |
+| 2026-10-08 | rebase_gsm8k (mi355-4; fix branch rebased on upstream 7760d5264a, DP2 TP-MoE, no TBO, no fusion) | 1319 | 5 | 0.896 | 0.002 | 36.268 s | /shared_nfs/kk/dsv41/gsm8k_rebase_gsm8k.log |
+| 2026-10-08 | qr_int8_gsm8k (mi355-4; same as rebase_gsm8k + fusion + ROCM_QUICK_REDUCE_QUANTIZATION=INT8) | 1319 | 5 | 0.887 | 0.000 | 34.458 s | /shared_nfs/kk/dsv41/gsm8k_qr_int8_gsm8k.log |
+| 2026-10-08 | hipgate_gsm8k (mi355-4; 3a558e110a ROCm-only gating, fusion, COPY_IN=1 from script, QR NONE) | 1319 | 5 | 0.899 | 0.000 | 34.080 s | /shared_nfs/kk/dsv41/gsm8k_hipgate_gsm8k.log |

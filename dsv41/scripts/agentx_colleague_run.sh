@@ -12,9 +12,12 @@ source /workspace/claude-skills/agentx/agentx_env.sh
 export AIPERF_PYTHON_VERSION=${AIPERF_PYTHON_VERSION:-3.11}
 [ -x "$AIPERF_VENV/bin/aiperf" ] && export AIPERF_DEPS_READY=1
 export TP=${TP:-2} EP_SIZE=${EP_SIZE:-1} CONC=${CONC:-4} DURATION=${DURATION:-3600} PORT=${PORT:-8888}
-# benchmark_lib.sh resets AIPERF_DEPS_READY and rm -rf's the venv on every run; per-port venvs keep parallel lanes
-# from deleting each other's live aiperf install.
-export AIPERF_VENV=$AIPERF_RUNTIME_DIR/venv_p$PORT
+# benchmark_lib.sh resets AIPERF_DEPS_READY, rm -rf's the venv on every run AND re-derives AIPERF_VENV as
+# $AIPERF_RUNTIME_DIR/venv (an AIPERF_VENV export alone is ignored), so parallel lanes need a per-port runtime dir.
+export AIPERF_RUNTIME_DIR=/workspace/agentx-runtime/p$PORT AIPERF_VENV=/workspace/agentx-runtime/p$PORT/venv
+if [ ! -d "$AIPERF_RUNTIME_DIR/uv" ] && [ -d /workspace/agentx-runtime/uv ]; then   # seed uv + cache (hardlinks)
+  mkdir -p "$AIPERF_RUNTIME_DIR" && cp -al /workspace/agentx-runtime/uv /workspace/agentx-runtime/uv-cache "$AIPERF_RUNTIME_DIR/" 2>/dev/null || true
+fi
 export MODEL="deepseek-ai/DeepSeek-V4.1-Flash" MODEL_PREFIX="dsv41flash"
 export MODEL_PATH=${MODEL_PATH:-$( [ -d /shared_nfs/models/deepseek-ai/DeepSeek-V4.1-Flash ] && echo /shared_nfs/models/deepseek-ai/DeepSeek-V4.1-Flash || echo /shared_nfs/deepseek-ai/DeepSeek-V4.1-Flash)}
 export DP_ATTENTION=${DP_ATTENTION:-false}

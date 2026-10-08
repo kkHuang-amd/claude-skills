@@ -119,7 +119,7 @@ fi
 # batch above the captured 64 runs eagerly and allocates its attention
 # workspace on the fly, which OOMed the H200 eval at 128 running requests.
 # Batches within the graph tier reuse the capture-time workspace instead.
-CUDA_GRAPH_MAX_BS=64
+CUDA_GRAPH_MAX_BS=${CUDA_GRAPH_MAX_BS:-64}   # CI recipe c64: 128
 MAX_RUNNING_REQUESTS=$((2 * CONC))
 if (( MAX_RUNNING_REQUESTS > CUDA_GRAPH_MAX_BS )); then
     MAX_RUNNING_REQUESTS=$CUDA_GRAPH_MAX_BS

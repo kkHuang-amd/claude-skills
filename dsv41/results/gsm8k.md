@@ -75,3 +75,5 @@
 | 2026-10-08 | rebase_gsm8k (mi355-4; fix branch rebased on upstream 7760d5264a, DP2 TP-MoE, no TBO, no fusion) | 1319 | 5 | 0.896 | 0.002 | 36.268 s | /shared_nfs/kk/results/DeepSeek-V4.1-Flash/gsm8k_rebase_gsm8k.log |
 | 2026-10-08 | qr_int8_gsm8k (mi355-4; same as rebase_gsm8k + fusion + ROCM_QUICK_REDUCE_QUANTIZATION=INT8) | 1319 | 5 | 0.887 | 0.000 | 34.458 s | /shared_nfs/kk/results/DeepSeek-V4.1-Flash/gsm8k_qr_int8_gsm8k.log |
 | 2026-10-08 | hipgate_gsm8k (mi355-4; 3a558e110a ROCm-only gating, fusion, COPY_IN=1 from script, QR NONE) | 1319 | 5 | 0.899 | 0.000 | 34.080 s | /shared_nfs/kk/results/DeepSeek-V4.1-Flash/gsm8k_hipgate_gsm8k.log |
+| 2026-10-08 | opt1008_tp4_smoke | 1319 | 5 | 0.902 | 0.000 | 104.152 s | /shared_nfs/kk/results/DeepSeek-V4.1-Flash/gsm8k_opt1008_tp4_smoke.log |
+| 2026-10-08 | opt1008_tp2_smoke | 1319 | 5 | 0.897 | 0.000 | 110.981 s | /shared_nfs/kk/results/DeepSeek-V4.1-Flash/gsm8k_opt1008_tp2_smoke.log |

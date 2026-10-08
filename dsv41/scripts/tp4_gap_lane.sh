@@ -9,9 +9,9 @@ D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source /workspace/claude-skills/agentx/agentx_env.sh >/dev/null 2>&1
 source "${INFMAX_CONTAINER_WORKSPACE:-/workspace/InferenceX}/benchmarks/runtime_settings.sh"
 export AIPERF_EXPERIMENTAL_FAST=0 ENABLE_AGENTX_POWER=0 REQUIRE_POWER=0 IS_MULTINODE=false PP_SIZE=1 PCP_SIZE=1
-export PYTHONPATH=/sgl-workspace/mori SRC=/sgl-workspace/sglang/python SGLANG_OPT_HIP_OPUS_SPARSE_PREFILL=1 OPUS=0
+export PYTHONPATH=/sgl-workspace/mori SRC=/sgl-workspace/sglang/python SGLANG_OPT_HIP_OPUS_SPARSE_PREFILL=${SGLANG_OPT_HIP_OPUS_SPARSE_PREFILL:-1} OPUS=0
 export EXTRA_ARGS="${EXTRA_ARGS:---fp8-gemm-backend aiter --enforce-shared-experts-fusion}"   # never empty (lane would pass "")
-export TP=4 EP_SIZE=1 GPUS=${GPUS:-0,1,2,3} PORT=${PORT:-8888}
+export TP=${TP:-4} EP_SIZE=1 GPUS=${GPUS:-0,1,2,3} PORT=${PORT:-8888}
 export POINTS=${POINTS:-"m255_tp4_c1_rep:1:16:16384:0.70 m255_tp4_c8_rep:8:16:16384:0.70 m255_tp4_c16_rep:16:16:16384:0.80"}
 
 L=${INFMAX_CONTAINER_WORKSPACE:-/workspace/InferenceX}/benchmarks/benchmark_lib.sh

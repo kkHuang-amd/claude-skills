@@ -6,23 +6,24 @@
 #   MODE=smoke LANE=tp4 bash ...         # server only (CONC 8 config, EVAL_ONLY=true -> no SGLANG_SIMULATE_ACC_LEN)
 #                                         # + scheduler env check + GSM8K 1319, then stop the server
 #   Sweep lanes serialize on /tmp/opt1008_sweep.lock (tp2 then tp4; one server at a time).
-#   TAGP=opt1008 (tag prefix). Items 0 (index-Q fuse) and 2 (block-max) have no flag; 4 and 6 are default on.
+#   TAGP=opt1008 (tag prefix). CONCS="1 4" runs only those points (no c64 group); TSUF=_r2 appends to each tag. Items 0 (index-Q fuse) and 2 (block-max) have no flag; 4 and 6 are default on.
 # Out: /shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx/<TAGP>_tp<TP>_c<C>/, progress agentx/lane_<PORT>.txt
 set -uo pipefail
 D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 TAGP=${TAGP:-opt1008}
 case ${LANE:?LANE=tp2|tp4} in
-  tp2) export TP=2 GPUS=${GPUS:-0,1} PORT=${PORT:-8888}; CONCS="1 2 4 8 16 32"; C64=1 ;;
-  tp4) export TP=4 GPUS=${GPUS:-4,5,6,7} PORT=${PORT:-8890}; CONCS="1 2 4 8 16"; C64=0 ;;
+  tp2) export TP=2 GPUS=${GPUS:-0,1} PORT=${PORT:-8888}; DEF="1 2 4 8 16 32"; C64=1 ;;
+  tp4) export TP=4 GPUS=${GPUS:-4,5,6,7} PORT=${PORT:-8890}; DEF="1 2 4 8 16"; C64=0 ;;
   *) echo "bad LANE"; exit 1 ;;
 esac
+if [ -n "${CONCS:-}" ]; then C64=0; else CONCS=$DEF; fi
 export SGLANG_OPT_HIP_OPUS_SPARSE_PREFILL=1 QR_QUANT=${QR_QUANT:-INT8}   # user 2026-10-08: OPUS sparse prefill on, quick-reduce INT8 (CI: off / NONE)
 export EXTRA_ARGS="--fp8-gemm-backend aiter --enforce-shared-experts-fusion"
 export SGLANG_DSV41_PREFILL_LOGITS_BF16=1 SGLANG_ROCM_MHC_ALL_REDUCE_STATS=1 SGLANG_AITER_SMALL_MOE_SORT_MAX_PAIRS=64 \
        SGLANG_ROCM_MXFP8_AITER_PRESHUFFLE=1 SGLANG_HIP_WO_A_MXFP8=1
 # CI per-point args: pdi 16 (c<32) / 4; chunk 16384 (c<64) / 4096; mem 0.70, 0.80 at TP2 c16/c32, 0.85 at c64.
 mem(){ local c=$1; if ((c>=64)); then echo 0.85; elif ((TP==2 && c>=16)); then echo 0.80; else echo 0.70; fi; }
-pt(){ local c=$1; echo "${TAGP}_tp${TP}_c$c:$c:$((c>=32?4:16)):$((c>=64?4096:16384)):$(mem $c)"; }
+pt(){ local c=$1; echo "${TAGP}_tp${TP}_c$c${TSUF:-}:$c:$((c>=32?4:16)):$((c>=64?4096:16384)):$(mem $c)"; }
 if [ "${MODE:-sweep}" = smoke ]; then
   T=${TAGP}_tp${TP}_smoke; OUT=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx
   TAG=$T CONC=8 PREFILL_DECODE_INTERVAL=16 CHUNKED_PREFILL_SIZE=16384 MEM_FRACTION_STATIC=0.70 SERVER_ONLY=1 EVAL_ONLY=true \

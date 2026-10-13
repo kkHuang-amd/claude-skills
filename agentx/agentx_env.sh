@@ -1,7 +1,8 @@
 # AgentX test-environment for InferenceX single-node agentic benchmarks.
 # source this before running any benchmarks/single_node/agentic/*.sh
-export INFMAX_CONTAINER_WORKSPACE=/workspace/InferenceX
-export AIPERF_RUNTIME_DIR=/workspace/agentx-runtime
+export INFMAX_CONTAINER_WORKSPACE=${INFMAX_CONTAINER_WORKSPACE:-/workspace/InferenceX}
+export AGENTX_RUNTIME_ROOT=${AGENTX_RUNTIME_ROOT:-/workspace/agentx-runtime}
+export AIPERF_RUNTIME_DIR=$AGENTX_RUNTIME_ROOT
 export AIPERF_VENV="$AIPERF_RUNTIME_DIR/venv"
 export AIPERF_UV_INSTALL_DIR="$AIPERF_RUNTIME_DIR/uv/bin"
 export AIPERF_UV_CACHE_DIR="$AIPERF_RUNTIME_DIR/uv-cache"

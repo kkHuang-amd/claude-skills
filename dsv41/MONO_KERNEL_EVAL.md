@@ -127,3 +127,4 @@ sglang); co-tenancy (a resident 256-CTA grid starves if another process shares t
 ## Log (append-only)
 - 2026-10-10 crsuse2-m2m-255: doc created from the three sources (sub-agent reads of #60397 @193922d6, ATOM #2479 head
   454d0e3 / merge 0873517 via /workspace/ATOM refs/remotes/pr/2479, RFC #60904 at 2026-10-10, no reviewer comments yet).
+- 2026-10-10 mi355-4: P0.1 layouts + P0.2 sourcing done in MONO_KERNEL_mi355-4.md (owner mi355-4). Summary: FFN-only needs no KV; SGLang KV = vLLM 584 B record; routed MXFP4 GUGU matches (GU_ITLV=1); shared expert needs keep_plain_weight_layout (aiter bpreshuffle); mono only at <=48 rows (bs<=8). Kernel source: vLLM mono/ package imports no other vLLM code (shim for its absolute imports); ATOM mono needs all of ATOM.

@@ -359,7 +359,7 @@ trap cleanup_server EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-"${SGLANG_CMD[@]}" >> "$SERVER_LOG" 2>&1 &
+${SERVER_CMD_PREFIX:-} "${SGLANG_CMD[@]}" >> "$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 echo "Server PID: $SERVER_PID"
 wait_for_server_ready --port "$SGLANG_BACKEND_PORT" --server-log "$SERVER_LOG" --server-pid "$SERVER_PID"

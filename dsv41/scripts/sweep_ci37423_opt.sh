@@ -18,7 +18,7 @@ case ${LANE:?LANE=tp2|tp4} in
 esac
 if [ -n "${CONCS:-}" ]; then C64=0; else CONCS=$DEF; fi
 export SGLANG_OPT_HIP_OPUS_SPARSE_PREFILL=1 QR_QUANT=${QR_QUANT:-INT8}   # user 2026-10-08: OPUS sparse prefill on, quick-reduce INT8 (CI: off / NONE)
-export EXTRA_ARGS="--fp8-gemm-backend aiter --enforce-shared-experts-fusion"
+export EXTRA_ARGS=${SWEEP_EXTRA_ARGS:-"--fp8-gemm-backend aiter --enforce-shared-experts-fusion"}   # SWEEP_EXTRA_ARGS: e.g. mono runs
 export SGLANG_DSV41_PREFILL_LOGITS_BF16=1 SGLANG_ROCM_MHC_ALL_REDUCE_STATS=1 SGLANG_AITER_SMALL_MOE_SORT_MAX_PAIRS=64 \
        SGLANG_ROCM_MXFP8_AITER_PRESHUFFLE=1 SGLANG_HIP_WO_A_MXFP8=1
 # CI per-point args: pdi 16 (c<32) / 4; chunk 16384 (c<64) / 4096; mem 0.70, 0.80 at TP2 c16/c32, 0.85 at c64.

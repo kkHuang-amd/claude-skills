@@ -17,13 +17,15 @@ import time
 
 import requests
 
+TEMPERATURE = 0.0
+
 
 def one(url, ids, osl, res, i, first_evt):
     if url.endswith("/generate"):
         body = {"input_ids": ids, "stream": True,
-                "sampling_params": {"max_new_tokens": osl, "ignore_eos": True, "temperature": 0.0}}
+                "sampling_params": {"max_new_tokens": osl, "ignore_eos": True, "temperature": TEMPERATURE}}
     else:  # /v1/completions with token-id prompt (the OpenAI path AgentX uses works without the 07:12 hang)
-        body = {"model": "default", "prompt": ids, "max_tokens": osl, "ignore_eos": True, "temperature": 0.0,
+        body = {"model": "default", "prompt": ids, "max_tokens": osl, "ignore_eos": True, "temperature": TEMPERATURE,
                 "stream": True, "stream_options": {"include_usage": True}}
     t0 = time.perf_counter(); t_first = t_last = None; ntok = 0
     with requests.post(url, json=body, stream=True, timeout=900) as r:  # fail fast on a server hang
@@ -60,7 +62,7 @@ def run(a, label, profile, prompts):
             e.wait()
         time.sleep(0.5)  # let the batch settle into steady decode
         r = requests.post(f"{base}/start_profile", json={"output_dir": a.profile_dir, "num_steps": a.profile_steps,
-                          "activities": ["GPU", "CPU"], "record_shapes": True, "with_stack": False}, timeout=600)
+                          "activities": a.activities.split(","), "record_shapes": True, "with_stack": False}, timeout=600)
         print(f"[{label}] start_profile at {time.perf_counter() - t0:.1f}s -> {r.status_code} {r.text[:120]}", flush=True)
     for t in ths:
         t.join()
@@ -78,10 +80,14 @@ def main():
     p.add_argument("--isl", type=int, default=65536)
     p.add_argument("--osl", type=int, default=1024)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--temperature", type=float, default=0.0, help="AgentX sends none -> server default 1.0")
     p.add_argument("--api", choices=["generate", "completions"], default="generate")
     p.add_argument("--profile-dir")
     p.add_argument("--profile-steps", type=int, default=40)
+    p.add_argument("--activities", default="GPU,CPU", help="GPU-only keeps host gaps closer to unprofiled")
     a = p.parse_args()
+    global TEMPERATURE
+    TEMPERATURE = a.temperature
     # Same prompts (same seed) in every round: the "prime" round cold-prefills them with 1 output token, so in "clean"
     # and "profile" every prefill is a cached-prefix hit (~0.1 s) and all `conc` requests decode together. With cold
     # prefills the TTFTs spread ~0.7-12 s and early requests finished their OSL before the last started -> the

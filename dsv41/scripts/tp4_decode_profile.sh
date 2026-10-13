@@ -14,7 +14,7 @@ if pgrep -f 'agentx_lane.sh|tp4_moe_tune.sh|gemm_moe_tune.py' >/dev/null || pgre
     echo "REFUSING: lane / MoE tuning / sglang server running"; exit 1
 fi
 export PYTHONPATH=/sgl-workspace/mori SRC=${SRC:-/sgl-workspace/sglang/python} SGLANG_OPT_HIP_OPUS_SPARSE_PREFILL=1 OPUS=0
-export EXTRA_ARGS="--fp8-gemm-backend aiter --enforce-shared-experts-fusion"
+export EXTRA_ARGS=${EXTRA_ARGS:-"--fp8-gemm-backend aiter --enforce-shared-experts-fusion"}
 export TP=4 EP_SIZE=1 GPUS=${GPUS:-0,1,2,3} PORT=${PORT:-8888} CONC=$CONC
 export PREFILL_DECODE_INTERVAL=16 CHUNKED_PREFILL_SIZE=16384 MEM_FRACTION_STATIC=${MEM:-0.70}
 export SERVER_ONLY=1 TAG=$TAG
@@ -40,13 +40,14 @@ if [ "$MODE" = prefix ]; then
     echo "load exit=$?"; grep -E '^L=|^\||^N=|Error|Traceback' "$OUT/load.out" | cut -c1-220
 else
     # PROFILE=0: clean TPOT only (a /start_profile at c1 dropped the connection once, 2026-10-06 13:38)
-    PARGS=(--profile-dir "$OUT" --profile-steps "$STEPS"); [ "${PROFILE:-1}" = 0 ] && PARGS=()
+    PARGS=(--profile-dir "$OUT" --profile-steps "$STEPS" --activities "${PROF_ACT:-GPU,CPU}"); [ "${PROFILE:-1}" = 0 ] && PARGS=()
     python3 -I "$D/decode_load_profile.py" --port "$PORT" --api "$API" --conc "${LOAD_CONC:-$CONC}" --isl "$ISL" --osl "$OSL" \
         "${PARGS[@]}" > "$OUT/load.out" 2>&1
     echo "load exit=$?"; grep '^\[' "$OUT/load.out" | cut -c1-220
 fi
 sleep 20   # trace flush
 kill -- -$SPID 2>/dev/null; sleep 5
-for p in $(ps -eo pid,comm | awk '$2 ~ /^sglang::/{print $1}'); do kill -9 "$p"; done
+for p in $(ps -eo pid,comm | awk '$2 ~ /^sglang::/{print $1}'); do
+    tr '\0' '\n' 2>/dev/null < /proc/$p/environ | grep -qx "HIP_VISIBLE_DEVICES=$GPUS" && kill -9 "$p"; done
 echo "traces:"; find "$OUT" -maxdepth 2 -name '*.json*' -newer "$OUT/load.out" -printf '  %s %p\n' 2>/dev/null | head -8
 find "$OUT" -maxdepth 2 \( -name '*.trace.json*' -o -name '*.pt.trace*' \) -printf '  %s %p\n' 2>/dev/null | head -8

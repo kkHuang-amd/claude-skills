@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Whole-layer mono validation chain (MONO_KERNEL_mi355-4.md), queued behind a running job on the same GPUs.
+#   WAIT_PID=<pid> GPUS=4,5,6,7 bash mono_whole_chain.sh
+# Waits for WAIT_PID to exit, then, all with SGLANG_DSV4_KV_LAYOUT=v4 (the kernels read the V4 KV record):
+#   1. GSM8K 1319, parallel 8: whole-layer mono (SGLANG_MONO_DSV41_WHOLE=1)      tag mi355-4_monowhole_gsm8k_p8
+#   2. GSM8K 1319, parallel 8: no mono, fusion off (V4-layout baseline)          tag mi355-4_v4nomono_gsm8k_p8
+#   3. TPOT sim-AL A/B: prod + nomono on V4, then whole-layer mono               tags mi355-4_tpotv4_* / _tpotv4whole_*
+# Each step has a 1 h timeout; leftovers on GPUS are killed by PID between steps. Markers -> stdout.
+set -uo pipefail
+D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+GPUS=${GPUS:-4,5,6,7}
+cleanup() {
+  for p in $(ps -eo pid,comm | awk '$2 ~ /^sglang::/ || $2=="python3" {print $1}'); do
+    tr "\0" "\n" 2>/dev/null < /proc/$p/environ | grep -qx "HIP_VISIBLE_DEVICES=$GPUS" && kill -9 "$p" 2>/dev/null
+  done
+  sleep 10
+}
+if [ -n "${WAIT_PID:-}" ]; then
+  echo "[$(date +%T)] waiting for PID $WAIT_PID"
+  while kill -0 "$WAIT_PID" 2>/dev/null; do sleep 60; done
+  echo "[$(date +%T)] PID $WAIT_PID exited"; sleep 30; cleanup
+fi
+export SGLANG_DSV4_KV_LAYOUT=v4
+echo "[$(date +%T)] 1 whole-layer GSM8K"
+SGLANG_MONO_DSV41_WHOLE=1 TAG=mi355-4_monowhole_gsm8k_p8 MONO=1 NQ=1319 PARALLEL=8 timeout 3600 bash "$D/mono_smoke.sh"
+echo "rc=$?"; cleanup
+echo "[$(date +%T)] 2 V4 baseline GSM8K"
+TAG=mi355-4_v4nomono_gsm8k_p8 MONO=0 NQ=1319 PARALLEL=8 timeout 3600 bash "$D/mono_smoke.sh"
+echo "rc=$?"; cleanup
+echo "[$(date +%T)] 3a TPOT V4 prod + nomono"
+CONFIGS="prod nomono" TAGP=mi355-4_tpotv4 OSL=1024 timeout 3600 bash "$D/mono_tpot_ab.sh"
+echo "rc=$?"; cleanup
+echo "[$(date +%T)] 3b TPOT V4 whole-layer mono"
+SGLANG_MONO_DSV41_WHOLE=1 CONFIGS="mono" TAGP=mi355-4_tpotv4whole OSL=1024 timeout 3600 bash "$D/mono_tpot_ab.sh"
+echo "rc=$?"; cleanup
+echo "[$(date +%T)] chain done"

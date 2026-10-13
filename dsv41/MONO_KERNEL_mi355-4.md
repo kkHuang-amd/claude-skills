@@ -80,7 +80,7 @@ Target = ATOM #2479 coverage (all 40 layers whole + draft on mono), not vLLM #60
 | 11 | Per-stage numerics tests vs SGLang ops (K1 insert bytes vs V41 store kernel, K2 vs aiter_sparse, FFN stages) | not started |
 | 12 | MiniMax-M3 on our framework: kernels = their aiter PR6047 copy (user 10-13), wrap as a MonoSpec, bring their prerequisites (aiter sparse PA, aiter indexer, SHUFFLE KV); weights /shared_nfs/MiniMaxAI/MiniMax-M3 | not started; user to decide: us vs zijie on our framework. Prep done: their common.py mapped onto gfx950/common (22/30 identical) |
 | 13 | GSM8K A/B x3 to settle the -1 pt (mono vs no-mono) | not started |
-| 21 | DSV4.1 mono MoE does not mask CUDA-graph padding rows (they route like real rows; SGLang's module path masks them via num_token_non_padded) -> extra experts loaded at non-captured batch sizes | found 10-13 (task 20 F7); perf only. Plan: pass the live row count to the router stage, padded rows select no expert; measure c3/c5/c7 + AgentX c4 |
+| 21 | (low priority, with task 16) DSV4.1 mono MoE does not mask CUDA-graph padding rows (SGLang's module path masks them via num_token_non_padded) | checked 10-13: no effect on current runs: max_running_requests=8 and graphs captured at every bs 1..8, so no padding rows (mono captures 6/12/../48 verify, 5/10/../40 draft rows). Matters only if max_running_requests > 8 with a sparse capture list |
 | 22 | Check mode: layer 17 hidden max\|diff\| 15% of ref max vs module path (median over 40 layers 2.4%) | found 10-13; accuracy fine. Look at which stage diverges (MXFP8 shared expert / quant order) |
 | 23 | Unreachable shared-common (L0) code: keep or delete | deferred to the M3 decision (M3 uses some, e.g. fp8x8_bf16_pk); per-step clear + fence protocol goes with task 10 |
 | -- | Optional: GPU-side gap profile (~0.45 ms/step at c1) | needs an env switch to force the nosync path off so the torch profiler sees verify-graph kernels |
@@ -804,3 +804,4 @@ GSM8K 0.940 (100 q), NIAH 4/4, 0 Tracebacks.
 - 2026-10-13 20:50 mi355-4: task 20 done (MONO_COMPARE_mi355-4.md): commit 134919476c on perf/v41-mono-fw, perf/v41-mono fast-forwarded
   locally (not pushed). New open items 21-24.
 - 2026-10-13 20:46 mi355-4: pushed HaiShaw/sglang perf/v41-mono 3c5ea0778c..134919476c; skills c5d88f4.
+- 2026-10-13 20:50 mi355-4: task 21 downgraded: no padding rows in our configs (bs 1..8 all captured, max_running_requests 8).

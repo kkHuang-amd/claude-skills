@@ -23,7 +23,7 @@ format + isort 7.0.0 (/tmp/isort_pkg) clean.
 - F7: CI registration for the K2i GPU test; new CPU tests (switch, capture-width, check mode, state bindings,
   shared-common guard). Padding audit: DSV4.1 MoE does not mask CUDA-graph padding rows (they route like real rows;
   SGLang's module path masks them via num_token_non_padded) -> extra experts loaded at non-captured batch sizes; perf
-  follow-up, not a correctness issue (padding KV goes to slot 0).
+  follow-up, not a correctness issue (padding KV goes to slot 0). Checked 20:50: no padding rows in our runs (every bs 1..8 captured, max_running_requests 8) -> no effect today.
 **Running (mi355-4, GPUs 4-7, started 17:40 +08):** final validation, chain PID 1222260, log /shared_nfs/kk/fw_final.log,
 script scripts/fw_final_chain.sh: fw6 (snap_fw_f6_1013) vs base (snap_v41mono_rebased_1013) GSM8K 1319 + NIAH 32/64/120k x20
 + TPOT x3, then AgentX TP4 c1/c4 on fw6 (TAGP mi355-4_fwfinal; compare mi355-4_task18reb 617.1 / 529.1). ~3-4 h.
@@ -215,3 +215,4 @@ user's go.
 - 2026-10-13 20:40 mi355-4: AgentX TP4 c4 fw6 9,561 / 516.0 vs task18reb 10,146 / 529.1 (-5.8% / -2.5%); per-request ITL equal
   (median 1.002), so decode speed unchanged; c4 TTT varies ~7% between runs of the same tree class. Waiting for the user.
 - 2026-10-13 20:45 mi355-4: user chose option 1: commit 134919476c, perf/v41-mono fast-forwarded (local only).
+- 2026-10-13 20:50 mi355-4: padding-row finding has no effect on current runs (all bs 1..8 captured); task 21 low priority.

@@ -6,43 +6,36 @@ findings are appended to the parent's Log, never to its CONTINUE HERE.
 
 ## CONTINUE HERE
 
-**Status (mi355-4, 2026-10-13 07:40 +08):** all 40 decoder layers on mono (K1+K2; the 8 indexer layers are "hybrid":
-SGLang indexer, and the compressor on 2/8/14/20, run between K1 and K2) on production KV layouts + 9b nosync + task 8
-draft on mono + 9c sim-accept fold (SGLANG_DSPARK_SIMULATE_FOLD=1). All in /sgl-workspace/sglang, uncommitted; frozen
-copy /sgl-workspace/snap_task9c_1012. GSM8K TP4 0.906, TP2 0.904.
-AgentX (night 10-12, section "AgentX night 10-12"): P90 vs ATOM 1010 (run 38056462998) TP2 c1/4/8/16 +3.2/+18.8/+17.3/+24.4%,
-TP4 c1 -2.2%, c4 +11.2%, c8 +9.6% (rerun +14.6%); TTT/GPU within +-2% of ATOM; 0 Tracebacks.
-Only gap left: TP4 c1 P90 (our ITL p90 1.665 vs ATOM 1.628), tail = long-ISL requests -> context-dependent indexer cost.
-No host bubble left at c1 (py-spy, task 9c).
-**Task 17 S1 (mi355-4, 2026-10-13): hybrid wired** (section "Task 17 S1"): ATOM's tree was 2-2.7x slower than SGLang's
-top-k, so per the user K2A=1 = K2i FP4 scorer + SGLang's top-k / candidate kernels (+ device walk plan replacing the
-aiter decode schedule). Microbench c1 -46 us/step at 128k, -167 at 512k; real-data K2A_CHECK Jaccard min 1.0 (FULL) /
-0.996 (REINDEX); GSM8K 100 0.940, NIAH 120k 4/4.
-**A/B done (10-13, snap_k2a_s1_1013, TP4, task17_ab.sh):** GSM8K 1319 k1 0.904 / k0 0.903, NIAH 60/60 both, 0 Tracebacks;
-TPOT mean of 3 (ms) k0 -> k1: 8k c1 1.460 -> 1.451 (-0.6%), 8k c4 2.128 -> 2.178 (+2.3%), 128k c1 1.497 -> 1.457 (-2.7%),
-128k c4 2.189 -> 2.223 (+1.5%; k0 alone spans 2.09-2.25). **Next (ask the user):** c4 does not match the microbench
-(-125 us/step predicted) -> more reps / GPU profile at c4; 512k A/B; AgentX TP4 c1.
-**Pushed (10-13):** HaiShaw/sglang perf/v41-mono @3c5ea0778c (5 commits on upstream +170; worktree /sgl-workspace/sglang_v41mono;
-snapshot snap_v41mono_rebased_1013). AgentX TP4 on it (K2A=1): c1 7,444 / P90 617.1 (vs ATOM 1010 +0.5% / +0.2%),
-c4 10,146 / 529.1 (+5.0% / +22.1%); 0 Tracebacks. **Next: task 20** (user 10-13, new session; prompt dsv41/MONO_COMPARE_SESSION_PROMPT_1013.md, doc
-dsv41/MONO_COMPARE_mi355-4.md): compare our mono design with zijiecode/sglang-mono-amd m3-mono. Then (ask the user):
-512k A/B, S3 (index q in K1), tasks 15/16/19.
-Then (ask the user): tasks 15, 16, 18 (commit prep), 10-13.
-Nothing committed (sglang dsv41-mono-ffn, aiter dsv41-opt-1008, skills dsv41/*): ask first; no AI attribution.
-**Run:** on perf/v41-mono >= 134919476c mono = `--layer-backend mono` alone (no env); older snapshots: `--enable-mono-kernel` + mono env = `SGLANG_MONO_DSV41_WHOLE=1 SGLANG_MONO_DSV41_INDEXER=1 SGLANG_MONO_DSV41_EDGE=1 SGLANG_MONO_DSV41_DRAFT=1 SGLANG_MONO_DSV41_K2A=1`. A/B of snapshots: scripts/fw_ab.sh (per-variant MONO_ARG)
+**Status (mi355-4, 2026-10-14 07:30 +08):** perf/v41-mono = 134919476c, pushed to HaiShaw/sglang (task 20 framework merge:
+`--layer-backend mono` alone enables the validated set -- 40 whole layers, indexer/edge layers, DSpark draft, K2i;
+kernels in `python/sglang/kernels/ops/mono/gfx950/{common,deepseek_v41}`, one shared common, check mode). Worktree
+/sgl-workspace/sglang_v41mono (branch perf/v41-mono-fw = same commit), frozen copy /sgl-workspace/snap_fw_f6_1013.
+Validation vs base snap_v41mono_rebased_1013: GSM8K 1319 0.901 / 0.912, NIAH 60/60, TPOT +-1.4%; AgentX TP4 (section
+"AgentX night 10-13"): c1 7,401 / 610.3, c4 9,561 / 516.0 and rerun 10,021 / 487.1 (= base within run-to-run spread),
+c8 16,357 / 409.9, c16 29,078 / 272.5; per-request ITL vs older runs 0.97-1.005; 0 Tracebacks.
+**Next (user picks in the new session; prompt dsv41/MONO_NEXT_SESSION_PROMPT_1014.md):** task 25 (TP2 sweep missing),
+17 S3, 22+13 (numerics), 19, 12 (needs the user's decision), 10, 11, 15, 16.
+**Run (perf/v41-mono >= 134919476c):**
 ```bash
-S=/workspace/claude-skills/dsv41/scripts; cd /tmp   # never launch from inside sglang/srt/models (transformers.py shadows)
-<mono env> VARIANTS="x:/sgl-workspace/snap_task9c_1012" SOAK=none GSM=x bash $S/task9b_ab.sh   # c1/c4 TPOT x3 + GSM8K
-<mono env> INFMAX_CONTAINER_WORKSPACE=/workspace/InferenceX-ci37423/inferencex-e2e AGENTX_RUNTIME_ROOT=/workspace/agentx-runtime-ci37423 \
-  SRC=<frozen snapshot>/python LANE=tp4 CONCS="1 2 4 8" TAGP=<tag> \
+S=/workspace/claude-skills/dsv41/scripts; cd /tmp   # never launch from inside sglang/srt/models
+# A/B of frozen snapshots (per-variant switch): MONO_ARG=--layer-backend=mono (new) / --enable-mono-kernel + env (old)
+TAGP=x NQ=1319 REPS=3 PHASES="gsm ab" VARIANTS="a:/sgl-workspace/snap_fw_f6_1013:MONO_ARG=--layer-backend=mono" bash $S/fw_ab.sh
+INFMAX_CONTAINER_WORKSPACE=/workspace/InferenceX-ci37423/inferencex-e2e AGENTX_RUNTIME_ROOT=/workspace/agentx-runtime-ci37423 \
+  SRC=/sgl-workspace/snap_fw_f6_1013/python LANE=tp4 CONCS="1 4" TAGP=<tag> \
   SWEEP_EXTRA_ARGS="--fp8-gemm-backend aiter --disable-shared-experts-fusion --layer-backend mono" bash $S/sweep_ci37423_opt.sh
-python3 -I $S/agentx_join_itl.py <atom agentic dir> <our run dir>   # per-request ITL vs ATOM by ISL bin
+python3 -I $S/agentx_table.py <tag> mi355-4_fwfinal; python3 -I $S/agentx_join_itl.py <run A dir> <run B dir>
+PYTHONPATH=<tree>/python HIP_VISIBLE_DEVICES=4 python3 $S/mono_isa_dump.py OUT   # compile-only ISA, diff -r two OUTs
 ```
-AgentX and A/B runs ALWAYS from a frozen copy of /sgl-workspace/sglang/python. Profiles: PROF_ACT=GPU (CPU activity at c1
-hung once); with the nosync patch the profiler drops verify-graph kernels -> gaps only estimable from clean TPOT.
-**Pass criteria:** GSM8K TP4 >= 0.895 (EVAL_ONLY, parallel 8); real accept len ~3.36; AgentX vs task8 rows; no Traceback.
+CPU tests: `PYTHONPATH=/sgl-workspace/sglang_v41mono/python python3 -m pytest test/registered/mono` (default import is
+/sgl-workspace/sglang). Lint: ruff /root/.cache/pre-commit/repomie1g607/py_env-python3.10/bin/ruff (--select
+F401,F821,F823,UP037 + format), isort 7.0.0 in /tmp/isort_pkg. Commits: author wunhuang <wunhuang@amd.com> via -c
+(no git identity on this node), no AI attribution.
+**Background jobs:** ONE chain at a time on GPUs 4-7. Launch `setsid bash script.sh > log 2>&1 < /dev/null &` and kill
+with the process group from `ps -o pgid= -p <pid>` (10-13 night: `kill -- -$!` missed the chain, two chains shared the
+GPUs, TP2 smoke OOM'd and the base c4 rerun failed). Check `ps -eo pid,cmd | rg 'sweep|fw_ab|night'` before starting.
+**Pass criteria:** GSM8K TP4 >= 0.895; NIAH all; TPOT within +-2% of snap_fw_f6_1013; no Traceback.
 
-## Task list (mi355-4; status as of 2026-10-13 20:50 +08 -- keep in sync)
+## Task list (mi355-4; status as of 2026-10-14 07:30 +08 -- keep in sync)
 
 Target = ATOM #2479 coverage (all 40 layers whole + draft on mono), not vLLM #60397's split. Nothing is committed yet
 (sglang dsv41-mono-ffn, aiter dsv41-opt-1008, skills dsv41/*). Latest frozen snapshot: /sgl-workspace/snap_k2a_s1_1013 (task9c + K2A hybrid).
@@ -79,10 +72,11 @@ Target = ATOM #2479 coverage (all 40 layers whole + draft on mono), not vLLM #60
 | 10 | Safety: bounded waits + error words in the vendored kernels (fail-stop reports) | not started |
 | 11 | Per-stage numerics tests vs SGLang ops (K1 insert bytes vs V41 store kernel, K2 vs aiter_sparse, FFN stages) | not started |
 | 12 | MiniMax-M3 on our framework: kernels = their aiter PR6047 copy (user 10-13), wrap as a MonoSpec, bring their prerequisites (aiter sparse PA, aiter indexer, SHUFFLE KV); weights /shared_nfs/MiniMaxAI/MiniMax-M3 | not started; user to decide: us vs zijie on our framework. Prep done: their common.py mapped onto gfx950/common (22/30 identical) |
-| 13 | GSM8K A/B x3 to settle the -1 pt (mono vs no-mono) | not started |
+| 13 | GSM8K A/B x3 to settle the -1 pt (mono vs no-mono); do with task 22 | not started. Data so far: 10-10 mono 0.901 / no-mono 0.911; 10-13 fw6 0.901 / mono base 0.912 |
 | 21 | (low priority, with task 16) DSV4.1 mono MoE does not mask CUDA-graph padding rows (SGLang's module path masks them via num_token_non_padded) | checked 10-13: no effect on current runs: max_running_requests=8 and graphs captured at every bs 1..8, so no padding rows (mono captures 6/12/../48 verify, 5/10/../40 draft rows). Matters only if max_running_requests > 8 with a sparse capture list |
-| 22 | Check mode: layer 17 hidden max\|diff\| 15% of ref max vs module path (median over 40 layers 2.4%) | found 10-13; accuracy fine. Look at which stage diverges (MXFP8 shared expert / quant order) |
+| 22 | Check mode: layer 17 hidden max\|diff\| 15% of ref max at one step (other steps ~3%), layer 27 12.8%; median over 40 layers 2.5%; do with task 13 | found 10-13; accuracy fine. Plan: add relative L2 / cosine to layers/mono/check.py, check more steps, per-stage (attention / FFN seam / MoE), then GSM8K mono vs no-mono x3 |
 | 23 | Unreachable shared-common (L0) code: keep or delete | deferred to the M3 decision (M3 uses some, e.g. fp8x8_bf16_pk); per-step clear + fence protocol goes with task 10 |
+| 25 | Complete the 10-13 night sweep on 134919476c: TP2 smoke + TP2 c1/c4/c8/c16 (GPUs 4,5), optional base c4 same-session rerun | TP2 not run (GPU clash, see CONTINUE HERE); script scripts/night_1013_fw.sh minus the done TP4 steps; ~4.5 h |
 | -- | Optional: GPU-side gap profile (~0.45 ms/step at c1) | needs an env switch to force the nosync path off so the torch profiler sees verify-graph kernels |
 | -- | Optional: AgentX TP4 c2 on snap_task9c_1012 | dropped by the user 10-12 |
 
@@ -564,6 +558,20 @@ Ours: smooth distribution (p50 1.581, p90 1.70, no cliff), slow tail = long ISL.
 needs our ITL p90 < ~1.62, i.e. ~5% off long-ISL requests -> context-dependent indexer cost (K2a) is the lever.
 Scripts: agentx_overlap.py (decode vs other prefills: 10-12 reqs overlap, not the driver), /tmp/short_osl.py.
 
+### AgentX night 10-13 (perf/v41-mono 134919476c = snap_fw_f6_1013, `--layer-backend mono`; tags mi355-4_fwfinal_*)
+
+| TP | conc | fwfinal (134919476c) | task9c (10-12) | task18reb (base, 10-13) | vs ATOM 1010 (TTT / P90) | per-request ITL fw / older |
+|---|---|---|---|---|---|---|
+| 4 | 1 | 7,401 / 610.3 | 7,405 / 602.4 | 7,444 / 617.1 | -0.1% / -0.9% | 1.005 (vs task18reb) |
+| 4 | 4 | 9,561 / 516.0 | 9,612 / 481.5 | 10,146 / 529.1 | -1.0% / +19.1% | 1.002 (vs task18reb) |
+| 4 | 4_r2 | 10,021 / 487.1 | - | (rerun failed: GPU clash) | +3.7% / +12.5% | 1.000 (vs task18reb) |
+| 4 | 8 | 16,357 / 409.9 | 16,346 / 381.7 (r2 399.3) | - | +0.9% / +17.7% | 0.969 (vs task9c) |
+| 4 | 16 | 29,078 / 272.5 | 29,208 / 273.2 | - | - | 0.988 (vs task9c) |
+
+0 Tracebacks. The c4 -5.8% TTT of the first run was run-to-run spread (rerun +4.8% on the same tree, ITL 1.000).
+TP2 missing (task 25): two chains ran at once (a kill missed the first), TP2 smoke OOM'd, base c4 rerun failed
+"memory capacity is unbalanced". TP4 c8 / c16 / c4_r2 each ran twice on the same snapshot; the dirs hold the last run.
+
 ### AgentX night 10-12 (task9c = task8 + 9c fold, snap_task9c_1012; TTT/GPU tok/s / P90 intvty; scripts/agentx_table.py)
 
 | TP | conc | task9c | mi355-4_task8 | CI 37423 | ATOM 1010 | ATOM 1007 | task9c vs CI (TTT / P90) | vs ATOM 1010 (TTT / P90) |
@@ -805,3 +813,9 @@ GSM8K 0.940 (100 q), NIAH 4/4, 0 Tracebacks.
   locally (not pushed). New open items 21-24.
 - 2026-10-13 20:46 mi355-4: pushed HaiShaw/sglang perf/v41-mono 3c5ea0778c..134919476c; skills c5d88f4.
 - 2026-10-13 20:50 mi355-4: task 21 downgraded: no padding rows in our configs (bs 1..8 all captured, max_running_requests 8).
+- 2026-10-13 20:55 mi355-4: night 10-13 started on perf/v41-mono 134919476c (snap_fw_f6_1013, --layer-backend mono), script
+  scripts/night_1013_fw.sh, PID 1274328, log /shared_nfs/kk/night_1013_fw.log, GPUs 4-7: TP4 c4_r2 fw6 then base (task18reb,
+  same session; user asked to rerun the -5.8% c4 point), TP2 smoke, TP4 c8 c16, TP2 c1/c4/c8/c16 (GPUs 4,5). Tags
+  mi355-4_fwfinal_* (TP4 c1/c4 from the final validation). Kill: kill -- -1274328 + GPU 4-7 sglang processes.
+- 2026-10-14 07:30 mi355-4: night 10-13 read (section "AgentX night 10-13"): TP4 c4 rerun 10,021 / 487.1 -> c4 gap was spread; TP2 not run
+  (two chains collided; task 25). CONTINUE HERE rewritten for the new session; tasks 13+22 paired.

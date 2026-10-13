@@ -23,6 +23,9 @@ Paste as the first message of a new session, after NEW_WORKSPACE_PROMPT.txt.
 - 25：補 TP2 sweep（smoke + c1/c4/c8/c16，GPU 4,5，約 4.5 h；可選 base c4 同場重跑）
 - 17 S3：index query 併進 K1（估 ~-100 us/step），以及 S1 的 512k TPOT A/B
 - 22 + 13：check mode 加 relative L2 / cosine、逐 stage 找第 17 層的差異來源；GSM8K mono vs no-mono 各 3 次確認 -1 pt
+- 26：dead code 清理。(a) 刪 DSV4.1 專屬沒用到的函式（約 37 行：back.py woa_loads、attention/device.py ld_i64 /
+  atomic_add_dev、index_plan.py final_level / task_writes），用 mono_isa_dump.py 確認 84 個 kernel 不變；(b) FFN-only launch
+  現在只是沒被測試的 fallback，要我決定：加強制走 FFN 的測試保留，或刪掉。共用 common 的 705 行跟 task 23 / M3 一起處理
 - 19：把 HaiShaw perf/v41-* 的優化移植進 mono 分支
 - 12：MiniMax-M3（要我先決定：我們做，或 zijie 基於我們的框架做；kernel 用對方的 aiter PR6047 版本）
 - 10 / 11 / 15 / 16：fail-stop、逐 stage 數值測試、V4 vs V41 layout TPOT、高併發

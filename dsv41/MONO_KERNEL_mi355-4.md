@@ -14,7 +14,7 @@ Validation vs base snap_v41mono_rebased_1013: GSM8K 1319 0.901 / 0.912, NIAH 60/
 "AgentX night 10-13"): c1 7,401 / 610.3, c4 9,561 / 516.0 and rerun 10,021 / 487.1 (= base within run-to-run spread),
 c8 16,357 / 409.9, c16 29,078 / 272.5; per-request ITL vs older runs 0.97-1.005; 0 Tracebacks.
 **Next (user picks in the new session; prompt dsv41/MONO_NEXT_SESSION_PROMPT_1014.md):** task 25 (TP2 sweep missing),
-17 S3, 22+13 (numerics), 19, 12 (needs the user's decision), 10, 11, 15, 16.
+17 S3, 22+13 (numerics), 26 (dead code), 19, 12 (needs the user's decision), 10, 11, 15, 16.
 **Run (perf/v41-mono >= 134919476c):**
 ```bash
 S=/workspace/claude-skills/dsv41/scripts; cd /tmp   # never launch from inside sglang/srt/models
@@ -77,6 +77,7 @@ Target = ATOM #2479 coverage (all 40 layers whole + draft on mono), not vLLM #60
 | 22 | Check mode: layer 17 hidden max\|diff\| 15% of ref max at one step (other steps ~3%), layer 27 12.8%; median over 40 layers 2.5%; do with task 13 | found 10-13; accuracy fine. Plan: add relative L2 / cosine to layers/mono/check.py, check more steps, per-stage (attention / FFN seam / MoE), then GSM8K mono vs no-mono x3 |
 | 23 | Unreachable shared-common (L0) code: keep or delete | deferred to the M3 decision (M3 uses some, e.g. fp8x8_bf16_pk); per-step clear + fence protocol goes with task 10 |
 | 25 | Complete the 10-13 night sweep on 134919476c: TP2 smoke + TP2 c1/c4/c8/c16 (GPUs 4,5), optional base c4 same-session rerun | TP2 not run (GPU clash, see CONTINUE HERE); script scripts/night_1013_fw.sh minus the done TP4 steps; ~4.5 h |
+| 26 | Dead-code cleanup on 134919476c (scan 10-14: scripts in MONO_COMPARE Log, /tmp/reach.py + identifier count): (a) delete DSV4.1-only unused defs, ~37 lines: attention/back.py `woa_loads`, attention/device.py `ld_i64` `atomic_add_dev`, indexer/index_plan.py `final_level` `task_writes`; verify with mono_isa_dump.py (84 kernels unchanged) + CPU tests. (b) DSV4.1 FFN-only launch is now only a fallback for layers that cannot go whole (none on V4.1-Flash) and has no test: user decides keep + forced-FFN test, or delete (such layers then take the module path). Shared-common leftovers (705 lines unreachable: layers/mono/runtime/{abi,compare,compile,debug,lifecycle,mailboxes,route,timeline,widths}, common/device/select, common/plan/check; ~48 lines unused defs incl. fp8x8_bf16_pk which M3 uses) stay with task 23; failstop with task 10; K2A=0 path stays until 17 S2/S3 | not started; (b) needs the user's decision |
 | -- | Optional: GPU-side gap profile (~0.45 ms/step at c1) | needs an env switch to force the nosync path off so the torch profiler sees verify-graph kernels |
 | -- | Optional: AgentX TP4 c2 on snap_task9c_1012 | dropped by the user 10-12 |
 
@@ -819,3 +820,5 @@ GSM8K 0.940 (100 q), NIAH 4/4, 0 Tracebacks.
   mi355-4_fwfinal_* (TP4 c1/c4 from the final validation). Kill: kill -- -1274328 + GPU 4-7 sglang processes.
 - 2026-10-14 07:30 mi355-4: night 10-13 read (section "AgentX night 10-13"): TP4 c4 rerun 10,021 / 487.1 -> c4 gap was spread; TP2 not run
   (two chains collided; task 25). CONTINUE HERE rewritten for the new session; tasks 13+22 paired.
+- 2026-10-14 07:40 mi355-4: dead-code rescan on 134919476c: 705 lines unreachable (all shared-common, task 23), ~85 lines unused defs
+  (37 DSV4.1-only -> task 26a), FFN-only launch untested fallback (task 26b, user decides).

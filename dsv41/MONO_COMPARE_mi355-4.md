@@ -28,7 +28,7 @@ format + isort 7.0.0 (/tmp/isort_pkg) clean.
 script scripts/fw_final_chain.sh: fw6 (snap_fw_f6_1013) vs base (snap_v41mono_rebased_1013) GSM8K 1319 + NIAH 32/64/120k x20
 + TPOT x3, then AgentX TP4 c1/c4 on fw6 (TAGP mi355-4_fwfinal; compare mi355-4_task18reb 617.1 / 529.1). ~3-4 h.
 Kill: `kill -- -1222260` then the GPU 4-7 sglang processes.
-**Done (20:45 +08):** committed 134919476c on perf/v41-mono-fw (author wunhuang, no attribution; python/ equals the validated snap_fw_f6_1013) and fast-forwarded perf/v41-mono to it locally. NOT pushed (haishaw/perf/v41-mono is 1 behind). Next: user decides push and M3 (task 12).
+**Done (20:45 +08):** committed 134919476c on perf/v41-mono-fw (author wunhuang, no attribution; python/ equals the validated snap_fw_f6_1013) and fast-forwarded perf/v41-mono to it locally. Pushed to HaiShaw/sglang 10-13 20:45 (3c5ea0778c..134919476c). Next: user decides push and M3 (task 12).
 **User decisions (2026-10-13 15:40):** (1) `--layer-backend mono`; (2) new branch off perf/v41-mono, cherry-pick their 3
 commits [superseded 15:46, see below]; (3) [superseded 15:46: M3 kernels = their aiter PR6047 copy]; (4) M3 weights at /shared_nfs/MiniMaxAI/MiniMax-M3
 (present 10-13: 796G, 60 safetensors, arch MiniMaxM3SparseForConditionalGeneration). ATOM M3 source on mi355-4:

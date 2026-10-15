@@ -2,7 +2,7 @@
 """Compile the DeepSeek-V4.1 mono kernels without launching them and write each kernel's disassembly (task 20 F6:
 the shared-common convergence must not change the generated code).
 
-  PYTHONPATH=<tree>/python HIP_VISIBLE_DEVICES=4 python3 mono_isa_dump.py OUT_DIR [--quick]
+  PYTHONPATH=<tree>/python HIP_VISIBLE_DEVICES=4 python3 mono_isa_dump.py OUT_DIR [--quick] [--tok-par | --tok-par-only]
   diff -r OUT_A OUT_B      # identical ISA <=> no output
 
 One file per build: <kernel symbol>.s (llvm-objdump -d of the code object, addresses stripped) and a summary line in
@@ -21,8 +21,12 @@ from pathlib import Path
 os.environ["COMPILE_ONLY"] = "1"
 os.environ.setdefault("FLYDSL_RUNTIME_CACHE_DIR", tempfile.mkdtemp(prefix="mono_isa_cache_"))
 
-from sglang.kernels.ops.mono.gfx950.deepseek_v41 import layer as L  # noqa: E402
-from sglang.kernels.ops.mono.gfx950.deepseek_v41.indexer import k2i  # noqa: E402
+try:  # RFC #43949 layout (perf/v41-mono-rfc step 1 on)
+    from sglang.kernels.ops.mono.deepseek_v41_gfx950 import layer as L  # noqa: E402
+    from sglang.kernels.ops.mono.deepseek_v41_gfx950.indexer import k2i  # noqa: E402
+except ImportError:
+    from sglang.kernels.ops.mono.gfx950.deepseek_v41 import layer as L  # noqa: E402
+    from sglang.kernels.ops.mono.gfx950.deepseek_v41.indexer import k2i  # noqa: E402
 
 OBJDUMP = "/opt/rocm/llvm/bin/llvm-objdump"
 _BIN = re.compile(r'bin\s*=\s*"')
@@ -105,18 +109,37 @@ def builds(quick: bool):
                 b = L.MonoBuild(t, 4, r, kv41=True, export_idx=ex, cfp4=r > 0, **target)
                 yield f"k1_t{t}_r{r}_ex{int(ex)}", L.build_mono_k1(b)
                 yield f"k2_t{t}_r{r}_ex{int(ex)}", L.build_mono_k2(b)
-        yield f"ffn_t{t}", L.build_mono_ffn(L.MonoBuild(t, 4, 0, **target))
+                if ex and "index_q" in L.MonoBuild.__dataclass_fields__:  # task 17 S3
+                    bq = L.MonoBuild(t, 4, r, kv41=True, export_idx=True, index_q=True, cfp4=True, **target)
+                    yield f"k1iq_t{t}_r{r}", L.build_mono_k1(bq)
+        if hasattr(L, "build_mono_ffn"):  # removed after 134919476c (task 26b)
+            yield f"ffn_t{t}", L.build_mono_ffn(L.MonoBuild(t, 4, 0, **target))
         bd = L.MonoBuild(t, 4, 0, kv41=True, **draft)
         yield f"draft_k1_t{t}", L.build_mono_k1(bd)
         yield f"draft_k2_t{t}", L.build_mono_k2(bd)
         yield f"k2i_t{t}", k2i.build_k2i(k2i.K2iBuild(t, 8192, tree=False))
 
 
+def tok_par_builds():
+    """Task 27b: token-parallel K2 builds (not in the default set, which must stay comparable to older dumps)."""
+    target = dict(experts=384, topk=6, ug_groups=2)
+    for tp in (2, 4):
+        for t in (12, 24, 48):
+            for r in (0, 1, 2):
+                b = L.MonoBuild(t, tp, r, kv41=True, export_idx=r > 0, cfp4=r > 0, tok_par=True, **target)
+                yield f"k2tok_tp{tp}_t{t}_r{r}", L.build_mono_k2(b)
+
+
 def main():
     out = Path(sys.argv[1])
     out.mkdir(parents=True, exist_ok=True)
     rows = []
-    for name, launcher in builds("--quick" in sys.argv):
+    sets = tok_par_builds() if "--tok-par-only" in sys.argv else builds("--quick" in sys.argv)
+    if "--tok-par" in sys.argv:
+        import itertools
+
+        sets = itertools.chain(sets, tok_par_builds())
+    for name, launcher in sets:
         try:
             elfs = compile_one(launcher)
         except Exception as e:  # report and go on: one broken build must not hide the others

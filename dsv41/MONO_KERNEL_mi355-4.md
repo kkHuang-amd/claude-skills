@@ -6,6 +6,9 @@ findings are appended to the parent's Log, never to its CONTINUE HERE.
 
 ## CONTINUE HERE
 
+**10-15:** current work = the RFC refactor (MONO_FRAMEWORK_RFC_PLAN_mi355-4.md, its CONTINUE HERE); overall status = the
+TOP TABLE below ("Task list"). The rest of this block is from 10-14 morning (pre-refactor).
+
 **Status (mi355-4, 2026-10-14 07:30 +08):** perf/v41-mono = 134919476c, pushed to HaiShaw/sglang (task 20 framework merge:
 `--layer-backend mono` alone enables the validated set -- 40 whole layers, indexer/edge layers, DSpark draft, K2i;
 kernels in `python/sglang/kernels/ops/mono/gfx950/{common,deepseek_v41}`, one shared common, check mode). Worktree
@@ -13,8 +16,22 @@ kernels in `python/sglang/kernels/ops/mono/gfx950/{common,deepseek_v41}`, one sh
 Validation vs base snap_v41mono_rebased_1013: GSM8K 1319 0.901 / 0.912, NIAH 60/60, TPOT +-1.4%; AgentX TP4 (section
 "AgentX night 10-13"): c1 7,401 / 610.3, c4 9,561 / 516.0 and rerun 10,021 / 487.1 (= base within run-to-run spread),
 c8 16,357 / 409.9, c16 29,078 / 272.5; per-request ITL vs older runs 0.97-1.005; 0 Tracebacks.
-**Next (user picks in the new session; prompt dsv41/MONO_NEXT_SESSION_PROMPT_1014.md):** task 25 (TP2 sweep missing),
-17 S3, 22+13 (numerics), 26 (dead code), 19, 12 (needs the user's decision), 10, 11, 15, 16.
+**10-14 12:01 (user): PAUSED** tasks 27b / S3 / 22 / 13 / 27a; first rebuild the mono framework in the RFC #43949
+shape ourselves -> MONO_FRAMEWORK_RFC_PLAN_mi355-4.md. S3 / 22+13 / 27a GPU chains stopped (never started); task 25
+keeps running. WIP saved: /shared_nfs/kk/results/DeepSeek-V4.1-Flash/patches/wip_s3_t22_t27a_1014.diff.
+**10-14 session (order confirmed by the user):** 25 (running) -> 26 (local commit 53d0945468, not pushed) -> 17 S3 (code
+done in the worktree, uncommitted; frozen as /sgl-workspace/snap_s3_1014; GPU validation queued) -> 22+13 -> 19; 12 = zijie.
+S3 validation chain `scripts/s3_validate_1014.sh` (waits for PGID 1322575 + free GPUs, then IQ=1 eager K2A_CHECK on GSM8K
+200 + NIAH 2x64k, then A/B IQ=0 vs 1: GSM8K 1319 + NIAH + TPOT x3 at 8k/128k; tags mi355-4_s3chk_* / mi355-4_s3ab_*), PGID
+1340654, log /shared_nfs/kk/s3_validate_1014.log; stop: `kill -- -1340654` + GPU 4-7 sglang processes.
+Then tasks 22 + 13 `scripts/t22_13_1014.sh` (waits for PGID 1340654; snap_t22_1014; check mode 600 eager steps, then
+GSM8K 1319 x3 mono vs module; tags mi355-4_t22chk_* / mi355-4_t13r{1,2,3}_*), PGID 1351566, log
+/shared_nfs/kk/t22_13_1014.log; stop: `kill -- -1351566`. Then task 27a A/B `scripts/t27a_validate_1014.sh` (waits for
+PGID 1351566; snap_t22_1014 base vs snap_t27a_1014, IQ=0: GSM8K 1319 + NIAH + TPOT x3 8k/128k c1/c4; tags
+mi355-4_t27a_*), PGID 1364030, log /shared_nfs/kk/t27a_validate_1014.log. Queue on GPUs 4-7: 25 -> S3 -> 22/13 -> 27a -> 27b checks (`scripts/t27b_check_1014.sh`: snap_t27b_s2_1014 then snap_t27b_s3_1014, TP4 + TP2 each; PGID 1396879, log /shared_nfs/kk/t27b_check_1014.log; stop `kill -- -1396879`). Task 25 chain `scripts/night_1014_tp2.sh` (base TP4 c4_r2, TP2 smoke, TP2 c1/c4/c8/c16) started
+2026-10-14 07:57 +08 on mi355-4, PGID 1322575, log /shared_nfs/kk/night_1014_tp2.log; stop: `kill -- -1322575` + GPU
+4-7 sglang processes. Task 26 still needs a GPU check of the worktree after the chain: GSM8K smoke with
+`--layer-backend mono`, startup log must say `layers=40 ({'whole': 40})`.
 **Run (perf/v41-mono >= 134919476c):**
 ```bash
 S=/workspace/claude-skills/dsv41/scripts; cd /tmp   # never launch from inside sglang/srt/models
@@ -22,7 +39,8 @@ S=/workspace/claude-skills/dsv41/scripts; cd /tmp   # never launch from inside s
 TAGP=x NQ=1319 REPS=3 PHASES="gsm ab" VARIANTS="a:/sgl-workspace/snap_fw_f6_1013:MONO_ARG=--layer-backend=mono" bash $S/fw_ab.sh
 INFMAX_CONTAINER_WORKSPACE=/workspace/InferenceX-ci37423/inferencex-e2e AGENTX_RUNTIME_ROOT=/workspace/agentx-runtime-ci37423 \
   SRC=/sgl-workspace/snap_fw_f6_1013/python LANE=tp4 CONCS="1 4" TAGP=<tag> \
-  SWEEP_EXTRA_ARGS="--fp8-gemm-backend aiter --disable-shared-experts-fusion --layer-backend mono" bash $S/sweep_ci37423_opt.sh
+  SWEEP_EXTRA_ARGS="--fp8-gemm-backend aiter --disable-shared-experts-fusion --layer-backend mono --enable-encoder-swa-bounded-replay" \
+  bash $S/sweep_ci37423_opt.sh   # encoder replay: from the runs after the S3 validation on (user 10-14; ATOM 1012 runs both replays)
 python3 -I $S/agentx_table.py <tag> mi355-4_fwfinal; python3 -I $S/agentx_join_itl.py <run A dir> <run B dir>
 PYTHONPATH=<tree>/python HIP_VISIBLE_DEVICES=4 python3 $S/mono_isa_dump.py OUT   # compile-only ISA, diff -r two OUTs
 ```
@@ -35,10 +53,16 @@ with the process group from `ps -o pgid= -p <pid>` (10-13 night: `kill -- -$!` m
 GPUs, TP2 smoke OOM'd and the base c4 rerun failed). Check `ps -eo pid,cmd | rg 'sweep|fw_ab|night'` before starting.
 **Pass criteria:** GSM8K TP4 >= 0.895; NIAH all; TPOT within +-2% of snap_fw_f6_1013; no Traceback.
 
-## Task list (mi355-4; status as of 2026-10-14 07:30 +08 -- keep in sync)
+## Task list -- TOP TABLE (mi355-4; status as of 2026-10-15 07:45 +08)
 
-Target = ATOM #2479 coverage (all 40 layers whole + draft on mono), not vLLM #60397's split. Nothing is committed yet
-(sglang dsv41-mono-ffn, aiter dsv41-opt-1008, skills dsv41/*). Latest frozen snapshot: /sgl-workspace/snap_k2a_s1_1013 (task9c + K2A hybrid).
+**This is the top-level mono task table (user 10-15): update it whenever a task starts, finishes or changes.** Sub-docs
+hold the details: RFC refactor -> MONO_FRAMEWORK_RFC_PLAN_mi355-4.md, K2a -> K2A_PORT_PLAN_mi355-4.md, token-parallel
+-> TOKEN_PAR_PORT_PLAN_mi355-4.md.
+
+Target = ATOM #2479 coverage (all 40 layers whole + draft on mono), not vLLM #60397's split. Code now lives on
+sglang branch perf/v41-mono-rfc (/sgl-workspace/sglang_v41mono, local, not pushed): 24d4379e6e / d9b33f55f1 /
+2d998c2496 / 020f4c2584. The 10-14 WIP of tasks 17 S3 / 22 / 27a / 27b is in that repo's `stash@{0}` (old env
+names SGLANG_MONO_* and paths gfx950/*: rename on re-apply). Last pushed: perf/v41-mono 134919476c (fwfinal).
 
 ### Done
 
@@ -59,25 +83,39 @@ Target = ATOM #2479 coverage (all 40 layers whole + draft on mono), not vLLM #60
 | 17 S1 | 10-13 | K2a S1 **hybrid** (`SGLANG_MONO_DSV41_K2A=1`): ATOM FP4 scorer (K2i) + SGLang top-k / candidate kernels, device walk plan, REINDEX on compact candidate logits (ATOM's tree was 2-2.7x slower than SGLang's top-k -> not used) | GSM8K 0.904 (k0 0.903), NIAH 60/60; real-data Jaccard min 1.0 / 0.996; AgentX TP4 c1 P90 612.7 (vs ATOM -0.5%, was -2.2%), c4 511.5 (+18.1%, was +11.2%); per-request ITL vs task9c 0.986 / 0.988 |
 | 18 | 10-13 | Commit prep + push: DRAFT_CHECK debug removed, ruff/ruff-format clean, 5 commits; rebased onto HaiShaw perf/v41-mono (upstream +170) and pushed b4822bae03..3c5ea0778c. Upstream #43623 already folds the simulated correct_len; our fold now only adds the in-graph sampled bonus (temperature > 0, AgentX default 1.0) | rebased snap_v41mono_rebased_1013 K2A=1: GSM8K 0.907, NIAH 120k 20/20, TPOT = old base within noise; temp 1.0 128k fold on/off c1 1.484/1.465, c4 2.261/2.329; 0 Tracebacks |
 | 20 | 10-13 | Compare with zijiecode/sglang-mono-amd m3-mono + framework merge (MONO_COMPARE_mi355-4.md): `--layer-backend mono` (validated set default, per-feature env removed except K2A for A/B), MonoStep.query_len + decline, check mode (SGLANG_MONO_CHECK), MonoSpec.state_bindings, kernels -> `kernels/ops/mono/gfx950/{common,deepseek_v41}`, DSV4.1 private common + attention dups merged into the shared common (84 kernels ISA-identical), JIT key covers common, CI tests | commit 134919476c on perf/v41-mono-fw, fast-forwarded perf/v41-mono, pushed to HaiShaw 10-13 20:45. Final vs base: GSM8K 1319 0.901 / 0.912, NIAH 60/60, TPOT +-1.4%, AgentX TP4 c1 7,401 / 610.3 (-0.6% / -1.1%), c4 9,561 / 516.0 (-5.8% / -2.5%), per-request ITL 1.005 / 1.002 |
+| 25 | 10-14 | Complete the 10-13 night: TP2 c1/c4/c8 on 134919476c (fwfinal) | done; fwfinal TP2 c1 13,750 / 514.8, c4 18,542 / 420.9, c8 31,257 / 303.5 |
+| 10 | 10-14 | Safety: bounded waits + error words in the kernels (fail-stop) | done as RFC step 5 (in 24d4379e6e): every K1 / K2 / draft mailbox wait has a deadline, sticky error word, peer flag, store to address 0; fault injection `SGLANG_TEST_MONO_FAULT_INJECT` stops all 4 ranks. K2i not guarded yet (open below) |
+| RFC 0-5 | 10-14 | RFC #43949 refactor steps 0-5 + kevin-mii PR #43984 review B (structure) / C (srt 7 files, K2i into the plugin), DSpark split out | 24d4379e6e / d9b33f55f1 / 2d998c2496 (details: MONO_FRAMEWORK_RFC_PLAN_mi355-4.md) |
+| RFC hook | 10-14 | `mono.skip_metadata` (C's c1 +2% = the unused aiter decode schedule for K2i-scored ratios) | 020f4c2584 (local): HIP radix +7 lines, srt 8th file; c1 TPOT -1..-3%, GSM8K / NIAH OK |
+| RFC A/A2 | 10-14 | Two tries to cut the guard's TPOT cost (clock / STOP every 32 polls) | both dropped (no gain; A: K1 VGPR +12..24); patches /shared_nfs/kk/rfc_A*_1014.patch |
+| -- | 10-15 | AgentX TP4 c1/c4/c8, s4 (no guard) vs h (020f4c2584) | h within noise of s4 and fwfinal: TP4 c1 7,488 / 623.0 vs 7,385 / 618.6 (fwfinal 7,401 / 610.3), c4 9,784 / 466.2 vs 10,233 / 514.9 (c4 spread ~7%), c8 16,214 / 410.0 vs 16,294 / 401.7; TP2 c1 13,767 / 517.1 vs 13,731 / 511.1 -> no regression from the refactor |
+| -- | 10-15 | AgentX TP2 c4 / c8, s4 vs h (night done 11:58 +08, 12 / 12 points rc=0, 0 Tracebacks; tags mi355-4_n1014{s4,h}_*) | TP2 c4 18,479 / 410.4 vs 18,420 / 421.9 (fwfinal 18,542 / 420.9); c8 31,290 / 303.9 vs 30,944 / 294.8 (-1.1% / -3.0%; fwfinal 31,257 / 303.5). vs ATOM 1012, h: TP2 c1 -1.3% / +0.8%, c4 -1.0% / -1.9%, c8 -3.3% / -6.5%; TP4 c1 -2.7% / -3.4%, c8 -0.8% / -8.9% |
 | -- | 10-12 night | AgentX night 10-12 on snap_task9c_1012 (TP4 c1/c4/c8/c8_r2/c16, TP2 c1/c4/c8/c16) | P90 vs ATOM 1010: TP2 +3..+24%, TP4 c1 -2.2%, c4 +11.2%, c8 +9.6/+14.6%; TTT/GPU within +-2% of ATOM; TP2 mono GSM8K 0.904; c8 rerun = variance, no PDI change; 0 Tracebacks (table: section "AgentX night 10-12") |
 
 ### Open
 
 | # | Item | Status / next step |
 |---|---|---|
-| 17 | **K2a S2 / S3** (plan: K2A_PORT_PLAN_mi355-4.md): S2 fuse the indexer into K2 (needs a faster in-kernel top-k first: ATOM's tree is 2-2.7x slower than SGLang's), S3 index query in K1 (`SGLANG_MONO_DSV41_K2A_IQ=1`, est. ~-100 us/step at any ISL) | S1 done (hybrid). Open: 512k TPOT A/B of S1; S3 next candidate |
+| RFC A3 | Guard's remaining cost: TPOT +1..+3% (s4 -> h, same run); not visible in AgentX TP4 / TP2 c1 | discuss with the user 10-15 before coding. Options: (1) slim stop path (own ERROR / SITE + store to 0, no peer flags, no STOP poll); (2) one shared out-of-line stop block; (3) ATOM-style: guard only in debug builds (ATOM production kernels have none) |
+| RFC K2i | K2i launch (indexer/k2i.py) has no deadline guard | RFC: every cross-GPU wait needs one |
+| RFC cap | handle_monokernel sets decode capture sizes | proposal: fill bs 1..8 when unset, never override; check the resolution hook may write server_args |
+| RFC move | experimental/monokernels layout (HaiShaw 10-14) | waiting for the user: location, what moves, `_gfx950` vs `_hip` |
+| RFC PR | **Opened 10-15 13:20 +08 (user: commit PRs first, everything else after):** #44405 [1/4] DSpark host sync, #44406 [2/4] framework + common_hip, #44407 [3/4] DSV4.1 + skip_metadata hook, #44408 [4/4] DSpark draft stages; heads HaiShaw:perf/v41-mono-pr1..4 (stacked, rebased onto origin/main d4daf52369); M3 skeleton dropped (zijie's PR); #43984 closed with a pointer | rebased tip validated: GSM8K 1319 0.905, NIAH 60/60, 0 Tracebacks / faults, TPOT 8k c1 1.449 / c4 2.128, 128k c1 1.503 / c4 2.162 ms; CPU 62 (tip) / 40 (2/4). Next: watch CI + reviews (kevin-mii, HaiShaw); then A3 / step 6 etc. |
+| RFC 6 | Step 6: test layout unit / kernels / e2e, switch-point e2e tests (48 -> 49 rows, decode <-> verify, covered next to uncovered, fault injection), validate.py, skill, kernels/README.md; split PRs (framework / common_hip / DSV4.1 + hook / DSpark); then rebase onto ea13359da9 or main | not started; task 11 folds into the kernel tests |
+| RFC run | AgentX rerun after the PR split, with the latest ATOM nightly the same night | we trail ATOM 1012 at TP4 c1 / c8 by ~1-3% TTT, 3-7% P90 |
+| skills | Commit the skills-repo docs / scripts of 10-14 / 10-15 | uncommitted; ask the user first |
+| 17 | **K2a S2 / S3** (plan: K2A_PORT_PLAN_mi355-4.md): S2 fuse the indexer into K2 (needs a faster in-kernel top-k first: ATOM's tree is 2-2.7x slower than SGLang's), S3 index query in K1 (`SGLANG_MONO_DSV41_K2A_IQ=1`, est. ~-100 us/step at any ISL) | S1 done (hybrid). S3 code done 10-14 (uncommitted, `SGLANG_MONO_DSV41_K2A_IQ=1`, default 0), GPU validation queued (see CONTINUE HERE / Log 10-14 08:25). Open: 512k TPOT A/B of S1; S2 **10-15:** S3 code is in stash@{0}, paused for the RFC refactor; re-apply on the new layout, then the GPU A/B. |
 | 15 | V4 vs V41 layout TPOT: decode-load ISL 4096, V41 +1.7% c2 / +3.4% c4 (c1/c8 slightly faster; noise ~+-2%) | cause not found; hypothesis FP4 compressed-KV dequant in K2. Plan: same snapshot, `SGLANG_DSV4_KV_LAYOUT=v4` vs default, c1/2/4/8 x3, ISL 4096 + 131072; if real, c4 GPU-only profile of K2 on the 18 ratio-2 layers |
 | 16 | High concurrency: mono only runs steps <= 48 rows (8 req x 6 DSpark rows; ATOM same); larger steps fall back | partly done: TP4 c16 and TP2 c16 ran clean (P90 +27% / +19% vs CI). Still open: TP2 c32/c64 vs base, mono vs fallback step counts, GSM8K at parallel 128. Raise MAX_ROWS only if high-conc gains are wanted |
 | 19 | **Port the HaiShaw perf/v41-* opts into the mono branch.** Finding 10-13: none of the 7 branches is in dsv41-mono-ffn (tips not ancestors of HEAD, patches not applied); SGLANG_DSV41_PREFILL_LOGITS_BF16 / ROCM_MHC_ALL_REDUCE_STATS / AITER_SMALL_MOE_SORT_MAX_PAIRS / ROCM_MXFP8_AITER_PRESHUFFLE are read by no code in sglang or aiter -> every mono and same-branch base run had them OFF; --tokenizer-worker-num is 1. Only upstream's SGLANG_HIP_WO_A_MXFP8 epilogue is active | candidates: index-q prefill fuse, indexer bf16 logits (aiter side cc1773508 already in), candidate block-max fast path (all apply cleanly), --tokenizer-worker-num 4; mhc-ar boundary stats conflicts and only helps prefill under mono; small-moe-sort / flydsl mxfp8 gemm / woa fuse mostly dead under mono. Prefill opts should cut the prefill interference that makes the c8/c16 P90 tail. Validate: GSM8K, AgentX TP4 c8 (+c1) vs task9c |
-| 10 | Safety: bounded waits + error words in the vendored kernels (fail-stop reports) | not started |
 | 11 | Per-stage numerics tests vs SGLang ops (K1 insert bytes vs V41 store kernel, K2 vs aiter_sparse, FFN stages) | not started |
-| 12 | MiniMax-M3 on our framework: kernels = their aiter PR6047 copy (user 10-13), wrap as a MonoSpec, bring their prerequisites (aiter sparse PA, aiter indexer, SHUFFLE KV); weights /shared_nfs/MiniMaxAI/MiniMax-M3 | not started; user to decide: us vs zijie on our framework. Prep done: their common.py mapped onto gfx950/common (22/30 identical) |
-| 13 | GSM8K A/B x3 to settle the -1 pt (mono vs no-mono); do with task 22 | not started. Data so far: 10-10 mono 0.901 / no-mono 0.911; 10-13 fw6 0.901 / mono base 0.912 |
+| 12 | MiniMax-M3 on our framework: kernels = their aiter PR6047 copy (user 10-13), wrap as a MonoSpec, bring their prerequisites (aiter sparse PA, aiter indexer, SHUFFLE KV); weights /shared_nfs/MiniMaxAI/MiniMax-M3 | **owner: zijie** (user 10-14), on our framework; not ours to schedule. Prep done: their common.py mapped onto gfx950/common (22/30 identical) |
+| 13 | GSM8K A/B x3 to settle the -1 pt (mono vs no-mono); do with task 22 | GSM8K x3 mono vs module queued 10-14 (t22_13_1014.sh, snap_t22_1014). Data so far: 10-10 mono 0.901 / no-mono 0.911; 10-13 fw6 0.901 / mono base 0.912 **10-15:** paused (stash@{0}); rerun with 22 after the re-apply. |
 | 21 | (low priority, with task 16) DSV4.1 mono MoE does not mask CUDA-graph padding rows (SGLang's module path masks them via num_token_non_padded) | checked 10-13: no effect on current runs: max_running_requests=8 and graphs captured at every bs 1..8, so no padding rows (mono captures 6/12/../48 verify, 5/10/../40 draft rows). Matters only if max_running_requests > 8 with a sparse capture list |
-| 22 | Check mode: layer 17 hidden max\|diff\| 15% of ref max at one step (other steps ~3%), layer 27 12.8%; median over 40 layers 2.5%; do with task 13 | found 10-13; accuracy fine. Plan: add relative L2 / cosine to layers/mono/check.py, check more steps, per-stage (attention / FFN seam / MoE), then GSM8K mono vs no-mono x3 |
-| 23 | Unreachable shared-common (L0) code: keep or delete | deferred to the M3 decision (M3 uses some, e.g. fp8x8_bf16_pk); per-step clear + fence protocol goes with task 10 |
-| 25 | Complete the 10-13 night sweep on 134919476c: TP2 smoke + TP2 c1/c4/c8/c16 (GPUs 4,5), optional base c4 same-session rerun | TP2 not run (GPU clash, see CONTINUE HERE); script scripts/night_1013_fw.sh minus the done TP4 steps; ~4.5 h |
-| 26 | Dead-code cleanup on 134919476c (scan 10-14: scripts in MONO_COMPARE Log, /tmp/reach.py + identifier count): (a) delete DSV4.1-only unused defs, ~37 lines: attention/back.py `woa_loads`, attention/device.py `ld_i64` `atomic_add_dev`, indexer/index_plan.py `final_level` `task_writes`; verify with mono_isa_dump.py (84 kernels unchanged) + CPU tests. (b) DSV4.1 FFN-only launch is now only a fallback for layers that cannot go whole (none on V4.1-Flash) and has no test: user decides keep + forced-FFN test, or delete (such layers then take the module path). Shared-common leftovers (705 lines unreachable: layers/mono/runtime/{abi,compare,compile,debug,lifecycle,mailboxes,route,timeline,widths}, common/device/select, common/plan/check; ~48 lines unused defs incl. fp8x8_bf16_pk which M3 uses) stay with task 23; failstop with task 10; K2A=0 path stays until 17 S2/S3 | not started; (b) needs the user's decision |
+| 22 | Check mode: layer 17 hidden max\|diff\| 15% of ref max at one step (other steps ~3%), layer 27 12.8%; median over 40 layers 2.5%; do with task 13 | found 10-13; accuracy fine. 10-14: check.py logs max|diff| + where (row, col), relL2, cos, worst-row relL2; _mono_checked compares the pending post per part (moe_out / residual / post / comb) and ffn_in (K2's `normed` MoE input vs the module path's post-attention norm, `runner.normed_rows`). GPU run queued (t22_13_1014.sh) **10-15:** the check.py changes are in stash@{0}; GPU run to reschedule after the re-apply. |
+| 23 | Unreachable shared-common (L0) code: keep or delete | deferred to the M3 decision (M3 uses some, e.g. fp8x8_bf16_pk); per-step clear + fence protocol goes with task 10 **10-15:** review B already dropped the unused ATOM runtime code; the rest stays with the M3 decision (to confirm what is left). |
+| 26 | Dead-code cleanup on 134919476c (scan 10-14: scripts in MONO_COMPARE Log, /tmp/reach.py + identifier count): (a) delete DSV4.1-only unused defs, ~37 lines: attention/back.py `woa_loads`, attention/device.py `ld_i64` `atomic_add_dev`, indexer/index_plan.py `final_level` `task_writes`; verify with mono_isa_dump.py (84 kernels unchanged) + CPU tests. (b) DSV4.1 FFN-only launch is now only a fallback for layers that cannot go whole (none on V4.1-Flash) and has no test: user decides keep + forced-FFN test, or delete (such layers then take the module path). Shared-common leftovers (705 lines unreachable: layers/mono/runtime/{abi,compare,compile,debug,lifecycle,mailboxes,route,timeline,widths}, common/device/select, common/plan/check; ~48 lines unused defs incl. fp8x8_bf16_pk which M3 uses) stay with task 23; failstop with task 10; K2A=0 path stays until 17 S2/S3 | 10-14: (a) + (b) done in the worktree (uncommitted; user: delete the FFN-only launch, keep a re-add record -> Log 10-14 08:03). 78 kernels ISA-identical, CPU tests 43 pass; GPU smoke pending **10-15:** done on the old branch; whether it reached perf/v41-mono-rfc is not yet checked. |
+| 27 | **New ATOM baseline 1012** (run 38276304505, nightly_202610121516): real per-token speedup, P90 +21..27% at TP2 c4-c16 / TP4 c8, +3..4% at c1 (section "Task 27") | numbers fetched + compared 10-14; we now trail at TP4 c1 -4.7% / c8 -7.0% P90. Cause = ATOM #2545 (mono micro-opts + token-parallel + SWA bounded replay; section "Task 27"). User 10-14: port now (tests use frozen snapshots). **27a** (non-token-parallel items) done in the worktree 10-14, uncommitted, A/B queued (Log 10-14 09:22). **27b token-parallel**: plan + progress in TOKEN_PAR_PORT_PLAN_mi355-4.md; steps 1-3 coded 10-14 (Log 10:20 / 11:00 / 11:50), GPU bitwise checks of s2 + s3 queued (PGID 1396879), then step 4 (user 10-14: do it; VGPR limit is the same for ATOM), K2 score buffer_load_to_lds; TP2 vs 1012 after task 25 **10-15:** 27a / 27b WIP in stash@{0}, paused for the RFC refactor; re-apply with the renames. Still behind 1012 at TP4 c1 / c8 (TTT ~1-3%, P90 3-7%). |
 | -- | Optional: GPU-side gap profile (~0.45 ms/step at c1) | needs an env switch to force the nosync path off so the torch profiler sees verify-graph kernels |
 | -- | Optional: AgentX TP4 c2 on snap_task9c_1012 | dropped by the user 10-12 |
 
@@ -108,6 +146,10 @@ Target = ATOM #2479 coverage (all 40 layers whole + draft on mono), not vLLM #60
   /shared_nfs/kk/results/DeepSeek-V4.1-Flash/mono/repo_backup_mi355-4_1010/ (previous sglang HEAD 1203eb9181 on main).
 
 ## Decisions
+
+- 2026-10-14 (user): AgentX sweeps after the S3 validation add `--enable-encoder-swa-bounded-replay` (decoder replay was
+  already on) to match ATOM 1012, which runs both replays; task 25 keeps the 10-13 flags. Tables must mark the runs
+  with it (no longer the SA CI 37423 flag set). No A/B: replay is known to help.
 
 - 2026-10-10 user: base = HaiShaw perf/v41-mono; compare against SA CI data (run 37423021942), no local opt1008 baseline;
   GPUs 4-7 exclusive; this separate doc; rebuild AgentX env if it differs, keep the old one.
@@ -559,6 +601,54 @@ Ours: smooth distribution (p50 1.581, p90 1.70, no cliff), slow tail = long ISL.
 needs our ITL p90 < ~1.62, i.e. ~5% off long-ISL requests -> context-dependent indexer cost (K2a) is the lever.
 Scripts: agentx_overlap.py (decode vs other prefills: 10-12 reqs overlap, not the driver), /tmp/short_osl.py.
 
+### Task 27: new ATOM baseline 1012 (run 38276304505, mi355-4, 2026-10-14)
+
+InferenceX PR #3928 (bump DSv4.1-Flash ATOM AgentX to the 1012 nightly, drop four points), run 38276304505 attempt 2,
+image rocm/atom-dev:nightly_202610121516 (1010 ref = nightly_202610100929). Points: TP2 c1/2/4/6/8/16/32/64, TP4
+c1/8/32 (TP4 c4 / c16 no longer run). Artifacts (agentic + bmk_agentic + server_logs per point) in
+/shared_nfs/kk/results/DeepSeek-V4.1-Flash/ref_atom_38276304505/ (scripts/atom_ci_fetch.py <run>; newest attempt per
+name). scripts/agentx_table.py now has an "ATOM 1012" column and the delta vs it.
+
+ATOM 1012 vs 1010 (TTT/GPU / P90 intvty): TP2 c1 +2.6% / +3.0%, c4 +0.8% / +24.4%, c8 +3.6% / +20.9%, c16 +3.3% /
++23.4%; TP4 c1 +2.4% / +4.0%, c8 +1.3% / +26.6%. New points: TP2 c2 14,371 / 443.7, c6 24,204 / 323.9, c32 111,975 /
+113.0, c64 179,228 / 67.0; TP4 c32 61,416 / 195.4. This time it is a real per-token speedup, not a p90 cliff:
+per-request join 1010 -> 1012 median ITL ratio TP4 c1 0.957 (1.53 -> 1.46 ms in every ISL bin), TP4 c8 0.900; the
+fixed part of the ITL fit dropped (c1 1.626 -> 1.512 ms intercept, c8 2.193 -> 1.793).
+
+Ours (fwfinal = 134919476c) vs ATOM 1012: TP4 c1 -2.5% / -4.7% (was -0.1% / -0.9% vs 1010), TP4 c8 -0.4% / -7.0% (was
++0.9% / +17.7%); per-request median ITL ATOM/ours c1 0.967, c8 0.972 (ATOM ~3% faster per token, all ISL bins; at
+c8 >= 512k equal). TP2 vs 1012 with task9c (10-12; fwfinal TP2 = task 25, running): c1 -0.6% / +0.3%, c4 +1.2% / -4.5%,
+c8 -2.6% / -2.9%, c16 -1.7% / +0.8%.
+What changed (ROCm/ATOM origin/main, window 10-10 17:29 .. 10-12 23:16 +08 = the two nightlies' UTC stamps; 1010 already
+had #2513): the V4.1 change is 5e8d9131 **#2545** (10-12 22:58, 62 files +2784/-1066), two independent parts; 1012
+server log: decoder_swa_bounded_replay True, encoder_swa_bounded_replay True. Also e543f331 #2514 (FlyDSL paged
+decode vs aiter #5809 work plans; not the mono path).
+(1) mono decode perf (atom/models/deepseek_v41/mono/**, atom/mono/device/{ops,sync}.py, ~1.3k lines):
+  token-parallel sublayers for S >= 12 and S % TP == 0 (attention / FFN all-reduce -> reduce-scatter to each token's
+  owner, per-token stages on own rows via token_par.own_view, only quantized rows all-gathered; off when K2 is split;
+  bits unchanged) -- applies at c2+ with DSpark (6 rows a request), not at c1; hand-off prefetch (loads independent of
+  a mailbox wait issued before it), fine ug tasks below 7 rows; mHC seam: norm before the Sinkhorn gate on shared CTAs,
+  gate after wqkv_a (K1) / after the shared expert (K2), DPP butterflies for the Sinkhorn sums, early hc_fn loads up to
+  24 rows; K2 score reads key rows via buffer_load_to_lds; mono routes any decode step up to 48 rows; one peer layout.
+(2) decoder / encoder SWA bounded replay (prefill): V4.1 = encoder layers 0-19 + decoder 20-39; a prompt's final
+  forward runs the encoder + layer 20's compression on every row, layers 20-38 on the last W=128 rows only, layer 39 on
+  the last row; other prefill forwards stop at layer 20's compression. Cuts prefill compute -> less prefill
+  interference in decode.
+Attribution from the bmk (1010 -> 1012): TPOT p50 TP4 c1 1.53 -> 1.46 ms (-4.6%), c8 1.94 -> 1.69 (-13%), TP2 c4 1.83 ->
+1.79, c16 3.66 -> 3.07 (-16%); TTFT p50 ~unchanged except TP2 c16 0.38 -> 0.29 s. c1 has no concurrent prefill, so its
+-4.6% is (1)'s non-token-parallel items; c8 / c16 add token-parallel and (2).
+Map onto ours: our seam / MoE stages are adapted from ATOM (stages/seam.py, stages/moe.py, common) -> the seam ordering,
+DPP Sinkhorn, early hc_fn, prefetch and fine-ug items port diff by diff; our attention K1 front / K2 back are vLLM's,
+so ATOM's attn_pre / attn_post / attention.py changes (buffer_load_to_lds score) need our own version; token-parallel
+is a redesign of the seam + MoE reductions (S >= 12).
+Correction (10-14 08:40, user): SGLang already has both replays. Decoder SWA bounded replay is ON in our AgentX runs
+(--enable-decoder-swa-bounded-replay; fwfinal / task18reb server.log True) and was ON in ATOM 1010 too, so it is not
+the 1010 -> 1012 gain (#2545 only refines it per the V4.1 report). Encoder SWA bounded replay exists in SGLang
+(--enable-encoder-swa-bounded-replay) but is OFF in our runs; ATOM 1012 turns it on by default (no state checkpoints;
+a prefix hit rebuilds the encoder window state). TTFT barely moved 1010 -> 1012, so it is a small part; SGLang's
+version is incompatible with prefill CUDA graphs, mixed chunk, DP attention, CP, PD, LoRA, radix sessions. => the gain
+is mainly #2545's mono decode changes. Candidate: A/B encoder replay on our AgentX.
+
 ### AgentX night 10-13 (perf/v41-mono 134919476c = snap_fw_f6_1013, `--layer-backend mono`; tags mi355-4_fwfinal_*)
 
 | TP | conc | fwfinal (134919476c) | task9c (10-12) | task18reb (base, 10-13) | vs ATOM 1010 (TTT / P90) | per-request ITL fw / older |
@@ -822,3 +912,98 @@ GSM8K 0.940 (100 q), NIAH 4/4, 0 Tracebacks.
   (two chains collided; task 25). CONTINUE HERE rewritten for the new session; tasks 13+22 paired.
 - 2026-10-14 07:40 mi355-4: dead-code rescan on 134919476c: 705 lines unreachable (all shared-common, task 23), ~85 lines unused defs
   (37 DSV4.1-only -> task 26a), FFN-only launch untested fallback (task 26b, user decides).
+- 2026-10-14 07:57 mi355-4: task 25 chain started (scripts/night_1014_tp2.sh: base TP4 c4_r2, TP2 smoke, TP2 c1/c4/c8/c16
+  on GPUs 4,5; tree snap_fw_f6_1013 = 134919476c, verified file-identical to the worktree). PGID 1322575.
+- 2026-10-14 08:03 mi355-4: task 26 done in /sgl-workspace/sglang_v41mono (uncommitted, 11 files, +37 / -376).
+  (a) deleted woa_loads (attention/back.py), ld_i64 + atomic_add_dev (attention/device.py), final_level + task_writes
+  (indexer/index_plan.py). (b) **FFN-only launch removed (user 10-14); re-add record:** the code is in 134919476c --
+  kernels/ops/mono/gfx950/deepseek_v41/layer.py `build_mono_ffn` (+ its `kffn`, ~160 lines at the end of the file; it
+  reuses `run_ffn`, still used by K2), runner.py `DSV41MonoLayer.ffn_kernel` + `DSV41MonoLayer.ffn`,
+  srt/models/deepseek_common/amd/deepseek_v4_fused_mhc.py `_mono_ffn` + its branch in
+  forward_hc_pre_from_prev_fused_boundary (attention with defer_all_reduce=True, then the launch on x.partial),
+  amd/mono/spec.py `MonoKernel.launch` + the ffn_kernel build in `MonoKernel.__init__` + `modes[i] = LayerMode.FFN` as
+  pack's default. L1 `LayerMode.FFN` stays (generic; test_mono_runtime uses it). Why it existed / when to re-add:
+  P0.3 microbench (section "P0.3 FFN-only launch microbench"): FFN span c1 M=6 75.2 -> 48.9-55.7 us/layer (1.35-1.54x,
+  ~1.1-1.3 ms/step over 40 layers), c8 M=48 134.7 -> 109-151 us (1.23x..0.89x by expert union). Re-add if a model or
+  checkpoint has layers whole cannot take but whose FFN matches (V4.1-Flash: none, all 40 whole), with a forced-FFN test.
+  Behaviour now: such layers are left out of packed.modes and take the module path; DSV4.1 `layers()` declares WHOLE;
+  L1 attach_spec falls back to spec.layers() only when packed has no `modes` (an empty dict no longer re-enables them).
+  Verification: mono_isa_dump.py (now skips ffn when build_mono_ffn is absent) -> isa_task26/index.txt: 78 kernels,
+  hashes identical to isa_task20_f6/index_f6.txt minus its 6 ffn_t*; ruff clean; CPU tests 43 pass. GPU smoke pending.
+- 2026-10-14 08:07 mi355-4: task 26 committed locally on perf/v41-mono-fw: 53d0945468 (author wunhuang, no trailer), not pushed.
+- 2026-10-14 08:25 mi355-4: task 17 S3 code (worktree, uncommitted; snapshot /sgl-workspace/snap_s3_1014). K1 packs the index
+  query on indexer layers when `SGLANG_MONO_DSV41_K2A_IQ=1`: new attention/index_query.py (from ATOM @454d0e3023
+  index_query.py): iq = indexer.wq_b GEMV on K1's QX8 (the attention wq_b's MXFP8 q latent; 256 tasks, one a CTA, after each
+  token tile's wq_b) + GPT-J RoPE dims 64..127 with the layer's cos_sin; iw = weights_proj on the seam's bf16 xn (behind XRDY;
+  read from global, not ATOM's 80 KB LDS group) on the 32 CTAs without a wqkv part, ATOM's wv_splitk-order emulation; iquant =
+  quantize_fp4 -> runner.iq_fp4 / iq_scale (SGLang's q_scale order) / iw bf16 (= w/64, exact). Host: AttnWeights.iq_w /
+  iq_w_scale / iw_w (spec._index_q_weights), between() wraps forward_low_ratio_sources in indexer_hook.provided_index_q,
+  low_ratio_index_topk_hip_decode takes k2i_hook.index_q(lambda: _indexer_inputs(...)) (verify rows take this decode body),
+  so it works with K2A=1 and K2A=0. K2A_CHECK also counts K1-vs-SGLang q / scale / weight byte mismatches ("K1 index q").
+  Expected numerics: not bitwise -- SGLang's indexer wq_b quantizes q_lora its own way (module path) while K1 uses QX8 as for
+  the attention wq_b, and the GEMM / GEMV sum orders differ; same FP4 rounding rule and amax floor; SGLang's double quant
+  can pick a scale one step lower for the same values. Builds: ISA dump isa_task17s3/ vs isa_task26/: K2, draft K2, K2i (42)
+  identical; every K1 differs only by the 6 new args (VGPRs unchanged); iq/iw scratch placed after all regions so K2 offsets
+  do not move. k1iq builds: VGPR 166 (S=1) .. 241 (S=48, base K1 240), LDS <= 111 KB (TP2 S=48), no scratch spill. CPU tests
+  43 pass. Pass criteria: GSM8K >= 0.895 and within noise of IQ=0, NIAH all, Jaccard median 1.0, TPOT IQ=1 < IQ=0 (est.
+  ~-100 us/step); then flip the default to 1 and commit.
+- 2026-10-14 08:34 mi355-4: task 27 added (user): ATOM 1012 run 38276304505 fetched to ref_atom_38276304505/ and compared
+  (section "Task 27"). ATOM per-request ITL -4.3% (c1) / -10% (c8) vs 1010; ours now -4.7% / -7.0% P90 at TP4 c1 / c8.
+- 2026-10-14 09:05 mi355-4: decision (user): encoder SWA bounded replay on in AgentX sweeps after the S3 validation
+  (section Decisions); Task 27 note corrected: decoder replay was already on in ours and ATOM 1010.
+- 2026-10-14 09:07 mi355-4: task 22 code (worktree, uncommitted; in snap_t22_1014 with S3): check.diff_stats (max|diff| and
+  its row/col, ref max, relL2, cos, worst-row relL2); _mono_checked adds per-part pairs of the pending FFN post and
+  ffn_in (forward_hc_pre_from_prev_fused_boundary(taps=) records the module path's MoE input; kernel side
+  DSV41MonoLayer.normed_rows). residual isolates attention + seams, ffn_in the MoE input, moe_out the MoE. CPU tests 43
+  pass. 22 + 13 GPU runs queued behind the S3 validation (t22_13_1014.sh, PGID 1351566).
+- 2026-10-14 09:22 mi355-4: task 27a (worktree, uncommitted; snapshot /sgl-workspace/snap_t27a_1014 = snap_t22_1014 + these):
+  ports of ATOM #2545's non-token-parallel items onto our ATOM-derived stages. common/device/ops.py first_rounds +
+  batched_rounds(first=); stages/seam.py stage_gate's Sinkhorn row/col sums as DPP butterflies (comb on lanes 16..31,
+  COMB0; same (e0+e1)+(e2+e3) order; our stage_gate was identical to ATOM's pre-#2545 one), stage_norm's weights before
+  its wait + one 12-word poll, slice_prefetch (first loads + mix weights up to 24 rows before K2's partials wait; its
+  loads read only res_in / comb_in / post_in, the reduce output is read in slice_row); stages/moe.py router weights
+  before x's wait from 12 rows, route bias before the logits' poll, run_moe(before_ug=); layer.py K2 runs the FFN
+  seam's gate in before_ug (after shared, before ug) and K1 its gate after wqkv_a (front.run_front(after_wqkv_stage=));
+  seam.lane_f32 removed (unused). Expected bitwise-identical outputs (ATOM: "bits unchanged"). Builds: ISA dump
+  isa_task27a/ (90 kernels, no ERROR, no scratch spill); VGPR +0..16 (k1 S=24 165 -> 181, k2 S=48 234 -> 246; max 252 at
+  k2 S=2, was ~250). CPU tests 43 pass. Not ported: token-parallel (27b), K2 score buffer_load_to_lds (our K2 is
+  vLLM's), the ug fine tasks below 7 rows (not found in the #2545 moe diff). A/B queued (t27a_validate_1014.sh).
+- 2026-10-14 09:27 mi355-4: task 27b plan written (TOKEN_PAR_PORT_PLAN_mi355-4.md): ATOM's token-parallel design, mapping onto
+  our K1 (vLLM front) / K2 / MoE / peer buffer, host contract (Engram + DSpark capture layers read the residual stream
+  on the host), 6 steps with bitwise checks. Implementation to start in a fresh session.
+- 2026-10-14 10:20 mi355-4: task 27b step 1 (worktree, uncommitted): peer_layout.py (gathers after both partial halves, so
+  K2's parity stride and every non-tok_par offset are unchanged; runner allocates peer_buffer_bytes), token_par.py (our arg
+  names), tok_par flag in MonoBuild / FrontBuild / BackBuild / MoeBuild (default False; K1 / K2 symbol `tok` only when
+  set), Mailbox.poll mixed spaces. ISA dump isa_task27b_s1/ == isa_task27a/ (91 kernels, diff -r empty); CPU tests 44
+  pass; ruff clean. Details: TOKEN_PAR_PORT_PLAN_mi355-4.md "Step 1".
+- 2026-10-14 11:00 mi355-4: task 27b step 2 (worktree, uncommitted; snapshot /sgl-workspace/snap_t27b_s2_1014): MoE
+  down partials to the token's owner, reduce on own tokens (own_view), temporary OG gather back to full rows;
+  runner check mode SGLANG_MONO_DSV41_TOK_PAR_CHECK=1 (eager: tok_par K2 then the regular K2 on restored state, bytewise
+  compare). Non-tok_par ISA isa_task27b_s2/ == isa_task27a/; tok_par K2 builds compile without spill (VGPR up to 256 at
+  S=48); CPU tests 44 pass. GPU check queued after the 27a chain (TP4 + TP2, GSM8K 200 eager). fw_ab.sh gained FW_TP /
+  FW_GPUS. Details: TOKEN_PAR_PORT_PLAN_mi355-4.md "Step 2".
+- 2026-10-14 11:50 mi355-4: task 27b step 3 (worktree, uncommitted; snapshot /sgl-workspace/snap_t27b_s3_1014): K2 wo_b
+  partial to the owner only, FFN seam on own tokens (own_view), normed rows pushed to XG from registers and gathered
+  before the MoE xq. A spill at S=48 (OG / XG bases held from K2 entry) fixed by computing them where used. Non-tok_par
+  ISA isa_task27b_s3/ == isa_task27a/; tok_par K2 no spill, VGPR 240-254; CPU tests 44 pass. The queued step 2 chain
+  was replaced by scripts/t27b_check_1014.sh (s2 then s3, TP4 + TP2), PGID 1396879. Details: TOKEN_PAR_PORT_PLAN "Step 3".
+- 2026-10-14 11:47 mi355-4: PR #43984 (HaiShaw:perf/v41-mono, head 134919476c): description filled (framework, diagrams,
+  adding a model) and title set; replied to amd-pedghazi's comment (converge on RFC #43949: move the framework to
+  kernels/ops/mono with hooks.py / spec.py, attach in precompile, numerics / devices / requires fields, bounded waits,
+  split the PR; DSV4.1: #43497 as base + our K2 / indexer / draft on top, or whole-layer as the base; proposed
+  --layer-backend, check mode, state_bindings for the RFC). Design comparison of RFC / #43497 / ours in this chat
+  (11:40); the follow-up refactor is not scheduled yet.
+- 2026-10-14 12:10 mi355-4: user pauses current tasks; framework refactor to the RFC #43949 shape first (own
+  implementation; kevin-mii's prototype is not public). Stopped PGIDs 1340654 / 1351566 / 1364030; WIP patch saved; plan
+  MONO_FRAMEWORK_RFC_PLAN_mi355-4.md.
+- 2026-10-14 12:50 mi355-4: RFC refactor step 0 decided (switch `--enable-monokernel`, MonoSpec names exactly as RFC,
+  M3 skeleton -> minimax_m3_gfx950/, WIP stashed on a new branch perf/v41-mono-rfc from 53d0945468); step 1 (move to
+  kernels/ops/mono/) done uncommitted: CPU 43 passed, ISA identical to isa_task26. Details: MONO_FRAMEWORK_RFC_PLAN_mi355-4.md.
+- 2026-10-14 13:30 mi355-4: task 25 chain (PGID 1322575) ended 12:41 +08 (NIGHT DONE): base TP4 c4_r2 and TP2 smoke
+  (GSM8K 0.908), TP2 c1 / c4 / c8 rc=0; TP2 c16 rc=1 at startup: "Loaded weights leave no GPU memory for the KV cache
+  under --mem-fraction-static=0.8 ... minimum viable 0.9354" (agentx/mi355-4_fwfinal_tp2_c16/server.log). GPUs 4-7 free.
+  TP2 results still to be folded into the "AgentX night 10-13" table.
+- 2026-10-14 17:10 mi355-4: RFC refactor: steps 1-5 + kevin-mii's PR #43984 review (structure, srt 7 files, K2i in the
+  plugin, DSpark split) committed locally on perf/v41-mono-rfc (24d4379e6e / d9b33f55f1 / 2d998c2496, not pushed);
+  A (guard check every 32 polls) in validation. Resume: MONO_FRAMEWORK_RFC_PLAN_mi355-4.md CONTINUE HERE,
+  prompt MONO_NEXT_SESSION_PROMPT_RFC_1014b.md.

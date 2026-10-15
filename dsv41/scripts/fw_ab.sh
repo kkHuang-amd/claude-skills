@@ -11,7 +11,8 @@ set -uo pipefail
 D=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 export INFMAX_CONTAINER_WORKSPACE=${INFMAX_CONTAINER_WORKSPACE:-/workspace/InferenceX-ci37423/inferencex-e2e}
 export AGENTX_RUNTIME_ROOT=${AGENTX_RUNTIME_ROOT:-/workspace/agentx-runtime-ci37423}
-REPS=${REPS:-3} PHASES=${PHASES:-"gsm ab"} ISLS=${ISLS:-"8192 131072"} GPUS=4,5,6,7 PORT=8890
+REPS=${REPS:-3} PHASES=${PHASES:-"gsm ab"} ISLS=${ISLS:-"8192 131072"} GPUS=${FW_GPUS:-4,5,6,7} PORT=8890
+FW_TP=${FW_TP:-4}  # TP2: FW_TP=2 FW_GPUS=4,5
 OUT=/shared_nfs/kk/results/DeepSeek-V4.1-Flash/agentx
 export QR_QUANT=INT8 ROCM_QUICK_REDUCE_QUANTIZATION=INT8 SGLANG_DSV41_PREFILL_LOGITS_BF16=1 SGLANG_ROCM_MHC_ALL_REDUCE_STATS=1 \
        SGLANG_AITER_SMALL_MOE_SORT_MAX_PAIRS=64 SGLANG_ROCM_MXFP8_AITER_PRESHUFFLE=1 SGLANG_HIP_WO_A_MXFP8=1
@@ -24,7 +25,7 @@ stop() {  # $1 = launcher PGID
   sleep 10
 }
 start() {  # $1 tag, $2 src, $3 EVAL_ONLY, $4 extra server args -> sets LP; returns 0 when ready
-  SRC=$2/python TAG=$1 TP=4 GPUS=$GPUS PORT=$PORT CONC=8 PREFILL_DECODE_INTERVAL=16 CHUNKED_PREFILL_SIZE=16384 \
+  SRC=$2/python TAG=$1 TP=$FW_TP GPUS=$GPUS PORT=$PORT CONC=8 PREFILL_DECODE_INTERVAL=16 CHUNKED_PREFILL_SIZE=16384 \
     MEM_FRACTION_STATIC=0.70 SERVER_ONLY=1 EVAL_ONLY=$3 EXTRA_ARGS="$EA ${MONO_ARG:?variant must set MONO_ARG} $4" \
     setsid bash "$D/agentx_colleague_run.sh" > "$OUT/$1.nohup" 2>&1 < /dev/null &
   LP=$!
@@ -51,6 +52,7 @@ load() {  # $1 tag, $2 label, $3 timeout s, rest = decode_load_profile args; ret
 summary() {  # $1 tag
   grep -cE 'Traceback' "$OUT/$1/server.log" | sed "s/^/[$1] tracebacks: /"
   grep -E '\[K2A_CHECK\]' "$OUT/$1/server.log" 2>/dev/null | tail -2 | sed "s/^/[$1] /" | cut -c1-220
+  grep -E 'mono tok_par check' "$OUT/$1/server.log" 2>/dev/null | tail -4 | sed "s/^/[$1] /" | cut -c1-220
   grep -E 'mono kernels on|accepted the configuration' "$OUT/$1/server.log" 2>/dev/null | head -2 | sed "s/^/[$1] /" | cut -c1-220
 }
 

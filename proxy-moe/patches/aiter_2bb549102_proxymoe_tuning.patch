@@ -1,0 +1,73 @@
+diff --git a/aiter/ops/flydsl/kernels/mxmoe_dispatcher.py b/aiter/ops/flydsl/kernels/mxmoe_dispatcher.py
+index 9f8d6241c..5b762c871 100644
+--- a/aiter/ops/flydsl/kernels/mxmoe_dispatcher.py
++++ b/aiter/ops/flydsl/kernels/mxmoe_dispatcher.py
+@@ -832,9 +832,7 @@ def mxfp4_moe_gemm2(
+             f"D_INTER (K) must be a multiple of BK ({BK}), got {D_INTER}"
+         )
+     if D_HIDDEN > HIDDEN_MAX:
+-        raise AssertionError(
+-            f"D_HIDDEN ({D_HIDDEN}) exceeds compile cap HIDDEN_MAX ({HIDDEN_MAX})"
+-        )
++        HIDDEN_MAX = -(-D_HIDDEN // 8192) * 8192
+     if str(out_dtype).strip().lower() == "fp4":
+         if epilog != "scatter":
+             raise AssertionError(
+diff --git a/csrc/ck_gemm_moe_2stages_codegen/gemm_moe_tune.py b/csrc/ck_gemm_moe_2stages_codegen/gemm_moe_tune.py
+index 7b28819f0..ca504a0a3 100644
+--- a/csrc/ck_gemm_moe_2stages_codegen/gemm_moe_tune.py
++++ b/csrc/ck_gemm_moe_2stages_codegen/gemm_moe_tune.py
+@@ -112,6 +112,11 @@ torch.int4 = getattr(torch, "int4", torch.uint32)
+ TUNE_MOE_EXPERT_BALANCE = (
+     os.environ.get("TUNE_MOE_EXPERT_BALANCE", "False").lower() == "true"
+ )
++# Expert-parallel runtime (expert_mask) forces stage2 to accumulate into [M, model_dim],
++# so only atomic stage2 kernels are valid candidates for EP shapes.
++TUNE_MOE_STAGE2_ATOMIC_ONLY = (
++    os.environ.get("TUNE_MOE_STAGE2_ATOMIC_ONLY", "False").lower() == "true"
++)
+ 
+ COS_DIFF_THRESHOLD = 1e-1
+ 
+@@ -3759,6 +3764,8 @@ class FmoeTuner(TunerCommon):
+                     )
+ 
+             for kname, kparams in flydsl_s2_kernels.items():
++                if TUNE_MOE_STAGE2_ATOMIC_ONLY and "_atomic" not in kname:
++                    continue
+                 s2_tile_m = kparams["tile_m"]
+                 if blockM % s2_tile_m != 0:
+                     continue
+@@ -4012,6 +4019,8 @@ class FmoeTuner(TunerCommon):
+                 model_dim=model_dim,
+                 inter_dim=inter_dim,
+             ).items():
++                if TUNE_MOE_STAGE2_ATOMIC_ONLY and "_atomic" not in kn2:
++                    continue
+                 kp = {**kp, "a_dtype": adtype}
+                 # flat=0, v2=1
+                 tasks.append(
+diff --git a/csrc/ck_gemm_moe_2stages_codegen/mxfp4_v2_tune_utils.py b/csrc/ck_gemm_moe_2stages_codegen/mxfp4_v2_tune_utils.py
+index 6bcec64be..7e36dd491 100644
+--- a/csrc/ck_gemm_moe_2stages_codegen/mxfp4_v2_tune_utils.py
++++ b/csrc/ck_gemm_moe_2stages_codegen/mxfp4_v2_tune_utils.py
+@@ -608,13 +608,12 @@ def v2_stage1_sorted_ref(
+     out = torch.zeros((max_sorted, inter_dim), dtype=torch.bfloat16, device=ref1.device)
+     tok_of = sti[:n] & 0x00FFFFFF
+     rows = (tok_of < token).nonzero(as_tuple=True)[0]
+-    for r in rows.tolist():
+-        t = int(tok_of[r].item())
+-        e = int(sei[r // bm_s1].item())
+-        slot = (topk_ids[t] == e).nonzero(as_tuple=True)[0]
+-        if slot.numel() == 0:
+-            continue
+-        out[r] = ref1[t, int(slot[0].item())].to(torch.bfloat16)
++    t = tok_of[rows].long()
++    e = sei[rows // bm_s1].to(topk_ids.dtype)
++    match = topk_ids[t] == e[:, None]
++    has = match.any(dim=1)
++    slot = match.int().argmax(dim=1)
++    out[rows[has]] = ref1[t[has], slot[has]].to(torch.bfloat16)
+     return out
+ 
+ 

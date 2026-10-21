@@ -24,11 +24,14 @@ numbering.
    without overlap (not started, ask the user first): cheaper AR (QR INT4/INT6, needs a logits check),
    AR+norm fusion at prefill sizes. P1 code not started. QR level measured (op level, section
    "F follow-up"): INT6 -11% / INT4 -17% AR time at 4x / 16x error → ~2.5% / ~3.8% prefill; not adopted.
-   **F2 (RS bf16 + fp4 AG instead of AR) M2 = GO**: 811 vs 1034 us per AR at M8192, exact; projected ~9%
-   prefill incl. M/8 norm/quant/router (section "F2 M2 results"). Next: ask the user for P1 code.
-2. **CONC=1024 decode ITL jump** [MI355X median ITL 67-74 ms at 1024 vs 40-46 ms at 512; GB300 shows
-   the same symptom]. Measure first: server-side decode step time vs client ITL (prefill-chunk
-   interleaving suspected), one variable at a time.
+   **F2 prefill SP P1 DONE (code local, not pushed)**: FFN-only (attention linears are bf16).
+   Serving vs off: 70000/300 c8 TTT/GPU +5.3% / TTFT -6.1% (hip quant for shared expert) or +3.3% /
+   -3.7% numerically equal to today (`..._SP_EXACT_SHARED=1`); 8192/1024 c64 +2.1% / +1.2%. Decode
+   unchanged. USER DECISION: which variant; whether to commit/push the SGLang branch (strip debug
+   `_SP_CHECK` first). Details "F2 P1".
+2. **CONC=1024 decode ITL jump** — measured (section "Item 2"): median jump = decode step 43.9 →
+   69.6 ms (bs512 → bs1024, 1.59x for 2x tokens), not prefill interleaving (that is the tail). Decode
+   kernel breakdown bs1024 vs bs512 in progress.
 3. **G — server flags, cheap A/B**: chunk per ISL (70k chunk 32768 = TTT +1..9% but TTFT worse at
    CONC 2-4 → repeat CONC 2/4 with more requests before deciding), other scheduler knobs.
 4. **Iso-comparison data vs GB300**: tp4ep1 sweep with `ROCM_QUICK_REDUCE_QUANTIZATION` unset (bf16
@@ -498,6 +501,24 @@ SGLang worktree `/data/proxy_moe/wt/sglang` (`feat/proxy-model-1020`, uncommitte
   costs ~2 points. Decision for the user: hip quantizer for the shared expert (+5.3%, shared-expert
   activations quantized by a different but equally valid MXFP4 rounding) vs exact (+3.3%).
 - TODO before any push: remove `_SP_CHECK` / `_sp_reference` debug code and the one-time info log.
+
+### Item 2 — CONC=1024 decode ITL jump: measured (2026-10-21, crsuse2-m2m-231, offline from the sweep)
+`/data/proxy_moe/f2/itl_shape.py` on `fixed_seq_len/tp8ep1/isl1024-osl1024-c{512,1024}` (client
+`--output-details` per-token ITLs + TP0 server decode/prefill log lines).
+
+| CONC | ITL p10 / p50 / p75 / p90 / p99 (ms) | steps > 2x median: % steps / % time | server decode-only ms/step (running >= 98%) |
+|---|---|---|---|
+| 512 | 40.7 / 43.9 / 46.1 / 51.9 / 119.5 | 1.6% / 17.1% | 43.9 (197 intervals) |
+| 1024 | 58.7 / 74.4 / 96.0 / 113.5 / 319.5 | 3.9% / 26.0% | 69.6 (197 intervals) |
+
+- Decode-only intervals (no Prefill batch line between two decode log lines): bs512 43.9 ms/step,
+  bs1024 69.6 ms/step (1.59x for 2x tokens; per token 0.086 → 0.068 ms). So the MEDIAN ITL jump is the
+  decode step itself, not prefill interleaving (hypothesis falsified for the median). Prefill
+  interleaving drives the tail (p75+; 26% vs 17% of time in > 2x-median steps; intervals that contain
+  prefill: 464 ms vs 1,311 ms median).
+- Next: decode kernel breakdown bs1024 vs bs512 (`/data/proxy_moe/f2/decode_prof.sh`, steady state,
+  by-stage profiler; the non-by-stage profiler SEGFAULTs at stop under decode CUDA graphs here and
+  kills the server, both CONC).
 
 **Item 2 plan (CONC=1024 decode ITL jump), measurement only, runs after F's M0/M1:** one run
 1024/1024 CONC 1024 (TP8 EP1) with the server's decode-batch log lines kept; compare (a) server

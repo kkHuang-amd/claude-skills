@@ -120,6 +120,38 @@ T11 conclusion: every TP8 lever carries over to TP4 with the same sign. Best TP4
 Inputs: `/data/proxy_moe/tune_tp4/run_tune.sh` → `ep1_tp4_tuned.csv`, `ep4eq_tuned.csv`
 (M 2048/4096/8192; EP4 equivalent = topk 4 over 128 experts, TUNE_MOE_STAGE2_ATOMIC_ONLY=1).
 
+## TTT/GPU + P90 interactivity (dsv41 / InferenceX style), all runs on crsuse2-m2m-231
+
+TTT/GPU = total_throughput (input + output tok/s) / num GPUs; P90 interactivity = 1000 / p90_itl_ms
+(tok/s/user; definition matched to AgentX logs, e.g. ITL p90 128.92 ms → 7.76). Bench 1024/256,
+64 req, conc 16. Δ vs the unoptimized pristine-base row of each group (both re-run on this node:
+TP8 c231_tp8_base_ep8def_warm_1021 788.6 / 324.1 / 19.05, matches mi355-4's 789 / 316 / 19.1).
+Generator: `/data/proxy_moe/tools/serving_table.py`.
+### TP8 (24 layers, 8 GPUs)
+
+| Config | TTT/GPU (tok/s) | P90 interactivity (tok/s/user) | Output tok/s | TTFT med (ms) | TPOT med (ms) | Run |
+|---|---|---|---|---|---|---|
+| Unoptimized: EP8, package defaults (pristine base) | 492.9 | 53.2 | 788.6 | 324.1 | 19.05 | c231_tp8_base_ep8def_warm_1021 |
+| EP8 + AR fusion + tuned MoE | 504.4 (+2.3%) | 54.5 (+2.4%) | 807.0 (+2.3%) | 314.3 (-3.0%) | 18.64 (-2.2%) | c231_ep8_warm_1020 |
+| EP8 + AR fusion + tuned + T4 | 508.7 (+3.2%) | 54.5 (+2.4%) | 814.0 (+3.2%) | 294.0 (-9.3%) | 18.52 (-2.8%) | c231_ep8_t4bf16x3_1020 |
+| EP8 + AR fusion + tuned + T4 + b_nt fix | 521.1 (+5.7%) | 56.0 (+5.2%) | 833.8 (+5.7%) | 296.8 (-8.4%) | 18.06 (-5.2%) | c231_ep8_t4_bnt2fix_1020 |
+| EP1 + AR fusion + tuned MoE | 558.4 (+13.3%) | 62.9 (+18.1%) | 893.4 (+13.3%) | 364.8 (+12.5%) | 16.53 (-13.2%) | c231_ep1_warm_1020 |
+| EP1 + AR fusion + tuned + T4 | 563.5 (+14.3%) | 62.9 (+18.3%) | 901.6 (+14.3%) | 342.9 (+5.8%) | 16.47 (-13.6%) | c231_ep1_t4bf16x3_1020 |
+| EP1 + AR fusion + tuned + T4 + b_nt fix | 582.0 (+18.1%) | 65.3 (+22.7%) | 931.2 (+18.1%) | 342.4 (+5.6%) | 15.89 (-16.6%) | c231_ep1_t4_bnt2fix_1020 |
+| Same, pushed branches (new base) | 583.6 (+18.4%) | 65.5 (+23.1%) | 933.7 (+18.4%) | 344.5 (+6.3%) | 15.83 (-16.9%) | c231_newbase_ep1_warm_1020 |
+
+### TP4 (12 layers, 4 GPUs)
+
+| Config | TTT/GPU (tok/s) | P90 interactivity (tok/s/user) | Output tok/s | TTFT med (ms) | TPOT med (ms) | Run |
+|---|---|---|---|---|---|---|
+| (a) Unoptimized: EP4, package defaults (pristine base) | 1,206.3 | 64.8 | 965.0 | 247.1 | 15.68 | c231_tp4_a_base_ep4def_1020 |
+| (b) New base, EP4 defaults (code changes only) | 1,226.6 (+1.7%) | 66.0 (+1.9%) | 981.2 (+1.7%) | 250.3 (+1.3%) | 15.39 (-1.9%) | c231_tp4_b_new_ep4def_1020 |
+| (c) + AR fusion | 1,244.5 (+3.2%) | 67.1 (+3.7%) | 995.6 (+3.2%) | 251.3 (+1.7%) | 15.14 (-3.4%) | c231_tp4_c_new_ep4_arf_1020 |
+| (d) + T4 router | 1,250.5 (+3.7%) | 67.1 (+3.7%) | 1000.4 (+3.7%) | 239.8 (-3.0%) | 15.11 (-3.7%) | c231_tp4_d_new_ep4_arf_t4_1020 |
+| (h) + TP4-tuned MoE rows | 1,253.2 (+3.9%) | 67.0 (+3.5%) | 1002.6 (+3.9%) | 234.0 (-5.3%) | 15.10 (-3.7%) | c231_tp4_h_new_ep4_arf_t4_tuned_1021 |
+| (f) EP1 + AR fusion + T4 | 1,362.2 (+12.9%) | 75.4 (+16.5%) | 1089.8 (+12.9%) | 260.9 (+5.6%) | 13.71 (-12.5%) | c231_tp4_f_new_ep1_arf_t4_1020 |
+| (g) + TP4-tuned MoE rows | 1,362.9 (+13.0%) | 75.3 (+16.2%) | 1090.3 (+13.0%) | 256.0 (+3.6%) | 13.73 (-12.4%) | c231_tp4_g_new_ep1_arf_t4_tuned_1021 |
+
 ## Before vs after (bench 1024 in / 256 out, 64 req, c16; Δ vs unoptimized EP8 defaults)
 
 | Config | Node / base | Out tok/s | TTFT med ms | TPOT med ms |
@@ -447,3 +479,4 @@ w3, bnt0.
 | 2026-10-21 | crsuse2-m2m-231 | c231_tp4_g_new_ep1_arf_t4_tuned_1021 | TP4 EP1 + AR fusion + T4 + TP4-tuned rows | 1090.3 | 256.0 | 13.73 | new base |
 | 2026-10-21 | crsuse2-m2m-231 | c231_tp4_h_new_ep4_arf_t4_tuned_1021 | TP4 EP4 + AR fusion + T4 + TP4-tuned rows | 1002.6 | 234.0 | 15.10 | new base |
 | 2026-10-20 | crsuse2-m2m-231 | c231_newbase_ep1_warm_1020 | NEW BASE: EP1 + AR fusion + tuned + T4 + b_nt fix | 933.7 | 344.5 | 15.83 | aiter cfae83274, sglang effe332427, flydsl 0.4.0 |
+| 2026-10-21 | crsuse2-m2m-231 | c231_tp8_base_ep8def_warm_1021 | TP8 EP8 package defaults, PRISTINE base (unoptimized) | 788.6 | 324.1 | 19.05 | cold 788.1 / 325.3 / 19.07 |

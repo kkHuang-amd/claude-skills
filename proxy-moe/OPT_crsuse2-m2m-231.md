@@ -18,11 +18,11 @@ numbering.
   <2% left), D (fused quant 16384: correct, no serving gain). Dropped: DP-attention, mega_moe_tp.
 
 **Next (priority order, evidence in brackets):**
-1. **F / T3 — prefill comm/compute overlap** [sweep: 70000/300 and 8192/1024 high-CONC are prefill
-   bound (TTFT ~linear in CONC, TTT flat); EP1 prefill comm 21-29% of GPU time]. Design + plan
-   written: section "F / T3 — prefill AR/compute overlap". Next action: M0 (MoE M-scaling + AR time,
-   decides go/no-go; MoE split penalty may cancel the gain at chunk 8192), then M1; ask the user
-   before the P1 code.
+1. **F / T3 — prefill comm/compute overlap: M0 + M1 DONE → side-stream overlap NO-GO** (section
+   "F M0 results"): AR concurrent with MoE slows both (AR 1.7-1.8x, moe1 1.3-1.4x); best CU split hides
+   12.5% of one AR (<3% prefill). Prefill comm is still ~22% (ISL 1024 and 70k). Remaining comm levers
+   without overlap (not started, ask the user first): cheaper AR (QR INT4/INT6, needs a logits check),
+   AR+norm fusion at prefill sizes. P1 code not started.
 2. **CONC=1024 decode ITL jump** [MI355X median ITL 67-74 ms at 1024 vs 40-46 ms at 512; GB300 shows
    the same symptom]. Measure first: server-side decode step time vs client ITL (prefill-chunk
    interleaving suspected), one variable at a time.
@@ -308,6 +308,62 @@ attention-metadata split. Everything else is per token and splits at token index
   (c) AR and MoE kernel durations vs unsplit (contention inflation); (d) step GPU ms (TP0, min-comm
   rank per `rank_skew.py`) and finally serving TTFT/TTT at 70000/300 CONC 8 and 8192/1024 CONC 256.
 
+### F M0 results (2026-10-21, crsuse2-m2m-231) — side-stream overlap: NO-GO
+Artifacts `/shared_nfs/kk/results/proxy_24l/c231_F_M0_1021/`; tools `/data/proxy_moe/tools/`
+(`decode_moe_roofline.py` T9_EP1=1, `ar_m_scaling.py`, `ar_moe_overlap.py`). Random top-16 routing,
+TP8-EP1 MoE shape, profiler kernel time / event wall time.
+
+| M | MoE 1 GPU (us) | AR [M,16384] bf16, 8 GPU (us, path) |
+|---|---|---|
+| 2048 | 2147 | 290 (custom AR 2stage) |
+| 4096 | 3014 | 569 (QR INT8 twoshot) |
+| 8192 | 5128 (matches serving trace per layer: moe1 2.2 / moe2 2.0 / reduce 1.06 ms) | 1031 (serving trace 1.07) |
+| 16384 | 10599 (no tuned row: default `moe2_..cshuffle` 6.9 ms) | 1939 |
+
+- Split penalty: 2 x M4096 = 6028 vs M8192 5128 (+17.5%); 2 x M8192 = 10256 vs M16384 10599 (-3%,
+  only because M16384 is untuned). AR is linear in bytes from 4096 up (no per-call overhead to lose).
+- Direct overlap test (8 GPUs, MoE on main stream + AR on a side stream, launched together; trace
+  confirms kernels overlap in time: 1.0 ms at M4096, 1.76 ms at M8192):
+
+| M | AR CUs | MoE alone | AR alone | both | vs serial unmasked (moe+ar) | AR kernel in "both" | moe1 in "both" |
+|---|---|---|---|---|---|---|---|
+| 4096 | shared | 2951 | 556 | 3738 | +231 us (worse) | 1015 (1.8x) | 1798 (1.38x) |
+| 8192 | shared | 5173 | 1037 | 6620 | +410 us (worse) | 1773 (1.7x) | 2737 (1.28x) |
+| 4096 | 32 own / MoE 224 | 3079 | 569 | 3545 | +38 us (worse) | 2295 | 1612 |
+| 8192 | 32 own / MoE 224 | 5339 | 1044 | 6080 | -130 us (12.5% of AR hidden) | 3659 | 2686 |
+| 4096 | 64 own / MoE 192 | 3279 | 612 | 3715 | +208 us (worse) | 2421 | 1474 |
+| 8192 | 64 own / MoE 192 | 5669 | 1160 | 6492 | +282 us (worse) | 2828 | 2937 |
+
+  CU partition = `hipExtStreamCreateWithCUMask` (GOTCHA: load torch's own
+  `_rocm_sdk_core/lib/libamdhip64.so.7` via ctypes; the system libamdhip64 is a different runtime →
+  "invalid argument" on any op in that stream).
+- Verdict: running QR AR concurrently with the MoE makes both slower; best case (AR on 32 private
+  CUs, M8192) hides 12.5% of one AR ≈ 0.13 ms/layer, < 3% prefill before the split penalty. Design S
+  (and TBO-style split with a side stream) is NO-GO with these kernels. Why the contention costs this
+  much is NOT measured (hypotheses: QR twoshot is CU/issue-throughput bound — it stretches 3.5x on 32
+  CUs; both kernels compete for HBM/fabric; persistent `cu256` MoE kernels lose a wave slot). Falsifier
+  if revisited: AR alone on 32 masked CUs vs AR concurrent on the same 32 CUs (CU vs memory contention).
+- Prefill comm (21.7%) remains; levers that do not need overlap: cheaper AR (QR INT4/INT6, accuracy
+  check needed), fewer AR bytes, AR+norm fusion at prefill sizes. Not started.
+
+### F M1 results (2026-10-21, crsuse2-m2m-231) — 70000/300 CONC 8 prefill shares
+Driver `/data/proxy_moe/F_M1.sh` (sweep launch flags via `serve_proxy.sh`, TP8 EP1, chunk 8192).
+- M1 (`c231_F_M1_70k_c8_1021`): profile started mid-run → only DECODE captured (by-stage profiling
+  ends the session after the decode capture if decode comes first; `profile_stages` is unused in v1).
+  Serving numbers reproduce the sweep point: TTT/GPU 3,566.9 / TTFT med 8,749 / ITL med 10.75
+  (sweep 3,573.8 / 8,745 / 10.75).
+- M1b (`c231_F_M1b_70k_c8_1021`): 2-request warm-up, then `start_profile` (by-stage, 9 steps =
+  one 70k request, context 0→70k) before the bench → EXTEND captured. TP0 EXTEND shares:
+  comm 22.2% (QR twoshot 20.5% + reduce_scatter 1.6%), MoE 48.8% (moe1 / moe2 / reduce / sort at
+  2.04 / 1.96 / 0.99 / 0.15 ms per layer = the M8192 numbers of M0), dense GEMM ~12%, attention 6.1%
+  (fmha full layers + unified_attention sliding layers), norm 3.9%, quant 3.9%. Serving 3,640.2 /
+  8,692 / 10.76 (warmup 0 instead of 16, profiler on; not a sweep-comparable point).
+- So the long-context prefill looks like ISL 1024 (comm 21.7%, MoE 52.5%): attention is only 6% at
+  70k because 3 of 4 layers are sliding-window. Prefill comm ≈ 22% everywhere; the M0 verdict
+  (overlap does not pay with these kernels) applies to 70k too.
+- Trace caveat: kernel counts imply ~7 of the 9 steps were recorded (moe1 171 calls / 24 layers);
+  shares and per-call times are unaffected, absolute ms/step from `--steps 9` are too low.
+
 **Item 2 plan (CONC=1024 decode ITL jump), measurement only, runs after F's M0/M1:** one run
 1024/1024 CONC 1024 (TP8 EP1) with the server's decode-batch log lines kept; compare (a) server
 decode step time at running-req ~1024 (log `gen throughput` / per-step timing) vs client median ITL,
@@ -590,3 +646,6 @@ w3, bnt0.
 | 2026-10-21 | crsuse2-m2m-231 | c231_tp4_h_new_ep4_arf_t4_tuned_1021 | TP4 EP4 + AR fusion + T4 + TP4-tuned rows | 1002.6 | 234.0 | 15.10 | new base |
 | 2026-10-20 | crsuse2-m2m-231 | c231_newbase_ep1_warm_1020 | NEW BASE: EP1 + AR fusion + tuned + T4 + b_nt fix | 933.7 | 344.5 | 15.83 | aiter cfae83274, sglang effe332427, flydsl 0.4.0 |
 | 2026-10-21 | crsuse2-m2m-231 | c231_tp8_base_ep8def_warm_1021 | TP8 EP8 package defaults, PRISTINE base (unoptimized) | 788.6 | 324.1 | 19.05 | cold 788.1 / 325.3 / 19.07 |
+| 2026-10-21 | crsuse2-m2m-231 | c231_F_M0_1021 | op-level: MoE M-scaling (1 GPU), QR AR M-scaling + AR/MoE concurrency (8 GPU) | — | — | — | side-stream overlap NO-GO, see F M0 results |
+| 2026-10-21 | crsuse2-m2m-231 | c231_F_M1_70k_c8_1021 | TP8 EP1 sweep flags, 70000/300 CONC 8, profile mid-run | TTT/GPU 3566.9 | 8749 | ITL 10.75 | only DECODE trace captured |
+| 2026-10-21 | crsuse2-m2m-231 | c231_F_M1b_70k_c8_1021 | same, warm-up + profile from bench start | TTT/GPU 3640.2 | 8692 | ITL 10.76 | EXTEND comm 22.2%, MoE 48.8%, attn 6.1% |

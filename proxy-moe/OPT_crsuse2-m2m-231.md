@@ -611,6 +611,21 @@ variant instead of exact, 70k c8 would be ~+5% (separate A/B).
 State: SGLang changes uncommitted in `/data/proxy_moe/wt/sglang` (patch
 `/data/proxy_moe/f2/p1_sglang_uncommitted.patch`, backup `/shared_nfs/kk/proxy_moe_node_backup_c231/f2/`).
 
+### Item 3 / G — 70k chunk 8192 vs 32768 at CONC 2/4, more requests (2026-10-21 ~19:50, crsuse2-m2m-231)
+`/data/proxy_moe/f2/g_chunk.sh` (baseline flags, one variable `CHUNK`, np = 16 x CONC), results
+`c231_G_chunk_1021/chunk{8192,32768}/`:
+
+| CONC | TTT/GPU 8192 → 32768 | TTFT med | TTFT p25 | TTFT p75 | ITL |
+|---|---|---|---|---|---|
+| 2 (n=32) | 2,888.8 → 2,948.3 (+2.1%) | 2,287 → 2,940 (+28.6%) | 2,279 → 2,929 (+28.5%) | 4,284 → 4,147 (-3.2%) | 6.44 = |
+| 4 (n=64) | 3,261.5 → 3,330.2 (+2.1%) | 4,525 → 4,911 (+8.5%) | 2,339 → 2,996 (+28.1%) | 6,475 → 6,841 (+5.6%) | 8.04 → 8.01 |
+
+- Confirmed with 4x more requests: chunk 32768 makes an UNQUEUED 70k prefill (TTFT p25) ~0.65 s
+  (+28%) slower, while throughput is +2%. Not MoE/AR: op-level MoE per token at M32768 (default
+  kernel 21.1 ms) ≈ M8192 (5.31 ms x 4), and a token=16384/32768 copy of the M8192 row makes it
+  -10% / -13% (rel_l2 3.6%); QR INT8 AR is linear (8192 1.03 / 16384 1.96 / 32768 3.82 ms). Next:
+  EXTEND profile of one 70k request at both chunks (`/data/proxy_moe/f2/g_prof.sh`, running).
+
 **Item 2 plan (CONC=1024 decode ITL jump), measurement only, runs after F's M0/M1:** one run
 1024/1024 CONC 1024 (TP8 EP1) with the server's decode-batch log lines kept; compare (a) server
 decode step time at running-req ~1024 (log `gen throughput` / per-step timing) vs client median ITL,

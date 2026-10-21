@@ -1,0 +1,124 @@
+diff --git a/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a4_mxfp4.py b/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a4_mxfp4.py
+index f860a3f..bf8f4fa 100644
+--- a/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a4_mxfp4.py
++++ b/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a4_mxfp4.py
+@@ -270,6 +270,17 @@ class QuarkW4A4MXFP4(QuarkLinearScheme):
+             # FP4 block scales are folded into the bf16 weight; drop them.
+             layer.weight_scale = None
+             layer.dequantized_bf16 = True
++        elif not _is_hip:
++            # FlashInfer mm_fp4 (cuDNN, MXFP4 x MXFP4) wants the weight scale in
++            # the 128x4-swizzled layout, as a 2D [round_up(N,128), round_up(K/32,4)].
++            from flashinfer import block_scale_interleave
++
++            n, k_groups = layer.weight_scale.shape
++            ws = block_scale_interleave(layer.weight_scale.data.contiguous())
++            layer.weight_scale = torch.nn.Parameter(
++                ws.view(-(-n // 128) * 128, -(-k_groups // 4) * 4), requires_grad=False
++            )
++            layer.flashinfer_mxfp4 = True
+ 
+     def create_weights(
+         self,
+@@ -689,6 +700,27 @@ class QuarkW4A4MXFP4(QuarkLinearScheme):
+                 x = x[0]
+             return torch.nn.functional.linear(x, layer.weight, bias)
+ 
++        if getattr(layer, "flashinfer_mxfp4", False):
++            from flashinfer import mm_fp4, mxfp4_quantize
++
++            out_shape = (*x.shape[:-1], layer.weight.shape[0])
++            x2 = x.reshape(-1, x.shape[-1])
++            x_q, x_s = mxfp4_quantize(x2)
++            y = mm_fp4(
++                x_q,
++                layer.weight.T,
++                x_s.view(-1, layer.weight_scale.shape[1]),
++                layer.weight_scale.T,
++                None,
++                x.dtype,
++                block_size=32,
++                use_nvfp4=False,
++                backend="cudnn",
++            )
++            if bias is not None:
++                y = y + bias
++            return y.view(out_shape)
++
+         # Bias will be added after the GEMM if provided
+         three_d = False
+         fused_gemm_split_cat = False
+diff --git a/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a4_mxfp4_moe.py b/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a4_mxfp4_moe.py
+index 5342591..a5cf848 100644
+--- a/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a4_mxfp4_moe.py
++++ b/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a4_mxfp4_moe.py
+@@ -160,6 +160,14 @@ class QuarkW4A4MXFp4MoE(QuarkMoEScheme):
+                 "More details at https://docs.sglang.io/advanced_features/quantization.html#online-quantization."
+             )
+ 
++        # NVIDIA: serialized MXFP4 experts run through the mxfp4 MoE method
++        # (FlashInfer trtllm-gen, MXFP4 weights x MXFP8 activations).
++        self._cuda_method = None
++        if not _is_hip and is_checkpoint_mxfp4_serialized and dequantization_config is None:
++            from sglang.srt.layers.quantization.mxfp4 import Mxfp4MoEMethod
++
++            self._cuda_method = Mxfp4MoEMethod(prefix="")
++
+     @classmethod
+     def get_min_capability(cls) -> int:
+         return 70
+@@ -173,6 +181,15 @@ class QuarkW4A4MXFp4MoE(QuarkMoEScheme):
+         params_dtype: torch.dtype,
+         **extra_weight_attrs,
+     ):
++        if self._cuda_method is not None:
++            return self._cuda_method.create_weights(
++                layer=layer,
++                num_experts=num_experts,
++                hidden_size=hidden_size,
++                intermediate_size_per_partition=intermediate_size_per_partition,
++                params_dtype=params_dtype,
++                **extra_weight_attrs,
++            )
+ 
+         from sglang.srt.layers.moe.fused_moe_triton import FusedMoeWeightScaleSupported
+ 
+@@ -907,6 +924,15 @@ class QuarkW4A4MXFp4MoE(QuarkMoEScheme):
+         layer.w2_weight_scale = torch.nn.Parameter(w2_weight_scale, requires_grad=False)
+ 
+     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
++        if self._cuda_method is not None:
++            self._cuda_method.process_weights_after_loading(layer)
++            # Quark experts use plain SiLU-gated activation, not the GPT-OSS
++            # swiglu (alpha 1.702, clamp 7) the mxfp4 method defaults to.
++            layer.gemm1_alpha = None
++            layer.gemm1_beta = None
++            layer.gemm1_clamp_limit = None
++            return
++
+         if not getattr(self, "_owns_moe_runner", False):
+             raise RuntimeError(
+                 "Quark MXFP4 weight preshuffling requires an owned AITER runner."
+@@ -997,6 +1023,12 @@ class QuarkW4A4MXFp4MoE(QuarkMoEScheme):
+             get_moe_runner_backend,
+         )
+ 
++        if self._cuda_method is not None:
++            # Quark stores gate and up as separate row blocks.
++            moe_runner_config.gate_up_interleaved = False
++            self.moe_runner_config = moe_runner_config
++            return self._cuda_method.create_moe_runner(layer, moe_runner_config)
++
+         self.moe_runner_config = moe_runner_config
+         self._owns_moe_runner = False
+         moe_runner_backend = get_moe_runner_backend()
+@@ -1017,6 +1049,9 @@ class QuarkW4A4MXFp4MoE(QuarkMoEScheme):
+         layer: torch.nn.Module,
+         dispatch_output: StandardDispatchOutput,
+     ) -> CombineInput:
++        if self._cuda_method is not None:
++            return self._cuda_method.apply(layer, dispatch_output)
++
+         from sglang.srt.layers.moe.moe_runner.aiter import (
+             AiterMoeQuantInfo,
+             AiterQuantType,

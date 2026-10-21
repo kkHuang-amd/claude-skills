@@ -624,7 +624,20 @@ State: SGLang changes uncommitted in `/data/proxy_moe/wt/sglang` (patch
   (+28%) slower, while throughput is +2%. Not MoE/AR: op-level MoE per token at M32768 (default
   kernel 21.1 ms) ≈ M8192 (5.31 ms x 4), and a token=16384/32768 copy of the M8192 row makes it
   -10% / -13% (rel_l2 3.6%); QR INT8 AR is linear (8192 1.03 / 16384 1.96 / 32768 3.82 ms). Next:
-  EXTEND profile of one 70k request at both chunks (`/data/proxy_moe/f2/g_prof.sh`, running).
+  EXTEND profile of one 70k request at both chunks (`/data/proxy_moe/f2/g_prof.sh`).
+- One unqueued 70k request (CONC-2 server, distinct `--seed` per bench call, no profiler, n=3):
+  TTFT 2,145 ms (chunk 8192) vs 2,083 ms (chunk 32768) → a single prefill is NOT slower with the big
+  chunk; the sweep's +28% at p25 is a concurrency/scheduling effect, mechanism not found yet.
+- Chunk-32768 EXTEND profile (3 steps = the whole request, 2,068 ms GPU): moe2 default
+  `mfma_moe2_..._cshuffle_t64x128x256` 647 ms (31%) at M32768 (no tuned row), QR AR 405 ms (20%),
+  moe1 268 ms. The chunk-8192 capture caught small-M steps, not the 70k prefill (not usable).
+- GOTCHAS: (1) the first g_prof attempt reused the same random prompts across bench calls → radix
+  prefix-cache hits (TTFT 63 ms for 70k); use a distinct `--seed` per call. (2) bench_serving warmup
+  sends `input_requests[0]` repeatedly and does NOT flush the cache (only `--flush-cache` / CI), so in
+  every sweep point the first measured request is a prefix-cache hit (1 of np; same on GB300, so the
+  comparison is unaffected, but CONC-2 medians over 8 requests carry it).
+- Follow-up running: chunk 32768 + token 16384/32768 rows (copies of the M8192 row, op-level -10/-13%),
+  70k c2/c8 (`/data/proxy_moe/f2/g_rows.sh` → `c231_G_rows_1021/{base,with16k32k}`).
 
 **Item 2 plan (CONC=1024 decode ITL jump), measurement only, runs after F's M0/M1:** one run
 1024/1024 CONC 1024 (TP8 EP1) with the server's decode-batch log lines kept; compare (a) server

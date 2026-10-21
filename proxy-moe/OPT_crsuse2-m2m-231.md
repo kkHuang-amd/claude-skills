@@ -19,8 +19,10 @@ numbering.
 
 **Next (priority order, evidence in brackets):**
 1. **F / T3 — prefill comm/compute overlap** [sweep: 70000/300 and 8192/1024 high-CONC are prefill
-   bound (TTFT ~linear in CONC, TTT flat); EP1 prefill comm 21-29% of GPU time]. Needs Laguna
-   micro-batch split of a prefill chunk so AR of half A overlaps compute of half B. Large; design first.
+   bound (TTFT ~linear in CONC, TTT flat); EP1 prefill comm 21-29% of GPU time]. Design + plan
+   written: section "F / T3 — prefill AR/compute overlap". Next action: M0 (MoE M-scaling + AR time,
+   decides go/no-go; MoE split penalty may cancel the gain at chunk 8192), then M1; ask the user
+   before the P1 code.
 2. **CONC=1024 decode ITL jump** [MI355X median ITL 67-74 ms at 1024 vs 40-46 ms at 512; GB300 shows
    the same symptom]. Measure first: server-side decode step time vs client ITL (prefill-chunk
    interleaving suspected), one variable at a time.
@@ -241,6 +243,77 @@ TP0 GPU ms/step (5 steps; profile batch 16 req is split 2 per DP rank, MoE still
   prefills per DP rank in lockstep (DP ranks step together for MoE collectives); hypothesis only.
 - Verdict: DROP for this model at TP8. Remaining T3 lever = overlap TP all-reduce with compute
   (e.g. split prefill chunk into 2 micro-batches inside Laguna) — no SGLang support, needs code.
+
+## F / T3 — prefill AR/compute overlap: design + measurement plan (2026-10-21, crsuse2-m2m-231)
+
+Status: design only, no code yet. Static numbers below are from the existing trace
+`c231_newbase_ep1_warm_1020` (TP0 EXTEND, `trace_kernels.py --steps 5`, ISL 1024, chunk 8192).
+
+**What there is to hide (EP1 TP8, prefill TP0, 93.84 ms/step GPU):** comm 20.40 ms (21.7%, QR INT8
+twoshot x19, AR not fused with norm in prefill: separate rmsnorm / add_rmsnorm_quant x19); MoE
+49.3 ms (52.5% = moe1 19.97 + moe2 `gemm2_a4w4..imax512` 18.40 + moe_reduction 9.51 + sort 1.43;
+trace_kernels files moe2 under "gemm"); dense GEMMs ~12 ms; attention core 1.6 ms (1.7% at ISL 1024;
+much larger at 70k context, so the comm share there is lower: unmeasured, see M1).
+Ceiling = 21.7% of prefill GPU time if every AR were hidden for free. Hypothesis, not a bound.
+
+**Why not SGLang TBO as-is:** TBO interleaves two micro-batches' ops on ONE stream and gets overlap
+from DeepEP/mori a2a running on NIC/copy engines. Our TP all-reduce is a CU kernel (QR twoshot) on the
+compute stream, so interleaving alone overlaps nothing. Overlap needs the AR on a second stream.
+Reusable from TBO: `batch_overlap/two_batch_overlap.py` two-chunk split (`compute_split_seq_index`,
+`compute_split_token_index`, one sequence may straddle the split), only if attention is split too.
+
+**Design S (proposed first prototype): split only the per-token part of each layer.**
+Attention core (`self.attn(q,k,v)` in `LagunaAttention.forward`) runs on the full chunk, so no
+attention-metadata split. Everything else is per token and splits at token index t = N/2:
+- refactor `LagunaAttention.forward` into `attn_pre` (qkv_proj, qk norm, rope), `attn_core`,
+  `attn_post` (g_proj gate, o_proj); `LagunaDecoderLayer.forward` gets a split path; the loop in
+  `LagunaModel.forward` stays.
+- per layer: core(full) → o_proj(A) → [comm] AR1(A) → o_proj(B) → [comm] AR1(B) → add+norm+MoE(A)
+  (waits AR1(A)) → [comm] AR2(A) → MoE(B) → [comm] AR2(B) → add+norm+attn_pre(L+1, A) →
+  attn_pre(L+1, B) → core(L+1) waits AR2(B). Hidden: AR1(B) behind MoE(A), AR2(A) behind MoE(B)
+  (fully); AR1(A) behind o_proj(B), AR2(B) behind attn_pre(A) (partially) → ~50-75% of comm.
+- comm stream: one dedicated stream, events for the 4 dependencies; all ARs stay in order on that
+  one stream (QR/custom-AR IPC buffers are not safe for two concurrent ARs).
+- gate: env `SGLANG_OPT_LAGUNA_PREFILL_SPLIT=<min tokens>` (default off), extend mode only, eager
+  only (prefill is not graphed), off for DP-attention/PP.
+- risk 1: the layer_boundary residual state (`residual_batch.start(forward_batch)`,
+  `attn_boundary.prepare/finish`, `layers/layer_boundary/residual/stream.py`) is one object per
+  batch; the split needs two (slice views of hidden/residual per half). Read that code first.
+- risk 2: QR twoshot uses CUs; concurrent with MoE both kernels may stretch (contention). Measured
+  outcome, not assumed.
+- risk 3 (largest): MoE at M/2 twice is slower than M once (weight read per pass is fixed: EP1 TP8
+  ~6.4 GB/rank/layer of fp4 experts, estimate). TP4 EP1 measured (T11 validate.sh): 2 x M4096 =
+  9526 us vs M8192 7858 us = +21%. Applied to the 52.5% MoE share that is ~+11% prefill, i.e. it can
+  cancel the 11-16% expected hiding at chunk 8192. Mitigation: split only when each half keeps
+  M >= 8192 (chunk 16384), compared against chunk 16384 unsplit (one variable).
+- Design T (later, only if S works): full TBO-style split including attention (two-chunk split +
+  per-child attention metadata), hides AR2(B)/AR1(A) behind the other half's attention core too;
+  worth it mainly at 70k where the core is large.
+
+**Measurement plan (sequential, one variable each; record every run in Results):**
+- M0 (1 GPU, no code): MoE op time, TP8-EP1 shape (inter 512, 512 experts, top-16) at M = 2048 /
+  4096 / 8192 / 16384, profiler kernel time (`scripts/ep_moe_check.py` or `tune_tp4/validate.sh`
+  adapted), plus QR INT8 AR time on 8 GPUs for [M,16384] bf16 at the same M (fixed latency vs
+  linear). Gives the split penalty and the per-half AR cost.
+- M1 (serving, no code): 70000/300 CONC 8 profile, TP0 EXTEND steady chunk: comm / MoE / attention
+  shares at long context (`trace_kernels.py`).
+- Go/no-go: projected = hidden comm (from the schedule above, using M0 AR times) - MoE penalty (M0)
+  >= 5% of prefill GPU time at chunk 8192 or 16384. Otherwise stop and record why.
+- P1 (code, ask first): design S behind the env gate. Correctness: greedy outputs identical
+  split vs unsplit on a few prompts (AR order identical per token, so expect bit-exact) + GSM8K-style
+  sanity not needed for a dummy ckpt; compare logits rel_l2.
+- Overlap verification in the trace (outcome, not the enabling flag): (a) AR kernels appear on a
+  second stream/tid; (b) exposed comm = time of AR intervals not covered by any compute kernel on
+  another stream (new tool `tools/overlap_exposed.py`), target < 50% of the unsplit comm ms;
+  (c) AR and MoE kernel durations vs unsplit (contention inflation); (d) step GPU ms (TP0, min-comm
+  rank per `rank_skew.py`) and finally serving TTFT/TTT at 70000/300 CONC 8 and 8192/1024 CONC 256.
+
+**Item 2 plan (CONC=1024 decode ITL jump), measurement only, runs after F's M0/M1:** one run
+1024/1024 CONC 1024 (TP8 EP1) with the server's decode-batch log lines kept; compare (a) server
+decode step time at running-req ~1024 (log `gen throughput` / per-step timing) vs client median ITL,
+(b) fraction of steps that are mixed/prefill chunks during steady state, (c) ITL distribution shape
+(bimodal = prefill interleaving; shifted = slower decode step, e.g. graph bs or attention at 1024).
+Next variable picked from that result only.
 
 ## T4 — router FP32 GEMM (2026-10-20, crsuse2-m2m-231)
 

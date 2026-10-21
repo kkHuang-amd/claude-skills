@@ -516,9 +516,25 @@ SGLang worktree `/data/proxy_moe/wt/sglang` (`feat/proxy-model-1020`, uncommitte
   decode step itself, not prefill interleaving (hypothesis falsified for the median). Prefill
   interleaving drives the tail (p75+; 26% vs 17% of time in > 2x-median steps; intervals that contain
   prefill: 464 ms vs 1,311 ms median).
-- Next: decode kernel breakdown bs1024 vs bs512 (`/data/proxy_moe/f2/decode_prof.sh`, steady state,
-  by-stage profiler; the non-by-stage profiler SEGFAULTs at stop under decode CUDA graphs here and
-  kills the server, both CONC).
+- Decode profile at bs512/bs1024 NOT obtained: torch profiler SEGFAULTs at "Stop profiling" (both
+  plain and by-stage) with `--cuda-graph-max-bs-decode 512/1024` and kills the server
+  (`c231_item2_decode_c{512,1024}_1021/server.log`); bs8/bs16 decode profiles worked earlier. Not
+  root-caused. Used op-level timing instead (`c231_item2_ops_1021/`, 1 GPU MoE EP1/TP8 random routing,
+  8-GPU AR):
+
+| Op per layer | M=512 | M=1024 | Δ x 24 layers |
+|---|---|---|---|
+| MoE (default kernels, t32 tiles) | 1,220 us (5.6 TB/s on 6.85 GB unique) | 1,789 us (3.8 TB/s) | +13.7 ms |
+| AR x 2 (custom 2stage) | 2 x 104.5 | 2 x 174.9 | +3.4 ms |
+| measured step (server) | 43.9 ms | 69.6 ms | +25.7 ms (remaining ~8.7 ms attention / dense GEMM / norm, not split) |
+
+- MoE M=1024: same unique weight bytes as M=512 but 1.47x time; EP1/TP8 tuned rows exist only for
+  M 2048/4096/8192, so M<=1024 uses default t32 tiles (avg 32 rows/expert at M1024 → many experts
+  need 2 M-blocks → weights re-read; hypothesis). Probe, one variable (`AITER_CONFIG_FMOE` = tuned
+  CSV + a token=1024 copy of the M2048 row, `/data/proxy_moe/f2/item2/with1024.csv`): M1024
+  1,807 → 1,430 us (-21%, moe1 t64x128x256 at 5.97 TB/s); M512 with the same row 1,232 → 1,348 (worse,
+  keep default). Output rel_l2 vs default 3.7% (same systematic fp4 requant-path difference as the
+  accepted T11 tuned rows, 3.6%). Projected decode step bs1024: -9 ms (~-13%).
 
 **Item 2 plan (CONC=1024 decode ITL jump), measurement only, runs after F's M0/M1:** one run
 1024/1024 CONC 1024 (TP8 EP1) with the server's decode-batch log lines kept; compare (a) server

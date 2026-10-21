@@ -112,6 +112,33 @@ retry at 07:43 with identical flags completed normally (kept as `...c64.failed_0
 - 1024/1024 at CONC 1024 adds little over 512 (TP8 2,131 → 2,193 tok/s/GPU) and costs P90
   interactivity (19.3 → 8.8).
 
+## 70000/300: `--chunked-prefill-size` 8192 vs 32768 (one variable, 2026-10-21 08:12-08:47 UTC)
+
+All other launch flags identical to the main sweep (the main sweep uses one launch command for all
+ISLs; only CONC changes). Chunk verified in every server log. Results:
+`/shared_nfs/kk/results/proxy_24l/fixed_seq_len_chunk32768/` (`CHUNK=32768` env to `sweep_proxy.sh`).
+One run per point; CONC 2 medians come from 8 requests.
+
+| Recipe | CONC | TTT/GPU 8192 → 32768 | Median TTFT (ms) | Median ITL (ms) | P90 interactivity |
+|---|---|---|---|---|---|
+| tp8ep1 | 2 | 3,091.3 → 3,129.9 (+1.3%) | 2,276 → 2,924 (+28.5%) | 6.44 → 6.44 (+0.0%) | 154.3 → 154.4 (+0.1%) |
+| tp8ep1 | 4 | 3,381.7 → 3,457.5 (+2.2%) | 4,513 → 4,896 (+8.5%) | 8.06 → 8.02 (-0.4%) | 123.6 → 124.0 (+0.3%) |
+| tp8ep1 | 8 | 3,573.8 → 3,656.6 (+2.3%) | 8,745 → 8,330 (-4.7%) | 10.75 → 10.75 (+0.0%) | 92.5 → 92.5 (-0.0%) |
+| tp8ep1 | 16 | 3,691.8 → 3,780.6 (+2.4%) | 18,142 → 16,555 (-8.7%) | 15.71 → 15.73 (+0.1%) | 63.4 → 63.3 (-0.1%) |
+| tp8ep1 | 32 | 3,806.2 → 3,884.5 (+2.1%) | 35,004 → 33,220 (-5.1%) | 22.78 → 22.87 (+0.4%) | 43.6 → 43.4 (-0.4%) |
+| tp4ep1 | 2 | 8,345.5 → 8,841.2 (+5.9%) | 1,713 → 2,051 (+19.7%) | 4.56 → 4.57 (+0.2%) | 217.9 → 216.7 (-0.5%) |
+| tp4ep1 | 4 | 8,908.7 → 9,640.8 (+8.2%) | 3,416 → 3,422 (+0.2%) | 6.10 → 6.10 (+0.1%) | 162.8 → 162.8 (-0.0%) |
+| tp4ep1 | 8 | 9,325.1 → 10,095.6 (+8.3%) | 6,590 → 5,863 (-11.0%) | 8.86 → 8.87 (+0.1%) | 112.3 → 112.0 (-0.2%) |
+| tp4ep1 | 16 | 9,611.7 → 10,426.5 (+8.5%) | 12,933 → 11,680 (-9.7%) | 13.55 → 13.57 (+0.1%) | 73.3 → 73.2 (-0.1%) |
+| tp4ep1 | 32 | 9,919.2 → 10,786.4 (+8.7%) | 25,617 → 23,278 (-9.1%) | 20.09 → 20.16 (+0.3%) | 49.4 → 49.2 (-0.3%) |
+
+- Throughput up at every point: TP8 +1.3..2.4%, TP4 +5.9..8.7% (TP4 carries more prefill per GPU).
+- Median TTFT -5..-11% at CONC >= 8, but WORSE at CONC 2 (TP8 +28.5%, TP4 +19.7%) and TP8 CONC 4
+  (+8.5%); cause not investigated (small sample at CONC 2; repeat before concluding).
+- Decode unchanged (ITL / P90 interactivity within ±0.5%).
+- The main tables above keep chunk 8192 for every ISL; InferenceX derives chunk from ISL, so align
+  the chunk setting before comparing with other platforms.
+
 ## Regenerating
 
 `python3 report.py /shared_nfs/kk/results/proxy_24l/fixed_seq_len [--md]`

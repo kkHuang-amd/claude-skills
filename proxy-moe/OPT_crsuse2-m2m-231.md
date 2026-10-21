@@ -18,7 +18,7 @@ Current best: EP1 + AR fusion + tuned + T4 = 902 tok/s / TTFT 343 / TPOT 16.47.
 **Status (2026-10-21):** TP8 best = EP1 + AR fusion + tuned + T4 + stage2 b_nt fix: 933.7 / 344.5 /
 15.83 (new base). T11 (TP4) done: TP8 levers carry over; TP4-tuned prefill rows pushed; TP4 best
 EP1 1090.3 / 256.0 / 13.73, EP4 1002.6 / 234.0 / 15.10 (see "T11"). Items A, B, D closed.
-**Next (user, 2026-10-21): fixed_seq_len sweep first** (TP8 + TP4; `proxy-moe/fixed_seq_len/README.md`,
+**fixed_seq_len sweep DONE 2026-10-21 07:50 UTC** (50/50, `fixed_seq_len/RESULTS.md`). Before that, user said: sweep first (TP8 + TP4; `proxy-moe/fixed_seq_len/README.md`,
 session prompt `fixed_seq_len/SESSION_PROMPT.md`); optimizations after the sweep. Candidates then: F (prefill AR/compute overlap, TTFT up to ~-15%, large), G (server flags, cheap
 A/B), I (upstream PRs; b_nt fix first). Doc edits: in worktree `/data/proxy_moe/wt/skills` (the main
 checkout has 2 unrelated unmerged files), commit + push from there.

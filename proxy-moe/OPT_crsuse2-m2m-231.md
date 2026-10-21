@@ -392,6 +392,29 @@ per rank, seeded), 8 GPUs, [M,16384] bf16 (QR casts to fp16), one variable =
   custom-AR based (2stage, used only up to M2048 here), which would give up QR INT8 at M8192 (custom
   AR 2stage vs QR at M8192 not measured). Upper bound ~5% minus that loss; not started.
 
+### F2 idea (2026-10-21): replace prefill AR by reduce-scatter + FP4 all-gather (sequence-parallel residual)
+Facts: every linear except router/lm_head/embed is MXFP4 W4A4 (quark `exclude` = gate, lm_head,
+embed) → the consumers of both ARs (next qkv_proj; shared expert + routed MoE) quantize their input to
+fp4 per 1x32 group per TOKEN anyway. AR = RS + AG; the AG half can move the already-quantized fp4.
+- Per layer (prefill only; decode keeps AR): o_proj partial → RS [M,H] → add + RMSNorm + MXFP4 quant
+  on M/8 tokens → router on M/8 tokens (router weight replicated) + AG of topk ids/weights (tiny) →
+  AG fp4 + e8m0 scales (0.53 B/elt vs 2 B bf16 / ~1 B QR INT8) → shared + routed MoE on M tokens with
+  pre-quantized input (the existing split path `dynamic_per_group_scaled_quant` + `mxfp4_moe_sort`
+  already takes fp4 tokens) → partial → RS → add + norm + quant on M/8 → AG fp4 → next qkv_proj.
+- Equivalence: quantization is token-local, so quantizing the shard then gathering = gathering bf16
+  then quantizing (bit-identical). With RS in bf16 the result is MORE exact than today's INT8 AR;
+  with an INT8 RS it keeps half of today's error.
+- Side wins: norm / residual add / quant / router run on M/8 tokens (~4-5% of prefill today); AG is a
+  pure byte copy (no codec) → candidate for SDMA/copy engines, i.e. no CU contention (the M0 failure).
+- Existing SGLang `--enable-attn-tp-input-scattered` is NOT usable: MLA-only (needs q_lora_rank,
+  gathers the qkv latent) and gated to CUDA/NPU. GQA + fp4 gather needs new Laguna code.
+- Estimate (hypothesis, from bytes, and QR was shown NOT byte-bound → must be measured): per layer
+  today 2 x 1.03 ms; new = 2 x RS + 2 x AG(fp4). If RS ~0.5-0.65 ms and AG(fp4) ~0.15-0.25 ms →
+  ~1.3-1.8 ms → comm -15..-37% (≈3-8% prefill) + ~4% from M/8 norm/quant/router.
+- M2 (op level, 8 GPUs, no model code): at M=8192, H=16384: (a) RS bf16 via RCCL / aiter custom RS
+  (`reduce_scatter_cross_device_store`) ; (b) AG of [8192, 8704 B] via RCCL / custom / SDMA peer copy;
+  (c) AG on a side stream concurrent with MoE (M0-style). Go if projected >= 5% prefill.
+
 **Item 2 plan (CONC=1024 decode ITL jump), measurement only, runs after F's M0/M1:** one run
 1024/1024 CONC 1024 (TP8 EP1) with the server's decode-batch log lines kept; compare (a) server
 decode step time at running-req ~1024 (log `gen throughput` / per-step timing) vs client median ITL,

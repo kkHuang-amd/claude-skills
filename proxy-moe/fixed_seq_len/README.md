@@ -9,8 +9,8 @@ columns plus TTT/GPU and P90 interactivity).
 
 ## CONTINUE HERE
 
-**Status (2026-10-21 01:18 UTC):** FULL SWEEP RUNNING on crsuse2-m2m-231 (user: run it in this session),
-sweep pid in `/shared_nfs/kk/results/proxy_24l/fixed_seq_len/sweep.pid` (404161), log `sweep.log`.
+**Status (2026-10-21 07:50 UTC): SWEEP COMPLETE** — 50/50 points, no warnings; results and tables in
+`RESULTS.md`. Next: optimizations (user decides), see OPT doc.
 Survival: sweep pid has PPID 1, own process group, nohup → survives the Claude session ending.
 It does NOT survive the container/node being reclaimed (no scheduler visible inside the container;
 check the reservation). Results are on /shared_nfs and DONE markers make a restart resume; `/data`

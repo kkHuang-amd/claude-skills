@@ -187,6 +187,57 @@ and P90 interactivity: higher is better, so < 1 = MI355X behind. ITL and TTFT: l
   Quote the iso row (0.843) unless GB300 runs 70000/300 with chunk 32768 too.
 - Precision / prefill-AR differences in the table above apply to every ratio here.
 
+## tp4ep1 with `ROCM_QUICK_REDUCE_QUANTIZATION` unset (bf16 prefill AR, GB300-like), 2026-10-21/22
+
+One variable vs the main tp4ep1 sweep (crsuse2-m2m-231): the container's
+`ROCM_QUICK_REDUCE_QUANTIZATION=INT8` unset for the server (verified absent in the server process
+environ), everything else identical (`sweep_proxy.sh`, same flags/client). Results
+`/shared_nfs/kk/results/proxy_24l/fixed_seq_len_qr_unset/tp4ep1/`; comparison script
+`/data/proxy_moe/f2/iso_compare.py` (GB300 values parsed from `../fixed_seq_len_gb300/RESULTS.md`; the
+INT8 column reproduces the geomeans above exactly). One run per point.
+
+| ISL/OSL | CONC | TTT/GPU INT8 → bf16 AR | TTFT med | ITL med | P90 int. |
+|---|---|---|---|---|---|
+| 1024/1024 | 2 | 219.8 → 219.3 (-0.2%) | +1.5% | +0.2% | -0.2% |
+| 1024/1024 | 4 | 330.1 → 324.9 (-1.6%) | +5.6% | +1.5% | -1.5% |
+| 1024/1024 | 8 | 453.3 → 448.6 (-1.0%) | +9.1% | +0.8% | -0.8% |
+| 1024/1024 | 16 | 590.1 → 589.5 (-0.1%) | +10.1% | -0.2% | +0.2% |
+| 1024/1024 | 32 | 793.4 → 794.5 (+0.1%) | +11.6% | -0.6% | +0.6% |
+| 1024/1024 | 64 | 1,160.2 → 1,156.7 (-0.3%) | +11.5% | -0.3% | +0.3% |
+| 1024/1024 | 128 | 1,936.2 → 1,919.5 (-0.9%) | +12.6% | -0.2% | +0.1% |
+| 1024/1024 | 256 | 3,257.0 → 3,216.9 (-1.2%) | +10.2% | +0.0% | +0.2% |
+| 1024/1024 | 512 | 4,969.4 → 4,669.1 (-6.0%) | +13.7% | +0.7% | -15.5% |
+| 1024/1024 | 1024 | 5,372.6 → 5,207.3 (-3.1%) | +14.8% | +2.7% | +0.4% |
+| 8192/1024 | 2 | 923.2 → 899.2 (-2.6%) | +12.7% | +1.9% | -2.0% |
+| 8192/1024 | 4 | 1,341.5 → 1,304.3 (-2.8%) | +13.5% | +1.7% | -1.7% |
+| 8192/1024 | 8 | 1,779.4 → 1,738.5 (-2.3%) | +24.1% | +0.7% | -0.7% |
+| 8192/1024 | 16 | 2,241.0 → 2,193.7 (-2.1%) | +12.7% | -0.0% | +0.1% |
+| 8192/1024 | 32 | 2,865.7 → 2,800.9 (-2.3%) | +12.3% | -0.6% | +0.6% |
+| 8192/1024 | 64 | 3,841.2 → 3,715.8 (-3.3%) | +12.4% | -0.5% | +0.5% |
+| 8192/1024 | 128 | 5,440.1 → 5,189.1 (-4.6%) | +13.2% | -1.0% | +1.1% |
+| 8192/1024 | 256 | 7,311.3 → 6,869.6 (-6.0%) | +12.6% | -1.1% | +1.4% |
+| 8192/1024 | 512 | 8,747.8 → 8,067.5 (-7.8%) | +12.8% | -0.5% | -1.2% |
+| 8192/1024 | 1024 | 9,306.8 → 8,450.0 (-9.2%) | +33.7% | -2.0% | +11.4% |
+| 70000/300 | 2 | 8,345.5 → 7,685.0 (-7.9%) | +12.0% | +1.8% | -1.8% |
+| 70000/300 | 4 | 8,908.7 → 8,129.2 (-8.7%) | +12.1% | +1.6% | -1.5% |
+| 70000/300 | 8 | 9,325.1 → 8,468.9 (-9.2%) | +12.1% | +0.1% | -0.6% |
+| 70000/300 | 16 | 9,611.7 → 8,697.1 (-9.5%) | +12.2% | +0.0% | +0.1% |
+| 70000/300 | 32 | 9,919.2 → 8,938.9 (-9.9%) | +12.3% | -0.2% | +0.2% |
+
+| Shape / subset | n | geomean bf16/INT8 TTT | GB300 ratio TTT (INT8) | GB300 ratio TTT (bf16 AR, iso) | TTFT ratio vs GB300 INT8 → bf16 |
+|---|---|---|---|---|---|
+| 1024/1024 | 10 | 0.986 | 0.923 | 0.910 | 1.091 → 1.200 |
+| 8192/1024 | 10 | 0.957 | 0.885 | 0.846 | 1.172 → 1.357 |
+| 70000/300 | 5 | 0.909 | 0.843 | 0.766 | 1.209 → 1.356 |
+| all | 25 | 0.958 | 0.891 | 0.854 | 1.146 → 1.292 |
+| all, CONC <= 512 | 23 | 0.960 | 0.874 | 0.840 | 1.151 → 1.288 |
+
+- bf16 prefill AR costs TTFT +12% almost everywhere and TTT/GPU -1.4% (1k/1k) / -4.3% (8k/1k) / -9.1%
+  (70k) geomean; decode (ITL) unchanged except noisy CONC-512/1024 points.
+- Iso-AR MI355X / GB300 TTT/GPU geomean: 0.891 → 0.854 (all 25 points), 0.874 → 0.840 (CONC <= 512),
+  70k 0.843 → 0.766. Routed-expert precision still differs (MI355X W4A4 vs GB300 W4A8), so this is
+  iso-AR, not fully iso-precision.
+
 ## Regenerating
 
 `python3 report.py /shared_nfs/kk/results/proxy_24l/fixed_seq_len [--md]`

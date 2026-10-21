@@ -35,8 +35,9 @@ numbering.
    (c512), +13.2% (c1024, noisy; decode step -13% every run). USER DECISION: install rows in AITER.
 3. **G — server flags, cheap A/B**: chunk per ISL (70k chunk 32768 = TTT +1..9% but TTFT worse at
    CONC 2-4 → repeat CONC 2/4 with more requests before deciding), other scheduler knobs.
-4. **Iso-comparison data vs GB300**: tp4ep1 sweep with `ROCM_QUICK_REDUCE_QUANTIZATION` unset (bf16
-   prefill AR) to size the INT8 effect; optionally MI355X W4A8 routed experts.
+4. **Iso-comparison data vs GB300** — tp4ep1 with QR unset DONE (`fixed_seq_len/RESULTS.md`, section
+   "QR unset"): bf16 prefill AR = TTFT +12%, TTT/GPU geomean -4.2%; MI355X/GB300 TTT 0.891 → 0.854
+   (iso-AR), 70k 0.843 → 0.766. Optional next: MI355X W4A8 routed experts for full iso-precision.
 5. **I — upstream AITER PRs** (b_nt fix first; then load_hip_runtime, NCK32, quant 16384, tuner
    chunked dequant; strip the default-off D2 env switches). Ask the user before opening PRs.
 6. Parked (small): D quantize-once kernel (~1% TPOT), B moe1 W1 read layout (<2%).
@@ -948,6 +949,7 @@ w3, bnt0.
 | 2026-10-21 | crsuse2-m2m-231 | c231_F_M1b_70k_c8_1021 | same, warm-up + profile from bench start | TTT/GPU 3640.2 | 8692 | ITL 10.76 | EXTEND comm 22.2%, MoE 48.8%, attn 6.1% |
 | 2026-10-21 | crsuse2-m2m-231 | c231_qr_quant_op_1021 | op-level QR AR FP/INT8/INT6/INT4, [8192,16384] | — | — | — | 1301/1034/918/857 us; rel_l2 1.7e-3/7.7e-3/3.0e-2/1.2e-1 |
 | 2026-10-21 | crsuse2-m2m-231 | c231_F2_M2_1021 | op-level RS bf16 + AG fp4 vs AR, [8192,16384] | — | — | — | RS 653 + AG 158 = 811 us vs QR INT8 AR 1034 us |
+| 2026-10-22 | crsuse2-m2m-231 | fixed_seq_len_qr_unset/tp4ep1 | tp4ep1 sweep, ROCM_QUICK_REDUCE_QUANTIZATION unset (25 points) | — | — | — | TTT/GPU geomean x0.958 vs INT8; vs GB300 0.854 |
 | 2026-10-21 | crsuse2-m2m-231 | c231_F2_P1_ab_1021/off | 70000/300 c8, tp8ep1 sweep flags | TTT/GPU 3574.6 | 8742 | ITL 10.75 | baseline |
 | 2026-10-21 | crsuse2-m2m-231 | c231_F2_P1_ab_1021/on | same + SGLANG_OPT_LAGUNA_PREFILL_SP=1 | TTT/GPU 3765.2 | 8210 | ITL 10.75 | +5.3% / -6.1% |
 | 2026-10-21 | crsuse2-m2m-231 | c231_F2_P1_ab_1021/off | 8192/1024 c64, tp8ep1 | TTT/GPU 1624.8 | 7828 | ITL 29.40 | baseline |

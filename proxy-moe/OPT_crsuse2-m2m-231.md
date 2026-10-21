@@ -558,6 +558,21 @@ SGLang worktree `/data/proxy_moe/wt/sglang` (`feat/proxy-model-1020`, uncommitte
   point (base alone spans 2,257-2,361), so the end-to-end gain is real but small and noisy. Next:
   proper tuner run for EP1/TP8 M=256/512/1024 (`/data/proxy_moe/f2/item2/run_tune.sh`) instead of
   the borrowed M2048 row, then validate + serving repeats.
+- Tuner run (16:42-16:57 UTC, 8 GPUs, `f2/item2/ep1_tp8_dec_tuned.csv`): picked block_m 32 / t32 for
+  all three M; tuner-reported us (1067 / 1090 / 1147) disagree with the profiler measurement at M1024
+  (1,751 us) → trust the measurement (same failure as T11 at M2048). Lookup is
+  `get_padded_M` = nextPow2(M), so the token=1024 row serves M 513..1024.
+  Op-level (1 GPU, random routing, us per layer), base CSV vs `best.csv` = base + tuned M256 + tuned
+  M512 + M2048-copy for M1024; rel_l2 vs default 3.6-3.7% (systematic requant path, as before):
+
+| M | 256 | 384 | 512 | 640 | 768 | 1024 |
+|---|---|---|---|---|---|---|
+| base | 1,173.7 | 1,203.6 | 1,222.6 | 1,274.1 | 1,323.2 | 1,784.7 |
+| best | 1,114.8 (-5.0%) | 1,165.8 (-3.1%) | 1,177.0 (-3.7%) | 1,357.9 (+6.6%) | 1,366.2 (+3.2%) | 1,411.7 (-20.9%) |
+
+  Known limit: M 513..~850 gets slower with the t64 row (one bucket for 513..1024). Serving A/B
+  (1024/1024, CONC 256/512/1024, base vs best interleaved, 2 repeats) running:
+  `/data/proxy_moe/f2/item2_ab2.sh` → `c231_item2_rows_ab_r{1,2}_1021/{base,best}`.
 
 **Item 2 plan (CONC=1024 decode ITL jump), measurement only, runs after F's M0/M1:** one run
 1024/1024 CONC 1024 (TP8 EP1) with the server's decode-batch log lines kept; compare (a) server

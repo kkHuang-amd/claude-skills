@@ -24,6 +24,8 @@ numbering.
    without overlap (not started, ask the user first): cheaper AR (QR INT4/INT6, needs a logits check),
    AR+norm fusion at prefill sizes. P1 code not started. QR level measured (op level, section
    "F follow-up"): INT6 -11% / INT4 -17% AR time at 4x / 16x error → ~2.5% / ~3.8% prefill; not adopted.
+   **F2 (RS bf16 + fp4 AG instead of AR) M2 = GO**: 811 vs 1034 us per AR at M8192, exact; projected ~9%
+   prefill incl. M/8 norm/quant/router (section "F2 M2 results"). Next: ask the user for P1 code.
 2. **CONC=1024 decode ITL jump** [MI355X median ITL 67-74 ms at 1024 vs 40-46 ms at 512; GB300 shows
    the same symptom]. Measure first: server-side decode step time vs client ITL (prefill-chunk
    interleaving suspected), one variable at a time.
@@ -415,6 +417,37 @@ fp4 per 1x32 group per TOKEN anyway. AR = RS + AG; the AG half can move the alre
   (`reduce_scatter_cross_device_store`) ; (b) AG of [8192, 8704 B] via RCCL / custom / SDMA peer copy;
   (c) AG on a side stream concurrent with MoE (M0-style). Go if projected >= 5% prefill.
 
+### F2 M2 results (2026-10-21, crsuse2-m2m-231, op level, 8 GPUs) — GO (projected ~9% prefill)
+`/data/proxy_moe/tools/rs_ag_bench.py`; artifacts `/shared_nfs/kk/results/proxy_24l/c231_F2_M2_1021/`
+(`rs_ag_cap512_overlap.log`; aiter custom RS/AR need `AITER_CUSTOM_AR_MAX_SIZE=536870912`, default
+cap 64 MiB). Event wall per call, rank 0. AG payload = [M, 8704 B] (fp4 + e8m0 scales).
+
+| Op | M4096 us | M8192 us | note |
+|---|---|---|---|
+| AR QR INT8 (today, from M0) | 566 | 1034 | lossy, rel_l2 7.7e-3 |
+| AR QR FP | 664 | 1301 | |
+| AR aiter custom 2stage bf16 | 599 | 1197 | slower than QR INT8 → AR+norm fusion lever is weak |
+| RS RCCL bf16 | 345 | **653** | exact sum |
+| RS aiter custom bf16 | 440 | 861 | incl. copy-in memcpy |
+| AG RCCL fp4 bytes | 112 | 194 | |
+| AG aiter custom fp4 bytes | 85 | **158** | incl. copy-in memcpy; peer-copy check bit-exact |
+| AG peer `copy_` x8 (IPC, DtoD memcpy) | 1452 | 1976 | slow; dropped |
+
+- RS + AG(fp4) = 653 + 158 = **811 us vs 1034 us INT8 AR (-21.6%)** at M8192 while being exact (bf16
+  RS); -0.45 ms/layer ≈ **4.5% of prefill GPU time** (layer ≈ 9.5 ms from M1b: 1.05 ms/AR x2 = 22.2%).
+- Plus norm / residual add / attention-input quant / router on M/8 tokens: those are ~6% of prefill
+  today (rmsnorm 3.9, add 1.2, quant ~1, router 0.3) → ~-5%. Total projection ~9% prefill GPU time
+  (hypothesis until P1 measures it). Cost not yet measured: routed MoE must take pre-quantized fp4
+  (today moe1 fuses the quant: `..._fp4q_sort_..`), i.e. the split quant + `mxfp4_moe_sort` path at
+  prefill M; and AG of topk (tiny).
+- AG on a side stream concurrent with the MoE hides 74% (aiter) / 41% (RCCL) at M8192 — unlike QR
+  AR (M0, worse than serial). Not needed for the base design (AG is on the critical path); keeps a
+  later chunk-pipelined variant open.
+- P1 scope (code, ask the user first): Laguna prefill path behind an env gate: RS after o_proj and
+  after MoE; sharded residual + add/norm/quant (+ router + topk AG) on M/8; AG fp4+scales; qkv_proj /
+  shared expert / routed MoE consume pre-quantized input; decode and M % 8 != 0 keep AR. Correctness:
+  greedy tokens and logits vs exact-AR (QR FP) reference.
+
 **Item 2 plan (CONC=1024 decode ITL jump), measurement only, runs after F's M0/M1:** one run
 1024/1024 CONC 1024 (TP8 EP1) with the server's decode-batch log lines kept; compare (a) server
 decode step time at running-req ~1024 (log `gen throughput` / per-step timing) vs client median ITL,
@@ -701,3 +734,4 @@ w3, bnt0.
 | 2026-10-21 | crsuse2-m2m-231 | c231_F_M1_70k_c8_1021 | TP8 EP1 sweep flags, 70000/300 CONC 8, profile mid-run | TTT/GPU 3566.9 | 8749 | ITL 10.75 | only DECODE trace captured |
 | 2026-10-21 | crsuse2-m2m-231 | c231_F_M1b_70k_c8_1021 | same, warm-up + profile from bench start | TTT/GPU 3640.2 | 8692 | ITL 10.76 | EXTEND comm 22.2%, MoE 48.8%, attn 6.1% |
 | 2026-10-21 | crsuse2-m2m-231 | c231_qr_quant_op_1021 | op-level QR AR FP/INT8/INT6/INT4, [8192,16384] | — | — | — | 1301/1034/918/857 us; rel_l2 1.7e-3/7.7e-3/3.0e-2/1.2e-1 |
+| 2026-10-21 | crsuse2-m2m-231 | c231_F2_M2_1021 | op-level RS bf16 + AG fp4 vs AR, [8192,16384] | — | — | — | RS 653 + AG 158 = 811 us vs QR INT8 AR 1034 us |

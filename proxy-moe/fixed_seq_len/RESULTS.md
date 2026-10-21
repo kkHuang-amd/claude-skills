@@ -139,6 +139,26 @@ One run per point; CONC 2 medians come from 8 requests.
 - The main tables above keep chunk 8192 for every ISL; InferenceX derives chunk from ISL, so align
   the chunk setting before comparing with other platforms.
 
+## Comparing with other platforms (e.g. GB300, `../fixed_seq_len_gb300/`)
+
+Settings that differ between this sweep and `fixed_seq_len_gb300` (pod4-gb300-2-tray01-f3), to read
+the GB300 vs MI355X tp4ep1 comparison correctly:
+
+| Item | MI355X (this dir) | GB300 (`../fixed_seq_len_gb300/`) | Effect on the comparison |
+|---|---|---|---|
+| Routed-expert precision | MXFP4 W4A4 (MXFP4 activations) | MXFP4 weights x MXFP8 activations (W4A8; no W4A4 MoE kernel on that stack) | not the same precision or activation bytes; not an iso-precision comparison |
+| Prefill all-reduce | `ROCM_QUICK_REDUCE_QUANTIZATION=INT8` (container env): lossy INT8 quick-reduce for prefill AR | no equivalent (bf16 AR) | MI355X prefill AR moves less data at some accuracy cost |
+| AR fusion | `--enable-aiter-allreduce-fusion` | `--enable-flashinfer-allreduce-fusion` | platform equivalents |
+| Router GEMM | `SGLANG_OPT_LAGUNA_ROUTER_BF16X3=1` (prefill, fp32-accurate) | fp32 | numerically equivalent |
+| Chunk / context / mem / KV / CONC binding / client | chunk 8192, ctx 73728, mem 0.88, fp8 KV, max-running = cuda-graph-max-bs-decode = CONC, same client | same | aligned |
+
+- For an iso-precision number, either run MI355X with W4A8 routed experts or GB300 with W4A4 when a
+  kernel exists; and run MI355X with `ROCM_QUICK_REDUCE_QUANTIZATION` unset (bf16 prefill AR).
+- Chunk 32768 raises MI355X tp4ep1 70000/300 TTT/GPU by 5.9-8.7% (section above). If both platforms
+  switch to 32768 the 70k gap may change; GB300 would need the same run to say.
+- Both sweeps use 12 layers for tp4ep1 (proxy spec); TP8 / 24-layer numbers here have no GB300
+  single-tray counterpart (`../fixed_seq_len_gb300_2node/` tracks the two-tray run).
+
 ## Regenerating
 
 `python3 report.py /shared_nfs/kk/results/proxy_24l/fixed_seq_len [--md]`

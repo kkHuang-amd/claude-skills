@@ -15,13 +15,12 @@ TPOT 24.4) → DROP DP-attn. See "T3 results".
 (−6.0%); TP0 prefill GPU −9.6% / −7.7%; decode unchanged. Keep on (env
 `SGLANG_OPT_LAGUNA_ROUTER_BF16X3=1`, SGLang tree edit uncommitted: `environ.py`, `models/laguna.py`).
 Current best: EP1 + AR fusion + tuned + T4 = 902 tok/s / TTFT 343 / TPOT 16.47.
-**Status (2026-10-20 ~14:40 UTC):** best = EP1 + AR fusion + tuned + T4 + stage2 b_nt fix:
-933.7 tok/s / TTFT 344.5 / TPOT 15.83 (new base). Items A, B, D closed (see sections):
-A = profiler artifact; D = implemented + pushed (89fed3572), correct but no serving gain;
-B = moe1 plateaus at ~6.6 TB/s for every decomposition, ATT shows VMEM-load (queue full) 67% →
-memory-side; remaining <2% TPOT needs a different W1 read layout → stopped.
-**Next candidates:** F (prefill AR/compute overlap, TTFT up to ~-15%, large), G (server flags,
-cheap A/B), I (upstream PRs; b_nt fix first). Skills repo commit blocked on 2 unrelated conflicts.
+**Status (2026-10-21):** TP8 best = EP1 + AR fusion + tuned + T4 + stage2 b_nt fix: 933.7 / 344.5 /
+15.83 (new base). T11 (TP4) done: TP8 levers carry over; TP4-tuned prefill rows pushed; TP4 best
+EP1 1090.3 / 256.0 / 13.73, EP4 1002.6 / 234.0 / 15.10 (see "T11"). Items A, B, D closed.
+**Next candidates:** F (prefill AR/compute overlap, TTFT up to ~-15%, large), G (server flags, cheap
+A/B), I (upstream PRs; b_nt fix first). Doc edits: in worktree `/data/proxy_moe/wt/skills` (the main
+checkout has 2 unrelated unmerged files), commit + push from there.
 **Pushed 2026-10-20 (on top of the remote branch tips = newer upstream main; NOT yet re-tested on
 those bases):** AITER `kkHuang-amd/aiter` `feat/proxy-model-1020` cfc37f9a1..39c03665a (5 commits:
 quant >8192 split path, tuning fixes, mega_moe_tp NCK32, stage2 b_nt + D2 env switches, proxy
@@ -108,7 +107,16 @@ whole MoE us, default → tuned): EP1-TP4 M=2048 3258→3510 (+7.7%, worse), 409
 Tuner-reported us disagree with the measurement at M=2048 → trust the measurement.
 Installed only faster rows (`tune_tp4/install_tp4.csv` appended to worktree
 `model_configs/proxymoe_fp4_tuned_fmoe.csv`): EP1-TP4 M=8192 (inter 1024, expert 512); EP4 M=4096,
-8192 (inter 4096, expert 128, topk rewritten 4→16). Serving A/B running (rows g, h).
+8192 (inter 4096, expert 128, topk rewritten 4→16). Pushed AITER fd537aaa4 (rows) + 44a1da311 (tuner fix).
+
+| Row | Config (TP4, new base, + TP4-tuned rows) | Out tok/s | TTFT med | TPOT med | TP0 prefill ms/step |
+|-----|------------------------------------------|-----------|----------|----------|---------------------|
+| (g) | EP1 + AR fusion + T4 + tuned (vs f) | 1090.3 (+13.0% vs a) | 256.0 (-1.9% vs f) | 13.73 | 71.64 → 68.98 |
+| (h) | EP4 + AR fusion + T4 + tuned (vs d) | 1002.6 (+3.9% vs a) | 234.0 (-2.4% vs d) | 15.10 | 62.79 → 60.84 |
+
+T11 conclusion: every TP8 lever carries over to TP4 with the same sign. Best TP4 throughput/TPOT =
+(g) EP1: 1090.3 / 256.0 / 13.73 (+13.0% / +3.6% / -12.4% vs pristine EP4 defaults); best TP4 TTFT =
+(h) EP4: 1002.6 / 234.0 / 15.10 (+3.9% / -5.3% / -3.7%), all three better than pristine.
 Inputs: `/data/proxy_moe/tune_tp4/run_tune.sh` → `ep1_tp4_tuned.csv`, `ep4eq_tuned.csv`
 (M 2048/4096/8192; EP4 equivalent = topk 4 over 128 experts, TUNE_MOE_STAGE2_ATOMIC_ONLY=1).
 
@@ -436,4 +444,6 @@ w3, bnt0.
 | 2026-10-20 | crsuse2-m2m-231 | c231_ep1_t4_bnt2fix_1020 | EP1 + AR fusion + tuned + T4 + stage2 b_nt fix | 931.2 | 342.4 | 15.89 | decode MoE 10.97 ms/step (was 11.38) |
 | 2026-10-20 | crsuse2-m2m-231 | c231_ep8_t4_bnt2fix_1020 | EP8 + AR fusion + tuned + T4 + stage2 b_nt fix | 833.8 | 296.8 | 18.06 | moe2 3.58 ms/step (was 3.84) |
 | 2026-10-20 | crsuse2-m2m-231 | c231_newbase_ep1_cold_1020 | NEW BASE: EP1 + AR fusion + tuned + T4 + b_nt fix (cold) | 933.5 | 347.7 | 15.84 | first run, JIT |
+| 2026-10-21 | crsuse2-m2m-231 | c231_tp4_g_new_ep1_arf_t4_tuned_1021 | TP4 EP1 + AR fusion + T4 + TP4-tuned rows | 1090.3 | 256.0 | 13.73 | new base |
+| 2026-10-21 | crsuse2-m2m-231 | c231_tp4_h_new_ep4_arf_t4_tuned_1021 | TP4 EP4 + AR fusion + T4 + TP4-tuned rows | 1002.6 | 234.0 | 15.10 | new base |
 | 2026-10-20 | crsuse2-m2m-231 | c231_newbase_ep1_warm_1020 | NEW BASE: EP1 + AR fusion + tuned + T4 + b_nt fix | 933.7 | 344.5 | 15.83 | aiter cfae83274, sglang effe332427, flydsl 0.4.0 |

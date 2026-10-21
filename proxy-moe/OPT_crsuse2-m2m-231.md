@@ -395,9 +395,12 @@ per rank, seeded), 8 GPUs, [M,16384] bf16 (QR casts to fp16), one variable =
   AR 2stage vs QR at M8192 not measured). Upper bound ~5% minus that loss; not started.
 
 ### F2 idea (2026-10-21): replace prefill AR by reduce-scatter + FP4 all-gather (sequence-parallel residual)
-Facts: every linear except router/lm_head/embed is MXFP4 W4A4 (quark `exclude` = gate, lm_head,
-embed) → the consumers of both ARs (next qkv_proj; shared expert + routed MoE) quantize their input to
-fp4 per 1x32 group per TOKEN anyway. AR = RS + AG; the AG half can move the already-quantized fp4.
+[CORRECTION 2026-10-21] quark `exclude` = `re:.*self_attn.*`, `mlp.gate$`, lm_head, embed_tokens:
+ATTENTION LINEARS ARE BF16 (qkv_proj is UnquantizedLinearMethod; the first P1 run crashed on it).
+Only the FFN-side AR feeds fp4 consumers (shared expert + routed MoE). The text below originally
+assumed both ARs did; the P1 section has the corrected (FFN-only) design and estimate.
+Original text: every linear except router/lm_head/embed is MXFP4 W4A4 → the consumers of both ARs
+(next qkv_proj; shared expert + routed MoE) quantize their input to fp4 per 1x32 group per TOKEN. AR = RS + AG; the AG half can move the already-quantized fp4.
 - Per layer (prefill only; decode keeps AR): o_proj partial → RS [M,H] → add + RMSNorm + MXFP4 quant
   on M/8 tokens → router on M/8 tokens (router weight replicated) + AG of topk ids/weights (tiny) →
   AG fp4 + e8m0 scales (0.53 B/elt vs 2 B bf16 / ~1 B QR INT8) → shared + routed MoE on M tokens with
@@ -447,6 +450,34 @@ cap 64 MiB). Event wall per call, rank 0. AG payload = [M, 8704 B] (fp4 + e8m0 s
   after MoE; sharded residual + add/norm/quant (+ router + topk AG) on M/8; AG fp4+scales; qkv_proj /
   shared expert / routed MoE consume pre-quantized input; decode and M % 8 != 0 keep AR. Correctness:
   greedy tokens and logits vs exact-AR (QR FP) reference.
+
+### F2 P1 — implementation + correctness (2026-10-21, crsuse2-m2m-231; code local, NOT pushed)
+SGLang worktree `/data/proxy_moe/wt/sglang` (`feat/proxy-model-1020`, uncommitted): `environ.py`
+(`SGLANG_OPT_LAGUNA_PREFILL_SP`, default off; `..._SP_MIN_TOKENS` 4096), `moe/moe_runner/aiter.py`
+(standard dispatch: fp4x2 `hidden_states` + `hidden_states_scale` → `a1_scale`, bf16 output),
+`models/laguna.py` (`_sp_gather_mxfp4`, `LagunaMoE.forward_sp`, `LagunaModel._sp_eligible/_sp_forward`).
+- Design (FFN-only, attention is bf16): per layer o_proj partial → RS bf16 (exact) → post-attn
+  add+norm on the M/8 shard → router + top-k on the shard → AG top-k (int32 pack) → hip MXFP4 quant of
+  the shard → AG fp4 + e8m0 → shared expert `(q, s)` + routed MoE prequant → partial; the attention
+  shard is added into the partial's own rows → ONE AR (QR INT8) = attn + ffn for all tokens →
+  next input_layernorm(summed, residual) on full tokens (residual stays replicated, as today).
+  Eligible: extend, tokens >= 4096 and % tp == 0, EP1, no PP/DP-attn/aux capture; else old path.
+- Comm per layer: RS 653 + AG 158 + AR 1034 = 1845 us vs 2 x 1034 = 2068 (-223 us ≈ -2.3% prefill)
+  + post-attn norm / router / shared-expert quant on M/8 (~3%) → projected ~5% prefill (was ~9%
+  under the wrong all-fp4 assumption).
+- aiter `fused_moe` with hip-prequantized fp4 input + `a1_scale` (needs `dtype=bf16`) is BIT-EXACT vs
+  bf16 input at M8192 and 62 us faster (`/data/proxy_moe/f2/moe_prequant_check.py`).
+- Correctness (`/data/proxy_moe/f2/p1_check.sh`, `p1_compare.py`, results
+  `/shared_nfs/kk/results/proxy_24l/c231_F2_P1_check_1021/`): end-to-end logprob / greedy comparisons
+  are useless on the dummy ckpt (QR FP vs INT8, both correct: mean |Δ input logprob| 0.30, greedy
+  0/32 match); fallback path (4100 tokens) identical to today (Δ 0). Per-layer self-check
+  (temporary `SGLANG_LAGUNA_SP_CHECK=1`, reference = same inputs on the old path with exact RS+AG):
+  SP vs same-math-no-SP rel_l2 8.5-8.7e-3 every layer (= INT8 AR error) → plumbing correct.
+  SP vs today 0.10-0.13: entirely the shared expert's activation quantizer (today triton
+  `dynamic_mxfp4_quant`, SP hip `per_1x32` so routed stays bit-exact); hip vs triton quant are not
+  bit-equal (each ~11.5% rel error vs bf16 x). NOT equivalent to today for the shared expert →
+  options: triton quant + 2nd AG (+158 us, eats most of the gain) or one quantizer for both. Open.
+- TODO before any push: remove `_SP_CHECK` / `_sp_reference` debug code and the one-time info log.
 
 **Item 2 plan (CONC=1024 decode ITL jump), measurement only, runs after F's M0/M1:** one run
 1024/1024 CONC 1024 (TP8 EP1) with the server's decode-batch log lines kept; compare (a) server

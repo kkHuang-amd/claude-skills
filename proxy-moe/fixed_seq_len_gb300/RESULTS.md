@@ -114,3 +114,7 @@ activations), see Configuration. Same shapes, client and server flags otherwise.
   prefill-chunk interleaving). Fixing it is the first GB300 optimization target.
 - TP8 / 24 layers on GB300 needs two trays; tracked separately in `../fixed_seq_len_gb300_2node/`
   (owner pod4-gb300-2-tray05-f3).
+
+![TTT/GPU vs P90 interactivity](ttt_vs_p90.png)
+
+`python3 plot_ttt_vs_p90.py` regenerates it from the two RESULTS.md files.

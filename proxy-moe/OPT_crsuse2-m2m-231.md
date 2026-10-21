@@ -477,6 +477,18 @@ SGLang worktree `/data/proxy_moe/wt/sglang` (`feat/proxy-model-1020`, uncommitte
   `dynamic_mxfp4_quant`, SP hip `per_1x32` so routed stays bit-exact); hip vs triton quant are not
   bit-equal (each ~11.5% rel error vs bf16 x). NOT equivalent to today for the shared expert →
   options: triton quant + 2nd AG (+158 us, eats most of the gain) or one quantizer for both. Open.
+- Serving A/B (2026-10-21 13:47-14:10, crsuse2-m2m-231, one variable `SGLANG_OPT_LAGUNA_PREFILL_SP=1`,
+  sweep launch flags + client via `sweep_proxy.sh`, tp8ep1, one run per point; driver
+  `/data/proxy_moe/f2/p1_ab.sh`, results `/shared_nfs/kk/results/proxy_24l/c231_F2_P1_ab_1021/{off,on}/`).
+  SP path verified active: "Laguna prefill SP active (first batch: 8192 tokens)" on all 8 ranks.
+
+| Point | TTT/GPU off → on | TTFT med (ms) | ITL med (ms) | P90 interactivity |
+|---|---|---|---|---|
+| 70000/300 c8 | 3,574.6 → 3,765.2 (+5.3%) | 8,742 → 8,210 (-6.1%) | 10.75 → 10.75 | 92.6 → 92.5 |
+| 8192/1024 c64 | 1,624.8 → 1,658.9 (+2.1%) | 7,828 → 7,347 (-6.1%) | 29.40 → 29.43 | 33.8 → 33.8 |
+
+  Off reproduces the sweep point (70k c8 3,573.8). Gain matches the ~5% prefill projection;
+  decode unchanged (SP is prefill-only). Shared expert here uses the hip quantizer (see above).
 - TODO before any push: remove `_SP_CHECK` / `_sp_reference` debug code and the one-time info log.
 
 **Item 2 plan (CONC=1024 decode ITL jump), measurement only, runs after F's M0/M1:** one run
@@ -766,3 +778,7 @@ w3, bnt0.
 | 2026-10-21 | crsuse2-m2m-231 | c231_F_M1b_70k_c8_1021 | same, warm-up + profile from bench start | TTT/GPU 3640.2 | 8692 | ITL 10.76 | EXTEND comm 22.2%, MoE 48.8%, attn 6.1% |
 | 2026-10-21 | crsuse2-m2m-231 | c231_qr_quant_op_1021 | op-level QR AR FP/INT8/INT6/INT4, [8192,16384] | — | — | — | 1301/1034/918/857 us; rel_l2 1.7e-3/7.7e-3/3.0e-2/1.2e-1 |
 | 2026-10-21 | crsuse2-m2m-231 | c231_F2_M2_1021 | op-level RS bf16 + AG fp4 vs AR, [8192,16384] | — | — | — | RS 653 + AG 158 = 811 us vs QR INT8 AR 1034 us |
+| 2026-10-21 | crsuse2-m2m-231 | c231_F2_P1_ab_1021/off | 70000/300 c8, tp8ep1 sweep flags | TTT/GPU 3574.6 | 8742 | ITL 10.75 | baseline |
+| 2026-10-21 | crsuse2-m2m-231 | c231_F2_P1_ab_1021/on | same + SGLANG_OPT_LAGUNA_PREFILL_SP=1 | TTT/GPU 3765.2 | 8210 | ITL 10.75 | +5.3% / -6.1% |
+| 2026-10-21 | crsuse2-m2m-231 | c231_F2_P1_ab_1021/off | 8192/1024 c64, tp8ep1 | TTT/GPU 1624.8 | 7828 | ITL 29.40 | baseline |
+| 2026-10-21 | crsuse2-m2m-231 | c231_F2_P1_ab_1021/on | same + SP | TTT/GPU 1658.9 | 7347 | ITL 29.43 | +2.1% / -6.1% |

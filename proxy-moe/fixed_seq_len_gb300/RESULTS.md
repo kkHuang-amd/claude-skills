@@ -70,3 +70,47 @@ TTT = total (input + output) tok/s; Interactivity = 1000 / median ITL; P90 inter
   likely prefill chunks (8192 tokens) interleaving with decode under continuous arrivals. Open item.
 - Low-CONC ITL (3.9 ms at CONC=2) vs MI355X tp4ep1 smoke 4.49 ms (crsuse2-m2m-231, 2026-10-21).
 - Server launch is 2-6 min per point (JIT + CUDA graph capture up to CONC); not in the measurement.
+
+## GB300 vs MI355X, tp4ep1 (12 layers, 4 GPUs)
+
+MI355X numbers from `../fixed_seq_len/RESULTS.md` (crsuse2-m2m-231, 2026-10-21; AITER/SGLang
+`feat/proxy-model-1020` branches, MXFP4 W4A4 experts). GB300 routed experts run W4A8 (MXFP8
+activations), see Configuration. Same shapes, client and server flags otherwise.
+
+| ISL/OSL | CONC | TTT/GPU MI355X | TTT/GPU GB300 | GB300/MI355X | TTFT MI355X (ms) | TTFT GB300 (ms) | ITL MI355X (ms) | ITL GB300 (ms) | ITL ratio (MI/GB) |
+|---|---|---|---|---|---|---|---|---|---|
+| 1024/1024 | 2 | 220 | 251 | 1.14x | 83 | 81 | 4.44 | 3.86 | 1.15x |
+| 1024/1024 | 4 | 330 | 376 | 1.14x | 144 | 150 | 5.93 | 5.18 | 1.14x |
+| 1024/1024 | 8 | 453 | 510 | 1.13x | 217 | 207 | 8.62 | 7.65 | 1.13x |
+| 1024/1024 | 16 | 590 | 661 | 1.12x | 254 | 299 | 13.19 | 11.73 | 1.12x |
+| 1024/1024 | 32 | 793 | 877 | 1.11x | 426 | 368 | 19.46 | 17.61 | 1.10x |
+| 1024/1024 | 64 | 1,160 | 1,304 | 1.12x | 775 | 658 | 26.19 | 23.31 | 1.12x |
+| 1024/1024 | 128 | 1,936 | 2,187 | 1.13x | 1,453 | 1,239 | 30.29 | 26.84 | 1.13x |
+| 1024/1024 | 256 | 3,257 | 3,766 | 1.16x | 2,899 | 2,422 | 33.61 | 29.14 | 1.15x |
+| 1024/1024 | 512 | 4,969 | 5,055 | 1.02x | 5,611 | 4,726 | 40.19 | 39.70 | 1.01x |
+| 1024/1024 | 1024 | 5,373 | 4,427 | 0.82x | 10,807 | 9,102 | 66.83 | 95.32 | 0.70x |
+| 8192/1024 | 2 | 923 | 1,086 | 1.18x | 207 | 170 | 4.54 | 3.86 | 1.18x |
+| 8192/1024 | 4 | 1,341 | 1,561 | 1.16x | 395 | 323 | 6.03 | 5.18 | 1.16x |
+| 8192/1024 | 8 | 1,779 | 2,042 | 1.15x | 759 | 626 | 8.74 | 7.64 | 1.14x |
+| 8192/1024 | 16 | 2,241 | 2,551 | 1.14x | 1,465 | 1,233 | 13.30 | 11.75 | 1.13x |
+| 8192/1024 | 32 | 2,866 | 3,218 | 1.12x | 2,981 | 2,513 | 19.58 | 17.64 | 1.11x |
+| 8192/1024 | 64 | 3,841 | 4,380 | 1.14x | 5,745 | 4,862 | 26.36 | 23.39 | 1.13x |
+| 8192/1024 | 128 | 5,440 | 6,254 | 1.15x | 11,521 | 9,784 | 30.71 | 27.07 | 1.13x |
+| 8192/1024 | 256 | 7,311 | 8,517 | 1.16x | 22,931 | 19,433 | 34.24 | 29.63 | 1.16x |
+| 8192/1024 | 512 | 8,748 | 9,849 | 1.13x | 45,550 | 38,577 | 41.70 | 38.33 | 1.09x |
+| 8192/1024 | 1024 | 9,307 | 9,179 | 0.99x | 76,114 | 76,971 | 68.53 | 97.16 | 0.71x |
+| 70000/300 | 2 | 8,346 | 9,919 | 1.19x | 1,713 | 1,378 | 4.56 | 3.89 | 1.17x |
+| 70000/300 | 4 | 8,909 | 10,596 | 1.19x | 3,416 | 2,822 | 6.10 | 5.24 | 1.16x |
+| 70000/300 | 8 | 9,325 | 11,058 | 1.19x | 6,590 | 5,494 | 8.86 | 7.75 | 1.14x |
+| 70000/300 | 16 | 9,612 | 11,391 | 1.19x | 12,933 | 10,800 | 13.55 | 11.95 | 1.13x |
+| 70000/300 | 32 | 9,919 | 11,750 | 1.18x | 25,617 | 21,412 | 20.09 | 18.05 | 1.11x |
+
+- CONC 2-256 (all shapes) and 70000/300: GB300 is 1.11-1.19x on TTT/GPU and 1.10-1.18x on median
+  ITL, TTFT 15-20% lower. The gap is flat across CONC, i.e. both decode (ITL) and prefill (TTFT) scale
+  by about the same factor.
+- CONC 512: the gap narrows (1.02x for 1k/1k, 1.13x for 8k/1k).
+- CONC 1024: GB300 loses (1k/1k 0.82x, 8k/1k 0.99x); median ITL 95-97 ms vs MI355X 67-69 ms. This is
+  the open CONC=1024 item in Notes (server-side decode step ~45 ms; client ITL inflated, suspected
+  prefill-chunk interleaving). Fixing it is the first GB300 optimization target.
+- TP8 / 24 layers on GB300 needs two trays; tracked separately in `../fixed_seq_len_gb300_2node/`
+  (owner pod4-gb300-2-tray05-f3).

@@ -489,6 +489,14 @@ SGLang worktree `/data/proxy_moe/wt/sglang` (`feat/proxy-model-1020`, uncommitte
 
   Off reproduces the sweep point (70k c8 3,573.8). Gain matches the ~5% prefill projection;
   decode unchanged (SP is prefill-only). Shared expert here uses the hip quantizer (see above).
+- Exact-shared variant `SGLANG_OPT_LAGUNA_PREFILL_SP_EXACT_SHARED=1` (default off): the shard is
+  also quantized with the triton quantizer of the dense W4A4 linears and gathered a 2nd time for the
+  shared expert. Self-check: SP vs today rel_l2 8.5-8.7e-3 every layer = the INT8 AR error alone →
+  numerically equivalent to today (attention AR now exact; routed and shared bit-exact inputs).
+  Serving (same day/node/flags, vs the off rows above): 70000/300 c8 TTT/GPU 3,691.2 (+3.3%), TTFT
+  8,415 (-3.7%), ITL 10.74; 8192/1024 c64 1,644.9 (+1.2%), TTFT 7,539 (-3.7%), ITL 29.43. The 2nd AG
+  costs ~2 points. Decision for the user: hip quantizer for the shared expert (+5.3%, shared-expert
+  activations quantized by a different but equally valid MXFP4 rounding) vs exact (+3.3%).
 - TODO before any push: remove `_SP_CHECK` / `_sp_reference` debug code and the one-time info log.
 
 **Item 2 plan (CONC=1024 decode ITL jump), measurement only, runs after F's M0/M1:** one run
@@ -782,3 +790,5 @@ w3, bnt0.
 | 2026-10-21 | crsuse2-m2m-231 | c231_F2_P1_ab_1021/on | same + SGLANG_OPT_LAGUNA_PREFILL_SP=1 | TTT/GPU 3765.2 | 8210 | ITL 10.75 | +5.3% / -6.1% |
 | 2026-10-21 | crsuse2-m2m-231 | c231_F2_P1_ab_1021/off | 8192/1024 c64, tp8ep1 | TTT/GPU 1624.8 | 7828 | ITL 29.40 | baseline |
 | 2026-10-21 | crsuse2-m2m-231 | c231_F2_P1_ab_1021/on | same + SP | TTT/GPU 1658.9 | 7347 | ITL 29.43 | +2.1% / -6.1% |
+| 2026-10-21 | crsuse2-m2m-231 | c231_F2_P1_ab_1021/onx | 70000/300 c8 + SP + EXACT_SHARED | TTT/GPU 3691.2 | 8415 | ITL 10.74 | +3.3% / -3.7%, numerically = today |
+| 2026-10-21 | crsuse2-m2m-231 | c231_F2_P1_ab_1021/onx | 8192/1024 c64 + SP + EXACT_SHARED | TTT/GPU 1644.9 | 7539 | ITL 29.43 | +1.2% / -3.7% |

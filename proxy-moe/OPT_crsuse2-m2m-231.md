@@ -543,7 +543,21 @@ SGLang worktree `/data/proxy_moe/wt/sglang` (`feat/proxy-model-1020`, uncommitte
   (-12.9%, matches the op-level -9 ms). Time split: decode-only intervals 551 → 479 s, intervals with
   prefill 335 → 411 s (same 1,045 prefill batches) → the decode gain is cancelled by slower
   prefill-containing intervals; mechanism unknown. Run-to-run noise at this point is large: today's
-  base 2,361.4 vs the sweep's 2,193 for the same point (+7.7%). Repeats r2/r3 (interleaved) running.
+  base 2,361.4 vs the sweep's 2,193 for the same point (+7.7%). [The decode-only / with-prefill time
+  split is confounded (each log interval holds 40 decode steps), do not read it as "prefill slower".]
+- Repeats (interleaved base/with1024, `c231_item2_moe1024_ab_r{2,3}_1021`), all three pairs:
+
+| Pair | TTT/GPU base → with1024 | ITL med (ms) | P90 interactivity | decode-only ms/step |
+|---|---|---|---|---|
+| r1 | 2,361.4 → 2,323.8 | 71.88 → 72.75 | 10.3 → 9.2 | 70.12 → 61.06 |
+| r2 | 2,256.9 → 2,357.0 | 74.01 → 70.43 | 8.9 → 9.2 | 69.95 → 60.94 |
+| r3 | 2,337.5 → 2,535.4 | 72.06 → 65.89 | 9.8 → 11.6 | 70.44 → 61.01 |
+| mean | 2,318.6 → 2,405.4 (+3.7%) | 72.7 → 69.7 (-4.1%) | 9.7 → 10.0 | 70.17 → 61.00 (-13.1%) |
+
+  Decode step -13% in every run (robust); end-to-end +3.7% mean with ±4% run-to-run spread at this
+  point (base alone spans 2,257-2,361), so the end-to-end gain is real but small and noisy. Next:
+  proper tuner run for EP1/TP8 M=256/512/1024 (`/data/proxy_moe/f2/item2/run_tune.sh`) instead of
+  the borrowed M2048 row, then validate + serving repeats.
 
 **Item 2 plan (CONC=1024 decode ITL jump), measurement only, runs after F's M0/M1:** one run
 1024/1024 CONC 1024 (TP8 EP1) with the server's decode-batch log lines kept; compare (a) server

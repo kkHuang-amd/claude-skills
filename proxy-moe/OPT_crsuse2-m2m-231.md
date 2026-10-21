@@ -49,7 +49,7 @@ numbering.
 - Combined (SP exact + rows): 70k c8 +3.3%, 8k/1k c64 +1.5%, 1k/1k c512 +2.5%.
 - G: chunk 32768 TTFT penalty at low CONC is a scheduling effect (single unqueued prefill is equal);
   M16k/M32k rows add +4-5% TTT with chunk 32768.
-- USER DECISIONS: (a) SP shared-expert variant; (b) commit/push SGLang SP code (strip `_SP_CHECK`);
+- USER DECISIONS: (a) DONE 2026-10-22: keep both, switch `..._SP_SHARED_QUANT=triton|hip` (default triton); (b) commit/push SGLang SP code (strip `_SP_CHECK`);
   (c) install decode rows (`f2/item2/t256_512.csv` + `row1024.csv`) and/or M16k/32k rows into AITER CSV;
   (d) chunk-per-ISL default. Remaining Next: 4 iso data (FP AR tp4ep1 sweep), 5 upstream PRs.
 
@@ -505,7 +505,14 @@ SGLang worktree `/data/proxy_moe/wt/sglang` (`feat/proxy-model-1020`, uncommitte
 
   Off reproduces the sweep point (70k c8 3,573.8). Gain matches the ~5% prefill projection;
   decode unchanged (SP is prefill-only). Shared expert here uses the hip quantizer (see above).
-- Exact-shared variant `SGLANG_OPT_LAGUNA_PREFILL_SP_EXACT_SHARED=1` (default off): the shard is
+- [2026-10-22, user decision] Both variants kept behind one switch, for comparison once real-weight
+  accuracy runs exist: `SGLANG_OPT_LAGUNA_PREFILL_SP_SHARED_QUANT` = `triton` (DEFAULT, variant B:
+  shared-expert input bit-identical to today, +3.3% at 70k c8) | `hip` (variant A: single gather,
+  +5.3%, shared expert sees hip-rounded MXFP4). Replaces the earlier boolean
+  `SGLANG_OPT_LAGUNA_PREFILL_SP_EXACT_SHARED` (=1 ⇔ `triton`; the A/B runs labelled "on" = `hip`,
+  "onx" = `triton`). Driver scripts in `/data/proxy_moe/f2/` updated to set the value explicitly.
+  Not yet re-verified on a server after the rename (iso sweep occupies the node).
+- Exact-shared variant (then `SGLANG_OPT_LAGUNA_PREFILL_SP_EXACT_SHARED=1`): the shard is
   also quantized with the triton quantizer of the dense W4A4 linears and gathered a 2nd time for the
   shared expert. Self-check: SP vs today rel_l2 8.5-8.7e-3 every layer = the INT8 AR error alone →
   numerically equivalent to today (attention AR now exact; routed and shared bit-exact inputs).

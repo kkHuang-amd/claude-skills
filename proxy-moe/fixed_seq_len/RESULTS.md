@@ -154,10 +154,38 @@ the GB300 vs MI355X tp4ep1 comparison correctly:
 
 - For an iso-precision number, either run MI355X with W4A8 routed experts or GB300 with W4A4 when a
   kernel exists; and run MI355X with `ROCM_QUICK_REDUCE_QUANTIZATION` unset (bf16 prefill AR).
-- Chunk 32768 raises MI355X tp4ep1 70000/300 TTT/GPU by 5.9-8.7% (section above). If both platforms
-  switch to 32768 the 70k gap may change; GB300 would need the same run to say.
+- Measured: chunk 32768 raises MI355X tp4ep1 70000/300 TTT/GPU by 5.9-8.7% (section above). GB300
+  has not run chunk 32768, so iso comparisons at 70k use chunk 8192 on both sides.
 - Both sweeps use 12 layers for tp4ep1 (proxy spec); TP8 / 24-layer numbers here have no GB300
   single-tray counterpart (`../fixed_seq_len_gb300_2node/` tracks the two-tray run).
+
+### Geomean MI355X / GB300, tp4ep1 (12 layers, 4 GPUs)
+
+Every ratio is MI355X value / GB300 value, per point, then geometric mean over the points. TTT/GPU
+and P90 interactivity: higher is better, so < 1 = MI355X behind. ITL and TTFT: lower is better, so
+> 1 = MI355X slower. Full-precision values from `RESULTS.md` here and in `../fixed_seq_len_gb300/`
+(25 matched points, both chunk 8192 unless noted).
+
+| Shape / subset | points | TTT/GPU | P90 interactivity | Median ITL | Median TTFT |
+|---|---|---|---|---|---|
+| 1024/1024 | 10 | 0.923 | 0.946 | 1.067 | 1.091 |
+| 8192/1024 | 10 | 0.885 | 0.928 | 1.084 | 1.172 |
+| 70000/300 | 5 | 0.843 | 0.874 | 1.145 | 1.209 |
+| all 3 shapes | 25 | 0.891 | 0.924 | 1.089 | 1.146 |
+
+| Shape / subset | points | TTT/GPU | P90 interactivity | Median ITL | Median TTFT |
+|---|---|---|---|---|---|
+| 1024/1024, CONC <= 512 | 9 | 0.896 | 0.911 | 1.118 | 1.081 |
+| 8192/1024, CONC <= 512 | 9 | 0.871 | 0.899 | 1.137 | 1.194 |
+| all, CONC <= 512 | 23 | 0.874 | 0.898 | 1.131 | 1.151 |
+| 70000/300, MI355X chunk 8192 (iso) | 5 | 0.843 | 0.874 | 1.145 | 1.209 |
+| 70000/300, MI355X chunk 32768 vs GB300 chunk 8192 (NOT iso) | 5 | 0.909 | 0.872 | 1.147 | 1.178 |
+
+- CONC=1024 is GB300's open item (GB300 behind there), so it lifts the MI355X ratio; CONC <= 512 is
+  the cleaner view (TTT/GPU 0.874 over 23 points).
+- The 70k chunk-32768 row mixes two variables (platform and chunk); GB300 has no chunk-32768 run.
+  Quote the iso row (0.843) unless GB300 runs 70000/300 with chunk 32768 too.
+- Precision / prefill-AR differences in the table above apply to every ratio here.
 
 ## Regenerating
 

@@ -29,9 +29,10 @@ numbering.
    -3.7% numerically equal to today (`..._SP_EXACT_SHARED=1`); 8192/1024 c64 +2.1% / +1.2%. Decode
    unchanged. USER DECISION: which variant; whether to commit/push the SGLang branch (strip debug
    `_SP_CHECK` first). Details "F2 P1".
-2. **CONC=1024 decode ITL jump** — measured (section "Item 2"): median jump = decode step 43.9 →
-   69.6 ms (bs512 → bs1024, 1.59x for 2x tokens), not prefill interleaving (that is the tail). Decode
-   kernel breakdown bs1024 vs bs512 in progress.
+2. **CONC=1024 decode ITL jump** — explained + improved (section "Item 2"): decode step 43.9 → 69.6 ms
+   (bs512 → bs1024) because EP1/TP8 MoE at M<=1024 had no tuned rows (t32 tiles). `best.csv` (tuned
+   M256/M512 + M2048-copy for M1024, via `AITER_CONFIG_FMOE`): 1024/1024 TTT/GPU +2.9% (c256), +3.3%
+   (c512), +13.2% (c1024, noisy; decode step -13% every run). USER DECISION: install rows in AITER.
 3. **G — server flags, cheap A/B**: chunk per ISL (70k chunk 32768 = TTT +1..9% but TTFT worse at
    CONC 2-4 → repeat CONC 2/4 with more requests before deciding), other scheduler knobs.
 4. **Iso-comparison data vs GB300**: tp4ep1 sweep with `ROCM_QUICK_REDUCE_QUANTIZATION` unset (bf16
@@ -573,6 +574,21 @@ SGLang worktree `/data/proxy_moe/wt/sglang` (`feat/proxy-model-1020`, uncommitte
   Known limit: M 513..~850 gets slower with the t64 row (one bucket for 513..1024). Serving A/B
   (1024/1024, CONC 256/512/1024, base vs best interleaved, 2 repeats) running:
   `/data/proxy_moe/f2/item2_ab2.sh` → `c231_item2_rows_ab_r{1,2}_1021/{base,best}`.
+- Serving result (2026-10-21 ~17:10-19:10, crsuse2-m2m-231, 1024/1024 tp8ep1 sweep flags, one variable =
+  `AITER_CONFIG_FMOE` base.csv vs best.csv, interleaved, 2 repeats; per-run values in the run dirs):
+
+| CONC | TTT/GPU base → best (mean) | ITL med | P90 interactivity | TTFT med | decode-only step |
+|---|---|---|---|---|---|
+| 256 | 1,413.8 → 1,454.8 (+2.9%) | 37.86 → 36.60 (-3.3%) | 26.1 → 27.0 (+3.6%) | -1.4% | 37.89 → 36.63 (-3.3%) |
+| 512 | 2,119.0 → 2,188.7 (+3.3%) | 44.66 → 43.50 (-2.6%) | 19.8 → 21.7 (+10.1%) | -0.1% | 44.68 → 43.59 (-2.4%) |
+| 1024 | 2,154.0 → 2,438.1 (+13.2%) | 80.67 → 68.71 (-14.8%) | 8.9 → 10.3 (+16.4%) | +0.5% | 70.38 → 60.97 (-13.4%) |
+
+  CONC 256/512: the two repeats agree within ~2%. CONC 1024: base TTT varies 2,117-2,361 across the 5
+  base runs today; over all 5 pairs (row-1024-only r1-r3 + best r1-r2) TTT Δ = -1.6 / +4.4 / +8.5 /
+  +16.4 / +10.1% (mean +7.6%), decode step -13% in every run. Item 2 status: median ITL jump at 1024
+  is explained (decode step; MoE at M1024 on t32 tiles re-reading weights) and reduced by 13%.
+  `best.csv` is NOT installed in the AITER worktree (runs used `AITER_CONFIG_FMOE`); install = append
+  `f2/item2/t256_512.csv` + `row1024.csv` to `model_configs/proxymoe_fp4_tuned_fmoe.csv` (user decision).
 
 **Item 2 plan (CONC=1024 decode ITL jump), measurement only, runs after F's M0/M1:** one run
 1024/1024 CONC 1024 (TP8 EP1) with the server's decode-batch log lines kept; compare (a) server

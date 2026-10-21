@@ -4,7 +4,7 @@ Owner node: pod4-gb300-2-tray05-f3
 
 2-node counterpart of `../fixed_seq_len_gb300/` (tp4ep1, 1 tray). Recipe **tp8ep1, 24 layers**,
 same shapes / CONC / client / server flags; only the topology differs (8 GPUs across 2 trays,
-cross-tray NCCL over MNNVL). Based on `../RUNBOOK_kimi_gb300_2node.md`.
+cross-tray NCCL over MNNVL).
 
 ## CONTINUE HERE
 
@@ -55,6 +55,19 @@ tokenizer `/shared_nfs/kk/proxy_moe/tokenizer`, ckpt `/shared_nfs/kk/proxy_moe/p
 `gen_dummy_ckpt --workers 32` seed 0, log `/shared_nfs/kk/proxy_moe/gen_24l.log`).
 `/SFS-aGqda6ct/models/kk` is root-owned: create dirs from a container; results dirs are chowned
 to uid 10003 so the host driver can write.
+
+### 2-node gotchas
+
+- Both trays must be in the same IMEX domain (`/etc/nvidia-imex/nodes_config.cfg`; host
+  `systemctl is-active nvidia-imex` = active, `nvidia-imex-ctl -q` = READY).
+- Containers need `--network=host` (bridge 172.17.x cannot reach the other tray) and the IMEX
+  channel (`--privileged`, or `--device /dev/nvidia-caps-imex-channels`); without it NCCL fails with
+  `Cuda failure 800 'operation not permitted'` / `MNNVL ... not working`.
+- `NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME` = interface name `bond0.113` on both nodes;
+  `--dist-init-addr` = node0 IP on both, only `--node-rank` differs.
+- Do not work around MNNVL errors with `NCCL_MNNVL_ENABLE=0`: it falls back to TCP sockets and the
+  numbers are meaningless. Check with `NCCL_DEBUG=INFO` that cross-tray channels say `via P2P/MNNVL`.
+- `EADDRINUSE` on :5000 = leftover server: `ss -ltnp | grep :5000`, then `teardown_2node`.
 
 ### Node-local checkpoint and containers
 

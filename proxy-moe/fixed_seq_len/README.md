@@ -16,6 +16,10 @@ It does NOT survive the container/node being reclaimed (no scheduler visible ins
 check the reservation). Results are on /shared_nfs and DONE markers make a restart resume; `/data`
 (checkpoints, worktrees, FlyDSL 0.4.0) is container-local: regenerate ckpt (seed 0, minutes), re-create
 worktrees from the pushed branches. Node-local scripts backed up to `/shared_nfs/kk/proxy_moe_node_backup_c231/`.
+Incident 02:53 UTC: tp8ep1 isl8192-osl1024-c64 CLIENT FAILED — server died mid-decode (64 running,
+KV 6%), no Python traceback / GPU fault / cgroup OOM (memory.events oom_kill 0, host RAM free);
+TP0 (TCPStore host) vanished → other ranks report TCPStore closed. Unexplained; the point has no
+DONE, so re-running the driver after the sweep retries it. If it recurs, investigate.
 Earlier: scripts written; 2-point smoke (tp8ep1 1024/1024 c2 and 70000/300 c2; tp4ep1 1024/1024 c2)
 run on crsuse2-m2m-231 → passed, see "Smoke". Full sweep NOT started (user: start it in the next session,
 look at optimizations only after the sweep).

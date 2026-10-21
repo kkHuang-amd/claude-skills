@@ -24,6 +24,7 @@ flags, in-node parallelism.
 | `OPT_mi355-4.md` | Warm profile, roofline estimates, optimization levers and results |
 | `OPT_crsuse2-m2m-231.md` | Continued on crsuse2-m2m-231: stage-2 MoE b_nt fix, bf16x3 router, decode MoE analysis, pushed branches, TP4 (T11) |
 | `SESSION_PROMPT_1020.md` | Handoff prompt to continue on another node |
+| `fixed_seq_len/` | InferenceX-style sweep (1k/1k, 8k/1k, 70k/300; TP8 + TP4): scripts, README, session prompt |
 
 Tools (`scripts/`): `trace_kernels.py <trace.json.gz> --steps N` (kernel time by name/category),
 `rank_skew.py` / `ar_wait_attrib.py` (cross-rank AR wait attribution), `ep_moe_check.py`

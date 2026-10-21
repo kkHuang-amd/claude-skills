@@ -22,7 +22,8 @@ numbering.
    "F M0 results"): AR concurrent with MoE slows both (AR 1.7-1.8x, moe1 1.3-1.4x); best CU split hides
    12.5% of one AR (<3% prefill). Prefill comm is still ~22% (ISL 1024 and 70k). Remaining comm levers
    without overlap (not started, ask the user first): cheaper AR (QR INT4/INT6, needs a logits check),
-   AR+norm fusion at prefill sizes. P1 code not started.
+   AR+norm fusion at prefill sizes. P1 code not started. QR level measured (op level, section
+   "F follow-up"): INT6 -11% / INT4 -17% AR time at 4x / 16x error → ~2.5% / ~3.8% prefill; not adopted.
 2. **CONC=1024 decode ITL jump** [MI355X median ITL 67-74 ms at 1024 vs 40-46 ms at 512; GB300 shows
    the same symptom]. Measure first: server-side decode step time vs client ITL (prefill-chunk
    interleaving suspected), one variable at a time.
@@ -364,6 +365,33 @@ Driver `/data/proxy_moe/F_M1.sh` (sweep launch flags via `serve_proxy.sh`, TP8 E
 - Trace caveat: kernel counts imply ~7 of the 9 steps were recorded (moe1 171 calls / 24 layers);
   shares and per-call times are unaffected, absolute ms/step from `--steps 9` are too low.
 
+### F follow-up: cheaper prefill AR via QR quantization level (2026-10-21, crsuse2-m2m-231, op level)
+`ar_m_scaling.py` (now also prints rel_l2 vs the exact fp32 sum of all ranks' inputs; inputs randn
+per rank, seeded), 8 GPUs, [M,16384] bf16 (QR casts to fp16), one variable =
+`ROCM_QUICK_REDUCE_QUANTIZATION`. Artifacts `/shared_nfs/kk/results/proxy_24l/c231_qr_quant_op_1021/`.
+
+| Level | M4096 us | M8192 us | vs INT8 (M8192) | rel_l2 per AR |
+|---|---|---|---|---|
+| FP (no quant, ~GB300 bf16 AR) | 664 | 1301 | +25.9% | 1.7e-3 |
+| INT8 (current) | 566 | 1034 | — | 7.7e-3 |
+| INT6 | 484 | 918 | -11.2% | 3.0e-2 (3.9x INT8) |
+| INT4 | 397 | 857 | -17.1% | 1.2e-1 (16x INT8) |
+
+- Projected prefill gain (comm = 22% of prefill, all of it QR at chunk 8192): INT6 ~2.5%, INT4 ~3.8%,
+  bought with 4x / 16x the per-AR error (48 ARs per forward, randn data; real activations with
+  outliers can only be worse). INT4 at 12% error per AR is not a usable trade; INT6 is a small gain
+  at a large error increase. Not run in serving; recommend not adopting (user decision).
+- Bytes vs time: INT4 moves 1/4 of FP's bytes but is only 34% faster → the quantized modes are not
+  link-bandwidth bound. Estimate only: twoshot moves ~1.75x payload per GPU → FP ~360 GB/s, INT8
+  ~230, INT4 ~140 GB/s per GPU; xGMI peak for this node NOT measured, so no utilization claim.
+  Consistent with M0 (QR stretches 3.5x on 32 CUs): QR time is dominated by on-GPU work
+  (codec/reduction), not the links. Hypothesis; falsifier = QR time vs CU count at fixed level.
+- Iso-comparison data point (Next item 4): bf16-like (FP) prefill AR would be +26% AR time ≈ +5.7%
+  prefill GPU time vs the INT8 we run; size of the INT8 advantage in the GB300 comparison.
+- AR+norm fusion at prefill sizes: norm + residual add ≈ 5% of prefill; the aiter fused AR path is
+  custom-AR based (2stage, used only up to M2048 here), which would give up QR INT8 at M8192 (custom
+  AR 2stage vs QR at M8192 not measured). Upper bound ~5% minus that loss; not started.
+
 **Item 2 plan (CONC=1024 decode ITL jump), measurement only, runs after F's M0/M1:** one run
 1024/1024 CONC 1024 (TP8 EP1) with the server's decode-batch log lines kept; compare (a) server
 decode step time at running-req ~1024 (log `gen throughput` / per-step timing) vs client median ITL,
@@ -649,3 +677,4 @@ w3, bnt0.
 | 2026-10-21 | crsuse2-m2m-231 | c231_F_M0_1021 | op-level: MoE M-scaling (1 GPU), QR AR M-scaling + AR/MoE concurrency (8 GPU) | — | — | — | side-stream overlap NO-GO, see F M0 results |
 | 2026-10-21 | crsuse2-m2m-231 | c231_F_M1_70k_c8_1021 | TP8 EP1 sweep flags, 70000/300 CONC 8, profile mid-run | TTT/GPU 3566.9 | 8749 | ITL 10.75 | only DECODE trace captured |
 | 2026-10-21 | crsuse2-m2m-231 | c231_F_M1b_70k_c8_1021 | same, warm-up + profile from bench start | TTT/GPU 3640.2 | 8692 | ITL 10.76 | EXTEND comm 22.2%, MoE 48.8%, attn 6.1% |
+| 2026-10-21 | crsuse2-m2m-231 | c231_qr_quant_op_1021 | op-level QR AR FP/INT8/INT6/INT4, [8192,16384] | — | — | — | 1301/1034/918/857 us; rel_l2 1.7e-3/7.7e-3/3.0e-2/1.2e-1 |

@@ -512,7 +512,9 @@ SGLang worktree `/data/proxy_moe/wt/sglang` (`feat/proxy-model-1020`, uncommitte
   +5.3%, shared expert sees hip-rounded MXFP4). Replaces the earlier boolean
   `SGLANG_OPT_LAGUNA_PREFILL_SP_EXACT_SHARED` (=1 ⇔ `triton`; the A/B runs labelled "on" = `hip`,
   "onx" = `triton`). Driver scripts in `/data/proxy_moe/f2/` updated to set the value explicitly.
-  Not yet re-verified on a server after the rename (iso sweep occupies the node).
+  Verified after the rename (2026-10-22, `p1_check.sh` VARIANTS="spcheck spexcheck", SP active on 8
+  ranks both): `hip` → per-layer rel_l2 vs today 0.100-0.120, vs hip-math 8.5e-3 (variant A);
+  `triton` → vs today 8.5-8.7e-3 (variant B). Same numbers as before the rename.
 - Exact-shared variant (then `SGLANG_OPT_LAGUNA_PREFILL_SP_EXACT_SHARED=1`): the shard is
   also quantized with the triton quantizer of the dense W4A4 linears and gathered a 2nd time for the
   shared expert. Self-check: SP vs today rel_l2 8.5-8.7e-3 every layer = the INT8 AR error alone →

@@ -7,6 +7,41 @@ numbering.
 
 ## CONTINUE HERE
 
+**Status (2026-10-21, after the fixed_seq_len sweep):**
+- Best configs (new base = pushed branches): TP8 EP1 933.7 tok/s / TTFT 344.5 / TPOT 15.83 (TTT/GPU
+  583.6, P90 interactivity 65.5; +18.4% / +23.1% vs pristine EP8 defaults); TP4 EP1 1090.3 / 256.0 /
+  13.73; TP4 EP4 1002.6 / 234.0 / 15.10. Tables: "TTT/GPU + P90 interactivity", "T11".
+- fixed_seq_len sweep (TP8 + TP4, 1k/1k, 8k/1k, 70k/300, 50 points) DONE: `fixed_seq_len/RESULTS.md`
+  (+ chunk 32768 comparison, GB300 comparability notes, geomean MI355X/GB300 tp4ep1 = 0.923 / 0.885 /
+  0.843, all 0.891, CONC<=512 0.874).
+- Closed: T1, T2/T2b, T4, T8, T9 (b_nt fix), T11, items A (profiler artifact), B (moe1 memory-side,
+  <2% left), D (fused quant 16384: correct, no serving gain). Dropped: DP-attention, mega_moe_tp.
+
+**Next (priority order, evidence in brackets):**
+1. **F / T3 — prefill comm/compute overlap** [sweep: 70000/300 and 8192/1024 high-CONC are prefill
+   bound (TTFT ~linear in CONC, TTT flat); EP1 prefill comm 21-29% of GPU time]. Needs Laguna
+   micro-batch split of a prefill chunk so AR of half A overlaps compute of half B. Large; design first.
+2. **CONC=1024 decode ITL jump** [MI355X median ITL 67-74 ms at 1024 vs 40-46 ms at 512; GB300 shows
+   the same symptom]. Measure first: server-side decode step time vs client ITL (prefill-chunk
+   interleaving suspected), one variable at a time.
+3. **G — server flags, cheap A/B**: chunk per ISL (70k chunk 32768 = TTT +1..9% but TTFT worse at
+   CONC 2-4 → repeat CONC 2/4 with more requests before deciding), other scheduler knobs.
+4. **Iso-comparison data vs GB300**: tp4ep1 sweep with `ROCM_QUICK_REDUCE_QUANTIZATION` unset (bf16
+   prefill AR) to size the INT8 effect; optionally MI355X W4A8 routed experts.
+5. **I — upstream AITER PRs** (b_nt fix first; then load_hip_runtime, NCK32, quant 16384, tuner
+   chunked dequant; strip the default-off D2 env switches). Ask the user before opening PRs.
+6. Parked (small): D quantize-once kernel (~1% TPOT), B moe1 W1 read layout (<2%).
+
+**Rules:** one variable per experiment; measure kernels under CUDA graph / profiler (not eager
+Python loops); `run_stage.sh` pkills every sglang server → sequential runs only; new base via
+`source /data/proxy_moe/newbase_env.sh`; results under `/shared_nfs/kk/results/proxy_24l/<tag>/`;
+docs edited and pushed from worktree `/data/proxy_moe/wt/skills` (main checkout has 2 unrelated
+unmerged files); no AI attribution lines in commits; ask before pushing code branches.
+**Repro (best TP8):** `NL=24 TPN=8 SGLANG_OPT_LAGUNA_ROUTER_BF16X3=1 ONE="<tag> 1 1" bash /data/proxy_moe/repro.sh`
+after `source /data/proxy_moe/newbase_env.sh` (TP4: `NL=12 TPN=4 GPUS=0,1,2,3`).
+
+## History (previous CONTINUE HERE contents, kept verbatim)
+
 **Status (2026-10-20 07:25 UTC):** env up; warm repro of EP8/EP1 best configs matches mi355-4
 within ~1% (serving) / 0.5% (TP0 prefill GPU time); tuned rows confirmed hit in traces.
 **T3 step 1 done:** `--enable-dp-attention --dp 8` on EP8 = large regression (229 tok/s, TTFT 9.8 s,
@@ -36,6 +71,7 @@ Not pushed: pre-existing unrelated AITER edits (pa_mqa_logits_fp4_prefill.py, cs
 mla .co) and SGLang hipify artifacts.
 Local AITER edits: `/data/proxy_moe/patches/aiter_moe2_bnt_and_d2_experiments.patch` (b_nt fix +
 default-off env experiments AITER_D2_STREAM_K / AITER_D2_DEFER_TID), `aiter_mega_moe_tp_nck32.patch`.
+
 **Files:** model `sglang/srt/models/laguna.py`; analysers `/workspace/claude-skills/proxy-moe/scripts/`.
 **Repro (warm, run from /tmp):**
 ```bash

@@ -535,6 +535,15 @@ SGLang worktree `/data/proxy_moe/wt/sglang` (`feat/proxy-model-1020`, uncommitte
   1,807 → 1,430 us (-21%, moe1 t64x128x256 at 5.97 TB/s); M512 with the same row 1,232 → 1,348 (worse,
   keep default). Output rel_l2 vs default 3.7% (same systematic fp4 requant-path difference as the
   accepted T11 tuned rows, 3.6%). Projected decode step bs1024: -9 ms (~-13%).
+- Serving A/B run 1 (2026-10-21 14:56-15:31, `c231_item2_moe1024_ab_1021/{base,with1024}`, 1024/1024
+  c1024 tp8ep1 sweep flags, one variable = CSV with the token=1024 row; server log confirms the row is
+  picked: "using 2stage (kernelName1='flydsl_moe1_..._t64x128x256_w2_fp4' ...) for (..., 1024, ...)"):
+  TTT/GPU 2,361.4 → 2,323.8 (-1.6%), TTFT 14,810 → 14,716, ITL med 71.88 → 72.75, P90 10.3 → 9.2.
+  BUT server decode-only step (running >= 1004, no prefill in the log interval) 70.12 → 61.06 ms
+  (-12.9%, matches the op-level -9 ms). Time split: decode-only intervals 551 → 479 s, intervals with
+  prefill 335 → 411 s (same 1,045 prefill batches) → the decode gain is cancelled by slower
+  prefill-containing intervals; mechanism unknown. Run-to-run noise at this point is large: today's
+  base 2,361.4 vs the sweep's 2,193 for the same point (+7.7%). Repeats r2/r3 (interleaved) running.
 
 **Item 2 plan (CONC=1024 decode ITL jump), measurement only, runs after F's M0/M1:** one run
 1024/1024 CONC 1024 (TP8 EP1) with the server's decode-batch log lines kept; compare (a) server

@@ -41,6 +41,11 @@ numbering.
    chunked dequant; strip the default-off D2 env switches). Ask the user before opening PRs.
 6. Parked (small): D quantize-once kernel (~1% TPOT), B moe1 W1 read layout (<2%).
 
+**Overnight summary (2026-10-21, autonomous):** F2 prefill SP and decode MoE rows both measured
+and documented (sections "F2 P1", "Item 2", "Combined"). Waiting on user: (a) SP shared-expert
+quantizer variant (hip +5.3% vs exact +3.3% at 70k c8); (b) commit/push SGLang SP code (strip
+`_SP_CHECK` debug first); (c) install decode rows into AITER CSV. Nothing pushed except docs.
+
 **Rules:** one variable per experiment; measure kernels under CUDA graph / profiler (not eager
 Python loops); `run_stage.sh` pkills every sglang server → sequential runs only; new base via
 `source /data/proxy_moe/newbase_env.sh`; results under `/shared_nfs/kk/results/proxy_24l/<tag>/`;
@@ -589,6 +594,22 @@ SGLang worktree `/data/proxy_moe/wt/sglang` (`feat/proxy-model-1020`, uncommitte
   is explained (decode step; MoE at M1024 on t32 tiles re-reading weights) and reduced by 13%.
   `best.csv` is NOT installed in the AITER worktree (runs used `AITER_CONFIG_FMOE`); install = append
   `f2/item2/t256_512.csv` + `row1024.csv` to `model_configs/proxymoe_fp4_tuned_fmoe.csv` (user decision).
+
+### Combined: prefill SP (exact-shared) + decode MoE rows (2026-10-21 19:25-19:45, crsuse2-m2m-231)
+`/data/proxy_moe/f2/combined.sh` (env `SGLANG_OPT_LAGUNA_PREFILL_SP=1 ..._EXACT_SHARED=1
+AITER_CONFIG_FMOE=f2/item2/best.csv`), results `c231_combined_1021/tp8ep1/`; baselines = today's
+same-node off/base runs (mean where repeated). SP active on all ranks (log line).
+
+| Point | TTT/GPU base → combined | TTFT med | ITL med | P90 interactivity |
+|---|---|---|---|---|
+| 70000/300 c8 | 3,574.6 → 3,691.5 (+3.3%) | 8,742 → 8,390 (-4.0%) | 10.75 → 10.74 | 92.6 → 92.6 |
+| 8192/1024 c64 | 1,624.8 → 1,648.6 (+1.5%) | 7,828 → 7,519 (-3.9%) | 29.40 → 29.31 | 33.8 → 33.9 |
+| 1024/1024 c512 | 2,119.0 → 2,172.0 (+2.5%) | 7,467 → 7,301 (-2.2%) | 44.66 → 43.59 (-2.4%) | 19.8 → 19.8 |
+
+Single combined run per point; roughly additive with the two separate A/Bs. With the hip-shared SP
+variant instead of exact, 70k c8 would be ~+5% (separate A/B).
+State: SGLang changes uncommitted in `/data/proxy_moe/wt/sglang` (patch
+`/data/proxy_moe/f2/p1_sglang_uncommitted.patch`, backup `/shared_nfs/kk/proxy_moe_node_backup_c231/f2/`).
 
 **Item 2 plan (CONC=1024 decode ITL jump), measurement only, runs after F's M0/M1:** one run
 1024/1024 CONC 1024 (TP8 EP1) with the server's decode-batch log lines kept; compare (a) server

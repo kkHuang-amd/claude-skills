@@ -41,10 +41,17 @@ numbering.
    chunked dequant; strip the default-off D2 env switches). Ask the user before opening PRs.
 6. Parked (small): D quantize-once kernel (~1% TPOT), B moe1 W1 read layout (<2%).
 
-**Overnight summary (2026-10-21, autonomous):** F2 prefill SP and decode MoE rows both measured
-and documented (sections "F2 P1", "Item 2", "Combined"). Waiting on user: (a) SP shared-expert
-quantizer variant (hip +5.3% vs exact +3.3% at 70k c8); (b) commit/push SGLang SP code (strip
-`_SP_CHECK` debug first); (c) install decode rows into AITER CSV. Nothing pushed except docs.
+**Overnight summary (2026-10-21, autonomous, crsuse2-m2m-231; nothing pushed except docs):**
+- F2 prefill SP (FFN-side RS bf16 + fp4 AG, attention is bf16): 70k c8 TTT/GPU +5.3% (hip quant for
+  the shared expert) or +3.3% numerically equal to today (`..._SP_EXACT_SHARED=1`); TTFT -6% / -4%.
+- Item 2 (CONC 1024 ITL): cause = decode step (EP1/TP8 MoE at M<=1024 untuned, t32 tiles). `best.csv`
+  rows: 1k/1k TTT/GPU +2.9% c256, +3.3% c512, +13.2% c1024 (decode step -13% every run).
+- Combined (SP exact + rows): 70k c8 +3.3%, 8k/1k c64 +1.5%, 1k/1k c512 +2.5%.
+- G: chunk 32768 TTFT penalty at low CONC is a scheduling effect (single unqueued prefill is equal);
+  M16k/M32k rows add +4-5% TTT with chunk 32768.
+- USER DECISIONS: (a) SP shared-expert variant; (b) commit/push SGLang SP code (strip `_SP_CHECK`);
+  (c) install decode rows (`f2/item2/t256_512.csv` + `row1024.csv`) and/or M16k/32k rows into AITER CSV;
+  (d) chunk-per-ISL default. Remaining Next: 4 iso data (FP AR tp4ep1 sweep), 5 upstream PRs.
 
 **Rules:** one variable per experiment; measure kernels under CUDA graph / profiler (not eager
 Python loops); `run_stage.sh` pkills every sglang server → sequential runs only; new base via
@@ -637,7 +644,15 @@ State: SGLang changes uncommitted in `/data/proxy_moe/wt/sglang` (patch
   every sweep point the first measured request is a prefix-cache hit (1 of np; same on GB300, so the
   comparison is unaffected, but CONC-2 medians over 8 requests carry it).
 - Follow-up running: chunk 32768 + token 16384/32768 rows (copies of the M8192 row, op-level -10/-13%),
-  70k c2/c8 (`/data/proxy_moe/f2/g_rows.sh` → `c231_G_rows_1021/{base,with16k32k}`).
+  70k c2/c8 (`/data/proxy_moe/f2/g_rows.sh` → `c231_G_rows_1021/{base,with16k32k}`), one run each:
+
+| CONC (chunk 32768) | TTT/GPU base → +rows | TTFT med | ITL |
+|---|---|---|---|
+| 2 (n=16) | 3,013.0 → 3,138.5 (+4.2%) | 2,924 → 2,760 (-5.6%) | 6.44 = |
+| 8 (n=64) | 3,604.7 → 3,778.5 (+4.8%) | 8,330 → 9,235 (+10.9%, unexplained, single run) | 10.76 → 10.75 |
+
+  vs today's default (chunk 8192, no rows) at c8: TTT 3,574.6 → 3,778.5 (+5.7%) but TTFT 8,742 → 9,235.
+  Chunk per ISL stays a throughput-vs-TTFT trade; needs repeats before any default change.
 
 **Item 2 plan (CONC=1024 decode ITL jump), measurement only, runs after F's M0/M1:** one run
 1024/1024 CONC 1024 (TP8 EP1) with the server's decode-batch log lines kept; compare (a) server

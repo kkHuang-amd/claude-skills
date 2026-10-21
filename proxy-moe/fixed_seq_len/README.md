@@ -9,7 +9,9 @@ columns plus TTT/GPU and P90 interactivity).
 
 ## CONTINUE HERE
 
-**Status (2026-10-21):** scripts written; 2-point smoke (tp8ep1 1024/1024 c2 and 70000/300 c2; tp4ep1 1024/1024 c2)
+**Status (2026-10-21 01:18 UTC):** FULL SWEEP RUNNING on crsuse2-m2m-231 (user: run it in this session),
+sweep pid in `/shared_nfs/kk/results/proxy_24l/fixed_seq_len/sweep.pid` (404161), log `sweep.log`.
+Earlier: scripts written; 2-point smoke (tp8ep1 1024/1024 c2 and 70000/300 c2; tp4ep1 1024/1024 c2)
 run on crsuse2-m2m-231 → passed, see "Smoke". Full sweep NOT started (user: start it in the next session,
 look at optimizations only after the sweep).
 **Next:** start the full sweep in the background, monitor by DONE count, then `report.py --md`

@@ -9,12 +9,12 @@ non-MoE ~200; mega_moe_tp not usable at small M).
 ## CONTINUE HERE
 
 **Status:** all five stages exist as standalone launches and are correct (S1 seam, S5, S2 router, S4 shared
-bit-exact, S3 routed deterministic). S3 optimised (2026-10-22): MFMA version 48 / 91 / 170 / 327 / 751 us at
-M 1/2/4/8/16 vs aiter fused_moe ~77 / 90 / 152 / 258 / 452 (faster at M=1, par at M=2, slower from M=4).
-S4 MFMA (2026-10-22): 15.8 / 17.5 / 18.8 / 20.6 / 22.2 us, still bit-exact. Not started: S2 performance,
-fusion into one launch, plugin wiring, serving.
-**Next (user, 2026-10-22):** S3 at large M (M >= 4: 3.5-4.5 TB/s vs aiter ~5.7; per-task barrier + tail, RQ
-grid sync, DOWN prefetch), then S2 (TP-shard the router), fuse, plugin, serving.
+bit-exact, S3 routed deterministic; optional shared-fused S3). S3 now 48 / 97 / 169 / 288 / 536 us at M
+1/2/4/8/16 vs aiter fused_moe ~77 / 90 / 152 / 258 / 452 (UG / DOWN at 5.0-6.5 TB/s; "rest" = U + Q + RQ +
+grid syncs + launch 13-27 us, to revisit inside the fused launch). S4 MFMA 16-22 us. Not started: S2
+performance, fusion into one launch, plugin wiring, serving.
+**Next:** S2 (TP-shard the router: 64 experts / rank + logit exchange), then fuse S1-S5 into one launch and
+wire it into the plugin; serving TPOT at CONC 1-16.
 **Repro:** `source /data/proxy_moe/mono_env.sh; T=/data/proxy_moe/ext/sgl-amd-mono/test/kernels/laguna;
 torchrun --standalone --nproc_per_node=8 $T/check_seam.py; for c in router mxq shared routed; do
 HIP_VISIBLE_DEVICES=0 python3 $T/check_$c.py; done`
@@ -115,6 +115,8 @@ Activation precision must stay A4 (MXFP4) to match the proxy spec (MiniMax's mon
 
 | 2026-10-22 | crsuse2-m2m-231 | S3 phase timing (`time_routed_phases.py`: run-time skip of UG / DOWN loops, one binary) | after cross-task UG prefetch + DOWN mid prefetch | full / UG / DOWN / rest us: M1 50.4 / 24.5 (5.65 TB/s) / 14.6 (4.76) / 13.3; M2 98.6 / 61.5 (4.22) / 34.2 (3.80) / 15.2; M4 191.3 / 123.8 / 63.4 / 16.8; M8 340.5 / 208.4 (4.86) / 123.1 (4.12) / 20.6; M16 732.0 / 441.4 (4.04) / 264.2 (3.38) / 27.6. DOWN prefetch depth 4 measured no better (kept 2) |
 | 2026-10-22 | crsuse2-m2m-231 | shared expert fused into S3 (user request; `build_routed(shared=True)`, `check_fused.py`, log `c231_mono_p0_1022/s3_fused_shared_check.log`) | shared expert = union entry 512 (every token, weight 1.0): quark row-major weights read in place, x and mid quantized with the triton rule, gate/up rounded to bf16 before silu (its GEMM's output), as S4; output = routed + shared summed in fp32 (one rounding) | vs SGLang (fused_moe + quark shared, bf16 add): 5.4-5.7e-3, same as separate S3+S4 (5.4-5.7e-3); fused vs S3+S4 2.8-2.9e-3 (two bf16 roundings vs one). Time fused vs S3 + S4: 66.6 vs 63.3, 113.5 vs 114.8, 191.8 vs 203.8, 362.5 vs 345.4, 743.8 vs 752.9 us (M 1/2/4/8/16): no clear gain; first version forgot the bf16 rounding of the shared gate/up (rel 4.6-9.2e-3 vs S3+S4) |
+
+| 2026-10-22 | crsuse2-m2m-231 | S3 large-M (`time_routed_phases.py`, `check_routed.py`) | (a) DOWN: 4 experts an iteration in straight-line code (loop-carried prefetches were drained at the loop edge, so prefetch depth did nothing): M1 DOWN 14.6 → 10.9 us, large M unchanged; (b) B-operand loads (x in UG, mid in DOWN) predicated by routing with out-of-range buffer offsets (zero, no traffic): at M16 ~15/16 of them were wasted L2 reads | full / UG / DOWN / rest: M1 47.8 / 21.4 (6.46 TB/s) / 12.3 / 13.6; M4 165.6 / 101.6 (5.19) / 56.0 (4.72) / 17.1; M8 291.3 / 179.4 (5.64) / 101.0 (5.02) / 19.4; M16 541.9 / 353.2 (5.04) / 163.7 (5.45) / 27.3. check: 48.2 / 97.4 / 168.8 / 287.8 / 536.4 us, rel_l2 vs fused_moe 5.4-5.7e-3 |
 
 ### Notes
 - Whole-model recheck is NOT a usable check here: SGLang's own decode path differs from itself by 2.6-3.1e-2

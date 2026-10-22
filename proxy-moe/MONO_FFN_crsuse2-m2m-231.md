@@ -113,6 +113,9 @@ Activation precision must stay A4 (MXFP4) to match the proxy spec (MiniMax's mon
 
 | 2026-10-22 | crsuse2-m2m-231 | S4 MFMA (`check_shared.py`, log `c231_mono_p0_1022/s4_shared_mfma_check.log`) | GU: CTA = (16-channel block, 1/8 of K), scaled fp4 x fp4 MFMA (A = 16 row-major quark rows, B = 16 token columns), slice partials in fp32 → GR sums slices in order, bf16, silu*up → RQ → DOWN MFMA | output still bit-identical to the quark path at M 1-16; 15.8 / 17.5 / 18.8 / 20.6 / 22.2 us (scalar: 21.4 ... 263.9) |
 
+| 2026-10-22 | crsuse2-m2m-231 | S3 phase timing (`time_routed_phases.py`: run-time skip of UG / DOWN loops, one binary) | after cross-task UG prefetch + DOWN mid prefetch | full / UG / DOWN / rest us: M1 50.4 / 24.5 (5.65 TB/s) / 14.6 (4.76) / 13.3; M2 98.6 / 61.5 (4.22) / 34.2 (3.80) / 15.2; M4 191.3 / 123.8 / 63.4 / 16.8; M8 340.5 / 208.4 (4.86) / 123.1 (4.12) / 20.6; M16 732.0 / 441.4 (4.04) / 264.2 (3.38) / 27.6. DOWN prefetch depth 4 measured no better (kept 2) |
+| 2026-10-22 | crsuse2-m2m-231 | shared expert fused into S3 (user request; `build_routed(shared=True)`, `check_fused.py`, log `c231_mono_p0_1022/s3_fused_shared_check.log`) | shared expert = union entry 512 (every token, weight 1.0): quark row-major weights read in place, x and mid quantized with the triton rule, gate/up rounded to bf16 before silu (its GEMM's output), as S4; output = routed + shared summed in fp32 (one rounding) | vs SGLang (fused_moe + quark shared, bf16 add): 5.4-5.7e-3, same as separate S3+S4 (5.4-5.7e-3); fused vs S3+S4 2.8-2.9e-3 (two bf16 roundings vs one). Time fused vs S3 + S4: 66.6 vs 63.3, 113.5 vs 114.8, 191.8 vs 203.8, 362.5 vs 345.4, 743.8 vs 752.9 us (M 1/2/4/8/16): no clear gain; first version forgot the bf16 rounding of the shared gate/up (rel 4.6-9.2e-3 vs S3+S4) |
+
 ### Notes
 - Whole-model recheck is NOT a usable check here: SGLang's own decode path differs from itself by 2.6-3.1e-2
   at layer-0 attention output when the same step is run twice in one process (attention input identical;
@@ -127,3 +130,7 @@ Activation precision must stay A4 (MXFP4) to match the proxy spec (MiniMax's mon
 - Stage-cutoff timing (`time_routed_stages.py`) stops being reliable once builds differ in register
   allocation (negative deltas); use it only for coarse splits. Scalar fp4 decode + FMA was VALU-bound
   (~7 us per UG task); the 16x16x128 scaled MFMA lane layout equals the (16,16) shuffle tile layout.
+- Harness traps met: `epoch.add_(1)` bumps EVERY word (deadline and error words too) → the guard sees a
+  failure and stops at the first wait (fault at 0x0); bump only word 0 (`epoch[:1].add_(1)` /
+  `epoch[0] += 1`). A stream fetched before `torch.cuda.graph` capture is NOT the capture stream: the
+  kernels then run outside the graph and the "graph time" is just the epoch bump (fetch the stream inside).

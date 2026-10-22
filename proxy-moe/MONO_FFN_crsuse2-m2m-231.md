@@ -18,8 +18,9 @@ Serving A/B (graphs, CONC 1/4/16): TPOT -23.7 % / -2.5 % / +14.6 % (c16 worse: S
 Widths capped at 6 by default (CONC 8 / 16 now equal to base, CONC 1 -23.7 %).
 S3 now = aiter at M16 (455 vs 452 us), 157 / 272 vs 152 / 258 at M4 / M8. LDS-staged stream dropped (UG is
 not in-flight-bound: no-prefetch probe costs 0-7 %).
-**Next (candidates):** seams at large M (S1 + S5 ≈ 70 us at M16: tagged pairs double the xGMI bytes); per-expert
-readiness instead of the UG→RQ→DOWN grid syncs (rest 17-28 us); then re-sweep serving and the width cap. Logs: `/shared_nfs/kk/results/proxy_24l/c231_mono_p0_1022/`.
+Seams two-shot from M2 (M16 seam 32.9 → 20.6 us; fused M16 556 → 468 us/layer).
+**Next:** per-expert readiness instead of the UG→RQ→DOWN grid syncs (rest 17-28 us), then re-sweep serving
+(check mode + CONC 6/8/16) and the width cap. Logs: `/shared_nfs/kk/results/proxy_24l/c231_mono_p0_1022/`.
 **Repro:** `source /data/proxy_moe/mono_env.sh; T=/data/proxy_moe/ext/sgl-amd-mono/test/kernels/laguna;
 torchrun --standalone --nproc_per_node=8 $T/check_seam.py; for c in router mxq shared routed; do
 HIP_VISIBLE_DEVICES=0 python3 $T/check_$c.py; done`
@@ -140,6 +141,8 @@ Activation precision must stay A4 (MXFP4) to match the proxy spec (MiniMax's mon
 | 2026-10-22 | crsuse2-m2m-231 | Read ceiling (`/data/proxy_moe/tools/read_bw.py`, triton int32 sum, .cg) | what streaming can reach | 256 CTAs x 4 warps, 16 KB a CTA an iteration: 6.90 TB/s; 512 x 4: 6.91; finer grids 5.5-5.7. torch sum 5.26 |
 | 2026-10-22 | crsuse2-m2m-231 | S3 UG: `rocdl.sched_barrier(0)` after each quarter's MFMAs (found via a run-time branch around the MFMAs that changed codegen) | one scheduling region a quarter | S3 M4/8/16 155 / 268 / 503 → 157 / 272 / **455** us (UG 6.43 TB/s at M16; = aiter 452); correct (check_routed PASS). Same barrier in DOWN: no effect (removed). Commit daf6947. Fused launch (`check_layer`): 87.2 / 124.2 / 190.5 / 303.7 / 556.0 us/layer at M 1/2/4/8/16 (M16 worse than the standalone chain 510: seams S1 40 + S5 33 us at M16 in the marks) |
 | 2026-10-22 | crsuse2-m2m-231 | S3 UG probe: no prefetch at all (each quarter loaded right before use) | is in-flight depth the limiter? | UG M4/8/16 97.3 / 166.6 / 281.3 us vs 90.5 / 168 / 274 with prefetch → halving in-flight bytes costs 0-7 %: **not in-flight-bound**, so an LDS-staged stream (only adds in-flight bytes) is not expected to pay; not built |
+| 2026-10-22 | crsuse2-m2m-231 | Seam: 2 tagged pairs a lane (16 B stores, `check_seam.py`, TP8) | fewer xGMI write transactions | 8.1 / 10.3 / 15.4 / 21.7 / 34.9 us vs 8.0 / 10.3 / 13.2 / 19.3 / 33.0 (1 pair) → no gain, reverted: the seam is xGMI-byte-bound (one-shot: every rank's full partial, tag words doubling it, to all 7 peers ≈ 3.5 MB out a rank at M16) |
+| 2026-10-22 | crsuse2-m2m-231 | Seam two-shot (`check_seam.py` with `LAGUNA_SEAM_TWO_SHOT_MIN` 17 vs 1, TP8, 3 chained layers) | reduce-scatter: a CTA's columns to their owner rank (rank = CTA // 32) only; owner sums the ranks in order, rounds to bf16, all-gathers it; ~4x fewer bytes, one more hop | one-shot 8.0 / 10.2 / 13.1 / 19.2 / 32.9 us, two-shot 8.5 / 9.2 / 10.9 / 13.9 / 20.6 at M 1/2/4/8/16; both within 1 ulp of the reference (residual 0 ulp). Default two-shot from M2. Fused launch (`check_layer`): 87.0 / 123.5 / 187.2 / 295.7 / **468.3** us/layer (was 87.2 / 124.2 / 190.5 / 303.7 / 556.0), bit-exact vs standalone |
 
 ### Notes
 - Whole-model recheck is NOT a usable check here: SGLang's own decode path differs from itself by 2.6-3.1e-2

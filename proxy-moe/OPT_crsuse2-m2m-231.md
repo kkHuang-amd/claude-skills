@@ -17,30 +17,29 @@ numbering.
 - Closed: T1, T2/T2b, T4, T8, T9 (b_nt fix), T11, items A (profiler artifact), B (moe1 memory-side,
   <2% left), D (fused quant 16384: correct, no serving gain). Dropped: DP-attention, mega_moe_tp.
 
-**Next (priority order, evidence in brackets):**
-1. **F / T3 — prefill comm/compute overlap: M0 + M1 DONE → side-stream overlap NO-GO** (section
-   "F M0 results"): AR concurrent with MoE slows both (AR 1.7-1.8x, moe1 1.3-1.4x); best CU split hides
-   12.5% of one AR (<3% prefill). Prefill comm is still ~22% (ISL 1024 and 70k). Remaining comm levers
-   without overlap (not started, ask the user first): cheaper AR (QR INT4/INT6, needs a logits check),
-   AR+norm fusion at prefill sizes. P1 code not started. QR level measured (op level, section
-   "F follow-up"): INT6 -11% / INT4 -17% AR time at 4x / 16x error → ~2.5% / ~3.8% prefill; not adopted.
-   **F2 prefill SP P1 DONE (code local, not pushed)**: FFN-only (attention linears are bf16).
-   Serving vs off: 70000/300 c8 TTT/GPU +5.3% / TTFT -6.1% (hip quant for shared expert) or +3.3% /
-   -3.7% numerically equal to today (`..._SP_EXACT_SHARED=1`); 8192/1024 c64 +2.1% / +1.2%. Decode
-   unchanged. USER DECISION: which variant; whether to commit/push the SGLang branch (strip debug
-   `_SP_CHECK` first). Details "F2 P1".
-2. **CONC=1024 decode ITL jump** — explained + improved (section "Item 2"): decode step 43.9 → 69.6 ms
-   (bs512 → bs1024) because EP1/TP8 MoE at M<=1024 had no tuned rows (t32 tiles). `best.csv` (tuned
-   M256/M512 + M2048-copy for M1024, via `AITER_CONFIG_FMOE`): 1024/1024 TTT/GPU +2.9% (c256), +3.3%
-   (c512), +13.2% (c1024, noisy; decode step -13% every run). USER DECISION: install rows in AITER.
-3. **G — server flags, cheap A/B**: chunk per ISL (70k chunk 32768 = TTT +1..9% but TTFT worse at
-   CONC 2-4 → repeat CONC 2/4 with more requests before deciding), other scheduler knobs.
-4. **Iso-comparison data vs GB300** — tp4ep1 with QR unset DONE (`fixed_seq_len/RESULTS.md`, section
-   "QR unset"): bf16 prefill AR = TTFT +12%, TTT/GPU geomean -4.2%; MI355X/GB300 TTT 0.891 → 0.854
-   (iso-AR), 70k 0.843 → 0.766. Optional next: MI355X W4A8 routed experts for full iso-precision.
-5. **I — upstream AITER PRs** (b_nt fix first; then load_hip_runtime, NCK32, quant 16384, tuner
-   chunked dequant; strip the default-off D2 env switches). Ask the user before opening PRs.
-6. Parked (small): D quantize-once kernel (~1% TPOT), B moe1 W1 read layout (<2%).
+**Next (refreshed 2026-10-22; DONE items kept one line each, details in their sections):**
+- DONE: F/T3 side-stream overlap NO-GO; F2 prefill SP pushed (sglang ed3d8b0089, switch
+  `SGLANG_OPT_LAGUNA_PREFILL_SP=1`, `..._SP_SHARED_QUANT=triton|hip`); item 2 CONC-1024 ITL fixed by MoE
+  rows pushed (aiter 605ade939); item 4 iso-AR data (QR unset tp4ep1 sweep, GB300 0.891 → 0.854).
+1. **Re-baseline on the new heads**: (a) 1024/256 c16 repro with SP off / on (the +18.4% headline
+   predates SP and the rows); (b) full fixed_seq_len re-sweep TP8 + TP4 (RESULTS.md and the GB300
+   ratios predate SP / rows). Measurement only.
+2. **G — chunk per ISL** (user decision pending): chunk 32768 (+ M16k/32k rows) = 70k TTT +4-6% but
+   TTFT worse at low CONC (scheduling effect, mechanism unknown) and c8 TTFT +10.9% in one run →
+   repeat c8, find the mechanism (per-request timeline), then decide.
+3. **I — upstream AITER PRs** (ask the user first): b_nt fix 4b921e91e, load_hip_runtime cfae83274,
+   quant split path 6819e047a, hidden>8192 tuner/dispatcher 6ef4d09fd, tuner chunked dequant
+   44a1da311, NCK32 eb42562c0, fused quant 16384 89fed3572; strip default-off D2 env switches.
+4. **MoE tuner: reported vs measured mismatch** (M1024 picked t32: tuner 1,147 us vs measured 1,751;
+   same at TP4 M2048). Fixing it would give real rows for M 513..1024 (today M640/768 +3-7% slower
+   with the borrowed M2048 row) and more trustworthy prefill rows.
+5. **Decode bs1024 remainder** (~8.7 ms/step not attributed after MoE + AR) — blocked by: torch
+   profiler SEGFAULT at stop with cuda-graph bs 512/1024 (try rocprofv3 kernel trace instead).
+6. **SP follow-ups**: INT8 reduce-scatter (QR first half) for the attention-side RS; real-weight accuracy
+   A/B of `triton` vs `hip` when real weights exist; SP for M % tp != 0 (padding).
+7. Optional: MI355X W4A8 routed experts for full iso-precision vs GB300; bench `--flush-cache` question
+   (warmup hits the prefix cache; changing it breaks comparability with the GB300 sweep).
+8. Parked (small): D quantize-once kernel (~1% TPOT), B moe1 W1 read layout (<2%).
 
 **Overnight summary (2026-10-21, autonomous, crsuse2-m2m-231; nothing pushed except docs):**
 - F2 prefill SP (FFN-side RS bf16 + fp4 AG, attention is bf16): 70k c8 TTT/GPU +5.3% (hip quant for

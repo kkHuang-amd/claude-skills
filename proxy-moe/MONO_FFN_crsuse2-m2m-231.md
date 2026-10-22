@@ -16,9 +16,10 @@ serving TPOT. The plugin serves it (`runner.py`, `spec.py`); eager check vs SGLa
 next layer's input (SGLang run-to-run 2.9e-3) after matching SGLang's SiluAndMul and fused add-RMSNorm.
 Serving A/B (graphs, CONC 1/4/16): TPOT -23.7 % / -2.5 % / +14.6 % (c16 worse: S3 at large M).
 Widths capped at 6 by default (CONC 8 / 16 now equal to base, CONC 1 -23.7 %).
-**Next:** S3 UG weights through an LDS-staged stream (direct-to-LDS loads, more bytes in flight without
-VGPRs; UG 5.5 TB/s at M16 vs aiter ~6.0), then per-expert readiness instead of the UG→RQ→DOWN grid syncs;
-then raise the cap and re-run the A/B. Logs: `/shared_nfs/kk/results/proxy_24l/c231_mono_p0_1022/`.
+S3 now = aiter at M16 (455 vs 452 us), 157 / 272 vs 152 / 258 at M4 / M8. LDS-staged stream dropped (UG is
+not in-flight-bound: no-prefetch probe costs 0-7 %).
+**Next (candidates):** seams at large M (S1 + S5 ≈ 70 us at M16: tagged pairs double the xGMI bytes); per-expert
+readiness instead of the UG→RQ→DOWN grid syncs (rest 17-28 us); then re-sweep serving and the width cap. Logs: `/shared_nfs/kk/results/proxy_24l/c231_mono_p0_1022/`.
 **Repro:** `source /data/proxy_moe/mono_env.sh; T=/data/proxy_moe/ext/sgl-amd-mono/test/kernels/laguna;
 torchrun --standalone --nproc_per_node=8 $T/check_seam.py; for c in router mxq shared routed; do
 HIP_VISIBLE_DEVICES=0 python3 $T/check_$c.py; done`
@@ -136,6 +137,9 @@ Activation precision must stay A4 (MXFP4) to match the proxy spec (MiniMax's mon
 | 2026-10-22 | crsuse2-m2m-231 | S3: UG task tail cost (skip bit 2) and DOWN BATCH 2 / 4 / 6 / 8 | where the rest goes | tails 4.8 / 12.4 / 15.3 us at M4/8/16 (~3 %); BATCH all within ±2 us (no effect, kept 4) |
 | 2026-10-22 | crsuse2-m2m-231 | Fused launch after NT (`check_layer.py`, TP8, 3 layers) | | bit-exact vs standalone; 87.4 / 130.6 / 199.9 / 316.1 / 544.0 us/layer at M 1/2/4/8/16 (was 89 / 141 / 218 / 341 / 575) |
 | 2026-10-22 | crsuse2-m2m-231 | Serving, NT build, widths 1..16 (`SGLANG_AMD_MONO_LAGUNA_MAX_ROWS=16`, log `c231_mono_p1_1022/mono_nt16`) vs base | did NT move the crossover? | TPOT median base / mono: c6 9.81 / 8.89 (-9.4 %, was -6.2 %), c8 10.31 / 10.48 (+1.6 %, was +5.5 %), c16 15.78 / 17.51 (+11 %) → crossover still 6..8, default cap stays 6 |
+| 2026-10-22 | crsuse2-m2m-231 | Read ceiling (`/data/proxy_moe/tools/read_bw.py`, triton int32 sum, .cg) | what streaming can reach | 256 CTAs x 4 warps, 16 KB a CTA an iteration: 6.90 TB/s; 512 x 4: 6.91; finer grids 5.5-5.7. torch sum 5.26 |
+| 2026-10-22 | crsuse2-m2m-231 | S3 UG: `rocdl.sched_barrier(0)` after each quarter's MFMAs (found via a run-time branch around the MFMAs that changed codegen) | one scheduling region a quarter | S3 M4/8/16 155 / 268 / 503 → 157 / 272 / **455** us (UG 6.43 TB/s at M16; = aiter 452); correct (check_routed PASS). Same barrier in DOWN: no effect (removed). Commit daf6947. Fused launch (`check_layer`): 87.2 / 124.2 / 190.5 / 303.7 / 556.0 us/layer at M 1/2/4/8/16 (M16 worse than the standalone chain 510: seams S1 40 + S5 33 us at M16 in the marks) |
+| 2026-10-22 | crsuse2-m2m-231 | S3 UG probe: no prefetch at all (each quarter loaded right before use) | is in-flight depth the limiter? | UG M4/8/16 97.3 / 166.6 / 281.3 us vs 90.5 / 168 / 274 with prefetch → halving in-flight bytes costs 0-7 %: **not in-flight-bound**, so an LDS-staged stream (only adds in-flight bytes) is not expected to pay; not built |
 
 ### Notes
 - Whole-model recheck is NOT a usable check here: SGLang's own decode path differs from itself by 2.6-3.1e-2

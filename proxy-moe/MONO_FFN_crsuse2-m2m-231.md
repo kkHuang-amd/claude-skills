@@ -16,8 +16,9 @@ serving TPOT. The plugin serves it (`runner.py`, `spec.py`); eager check vs SGLa
 next layer's input (SGLang run-to-run 2.9e-3) after matching SGLang's SiluAndMul and fused add-RMSNorm.
 Serving A/B (graphs, CONC 1/4/16): TPOT -23.7 % / -2.5 % / +14.6 % (c16 worse: S3 at large M).
 Widths capped at 6 by default (CONC 8 / 16 now equal to base, CONC 1 -23.7 %).
-**Next:** S3 at M >= 4 (the only stage slower than today's path; bandwidth: UG 5.0, DOWN 5.45 TB/s vs aiter
-~5.8); then raise the cap and re-run the A/B. Logs: `/shared_nfs/kk/results/proxy_24l/c231_mono_p0_1022/`.
+**Next:** S3 UG weights through an LDS-staged stream (direct-to-LDS loads, more bytes in flight without
+VGPRs; UG 5.5 TB/s at M16 vs aiter ~6.0), then per-expert readiness instead of the UG→RQ→DOWN grid syncs;
+then raise the cap and re-run the A/B. Logs: `/shared_nfs/kk/results/proxy_24l/c231_mono_p0_1022/`.
 **Repro:** `source /data/proxy_moe/mono_env.sh; T=/data/proxy_moe/ext/sgl-amd-mono/test/kernels/laguna;
 torchrun --standalone --nproc_per_node=8 $T/check_seam.py; for c in router mxq shared routed; do
 HIP_VISIBLE_DEVICES=0 python3 $T/check_$c.py; done`
@@ -134,6 +135,7 @@ Activation precision must stay A4 (MXFP4) to match the proxy spec (MiniMax's mon
 | 2026-10-22 | crsuse2-m2m-231 | S3: UG prefetch depth 1 / 2 / 3 quarters (register queue) | more loads in flight | 2: 299 / 501 / 856 us, 3: 362 / 607 / 1060 (UG 2.0-2.6 TB/s) → register spill (≈60 VGPR a quarter a lane); reverted (`routed_gdepth.py`). Deeper prefetch needs an LDS-staged stream |
 | 2026-10-22 | crsuse2-m2m-231 | S3: UG task tail cost (skip bit 2) and DOWN BATCH 2 / 4 / 6 / 8 | where the rest goes | tails 4.8 / 12.4 / 15.3 us at M4/8/16 (~3 %); BATCH all within ±2 us (no effect, kept 4) |
 | 2026-10-22 | crsuse2-m2m-231 | Fused launch after NT (`check_layer.py`, TP8, 3 layers) | | bit-exact vs standalone; 87.4 / 130.6 / 199.9 / 316.1 / 544.0 us/layer at M 1/2/4/8/16 (was 89 / 141 / 218 / 341 / 575) |
+| 2026-10-22 | crsuse2-m2m-231 | Serving, NT build, widths 1..16 (`SGLANG_AMD_MONO_LAGUNA_MAX_ROWS=16`, log `c231_mono_p1_1022/mono_nt16`) vs base | did NT move the crossover? | TPOT median base / mono: c6 9.81 / 8.89 (-9.4 %, was -6.2 %), c8 10.31 / 10.48 (+1.6 %, was +5.5 %), c16 15.78 / 17.51 (+11 %) → crossover still 6..8, default cap stays 6 |
 
 ### Notes
 - Whole-model recheck is NOT a usable check here: SGLang's own decode path differs from itself by 2.6-3.1e-2

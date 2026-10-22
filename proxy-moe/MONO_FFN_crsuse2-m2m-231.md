@@ -46,7 +46,26 @@ Activation precision must stay A4 (MXFP4) to match the proxy spec (MiniMax's mon
 
 ## Design
 
-(to be filled from the API / template reads)
+### SGLang monokernel API (PR #44353; paths under `/data/proxy_moe/wt/sglang/python/sglang/srt/`)
+- `monokernels/spec.py`: `MONOKERNEL_API_VERSION = 1`; `MonoSpec(name, devices={"gfx950": DeviceLimits(widths,
+  tp_sizes, resident_blocks)}, features, requires=Requirements(dtypes, attention_backends, server_args,
+  hf_config, env), numerics=BITWISE|TOLERANCE, model_disable_reasons, build, api_version, optional
+  config_disable_reasons / load_tensor / tokens_per_request / unread_metadata)`; `register(backend,
+  architecture, path)`; lazy `find_spec` by HF architecture + ISA. Backend "amd" is the installed plugin's
+  (`/sgl-workspace/sgl-amd-mono` @e07665c); we add `LagunaForCausalLM` to its `SPECS` in our clone.
+- `runtime.py`: `_install_forward` replaces the WHOLE `LagunaForCausalLM.forward` for served shape keys
+  (DECODE / TARGET_VERIFY, rows = bs x tokens_per_request), calls `built.forward(Plan(key), input_ids,
+  positions, forward_batch, input_embeds=None, pp_proxy_tensors=None, ...)` and must return what the original
+  returns (logits processor output). Obligations: KV + aux writes for every row incl. padded rows; graph
+  capturable; warmup calls it eagerly too. Build runs after weight load, before KV sizing; gets (model,
+  hf_config, BuildContext(isa, widths, deadline_s <= 60, copies)); KV pools / attn backend fetched lazily in
+  forward. `handle_monokernel` aligns decode capture sizes to the spec widths (1..16 with
+  `--cuda-graph-max-bs-decode 16`). Ranks must decide identically; cross-rank waits need deadlines.
+- Plugin forward may call SGLang modules (reference does; our `_sp_forward` is a template). FFN-only needs an
+  unrolled attention (qkv → qk-norm → rope → `self.attn` writes KV → stop before `o_proj`), so o_proj can be
+  fused with the AR into the launch. Refuse `layers_to_capture`, speculative, DP-attn, PP, EP>1.
+- Env: `/data/proxy_moe/mono_env.sh` (new base + our clone first on PYTHONPATH; verified the clone's
+  `sgl_amd_mono` is the one imported).
 
 ## Results (append-only; node + date)
 

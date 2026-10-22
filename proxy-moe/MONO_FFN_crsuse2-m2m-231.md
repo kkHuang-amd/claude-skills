@@ -11,10 +11,9 @@ non-MoE ~200; mega_moe_tp not usable at small M).
 **Status:** all five stages exist as standalone launches and are correct (S1 seam, S5, S2 router, S4 shared
 bit-exact, S3 routed deterministic; optional shared-fused S3). S3 now 48 / 97 / 169 / 288 / 536 us at M
 1/2/4/8/16 vs aiter fused_moe ~77 / 90 / 152 / 258 / 452 (UG / DOWN at 5.0-6.5 TB/s; "rest" = U + Q + RQ +
-grid syncs + launch 13-27 us, to revisit inside the fused launch). S4 MFMA 16-22 us. Not started: S2
-performance, fusion into one launch, plugin wiring, serving.
-**Next:** S2 (TP-shard the router: 64 experts / rank + logit exchange), then fuse S1-S5 into one launch and
-wire it into the plugin; serving TPOT at CONC 1-16.
+grid syncs + launch 13-27 us, to revisit inside the fused launch). S4 MFMA 16-22 us. S2 TP-sharded
+(`router_tp.py`) 13.6-21.9 us at M 1-16. Not started: fusion into one launch, plugin wiring, serving.
+**Next:** fuse S1-S5 into one launch per layer and wire it into the plugin; serving TPOT at CONC 1-16.
 **Repro:** `source /data/proxy_moe/mono_env.sh; T=/data/proxy_moe/ext/sgl-amd-mono/test/kernels/laguna;
 torchrun --standalone --nproc_per_node=8 $T/check_seam.py; for c in router mxq shared routed; do
 HIP_VISIBLE_DEVICES=0 python3 $T/check_$c.py; done`
@@ -119,6 +118,7 @@ Activation precision must stay A4 (MXFP4) to match the proxy spec (MiniMax's mon
 | 2026-10-22 | crsuse2-m2m-231 | S3 large-M (`time_routed_phases.py`, `check_routed.py`) | (a) DOWN: 4 experts an iteration in straight-line code (loop-carried prefetches were drained at the loop edge, so prefetch depth did nothing): M1 DOWN 14.6 → 10.9 us, large M unchanged; (b) B-operand loads (x in UG, mid in DOWN) predicated by routing with out-of-range buffer offsets (zero, no traffic): at M16 ~15/16 of them were wasted L2 reads | full / UG / DOWN / rest: M1 47.8 / 21.4 (6.46 TB/s) / 12.3 / 13.6; M4 165.6 / 101.6 (5.19) / 56.0 (4.72) / 17.1; M8 291.3 / 179.4 (5.64) / 101.0 (5.02) / 19.4; M16 541.9 / 353.2 (5.04) / 163.7 (5.45) / 27.3. check: 48.2 / 97.4 / 168.8 / 287.8 / 536.4 us, rel_l2 vs fused_moe 5.4-5.7e-3 |
 
 | 2026-10-22 | crsuse2-m2m-231 | S3 items 1 + 2 tried (user): wave-level UG tasks (one wave = (expert, 32-channel block) over all K, no cross-wave reduction / CTA barrier) with the MID requant folded in (no RQ stage, one grid sync fewer); kept as `/data/proxy_moe/f2/mono/routed_waveug.py`, NOT committed | `time_routed_phases.py` M4 / M8 / M16: full 284.5 / 348.8 / 638.7 us (was 165.6 / 291.3 / 541.9): UG 225.3 (2.34 TB/s) / 243.5 (4.05) / 439.9 (4.01) vs 101.6 / 179.4 / 353.2 before; rest 12.5 / 14.7 / 23.3 (was 17.1 / 19.4 / 27.3: the folded requant saves ~4-5 us as expected); DOWN slightly faster. Static unroll of the wave's K loop: worse (UG 345.8 / 374.5 / 704.1, register pressure). Reverted to 50acaf9 | per-wave load → wait → MFMA is serial and 2 waves / SIMD cannot hide it; at M4 only ~1000 tasks for 2048 waves (half idle, a busy wave streams 512 KB alone at ~2.3 GB/s) |
+| 2026-10-22 | crsuse2-m2m-231 | S2 TP-sharded router (`check_router_tp.py`, torchrun TP8, log `c231_mono_p0_1022/s2_router_tp_check.log`) | `laguna/gfx950/router_tp.py`: rank r owns experts 64r..64r+63 (4 MiB fp32 instead of 32 MiB); CTA = (local expert, K quarter), 8 waves x 512 K; quarter partials via scratch mailbox, summed in order by the quarter-0 CTA and pushed to every rank (wave w -> rank w); every rank runs the same top-16 | expert ids identical (order too) for all 4 trials x M at M 1/2/4/8/16; weights rel_l2 <= 1.1e-7; all 8 ranks agree; graph stable; 13.6 / 14.1 / 15.0 / 16.7 / 21.9 us (was 14.4 / 15.8 / 18.8 / 36.6 / 115.3) → M16 5.3x; small M is launch + one cross-GPU hop, which the fused launch hides |
 
 ### Notes
 - Whole-model recheck is NOT a usable check here: SGLang's own decode path differs from itself by 2.6-3.1e-2
@@ -138,3 +138,5 @@ Activation precision must stay A4 (MXFP4) to match the proxy spec (MiniMax's mon
   failure and stops at the first wait (fault at 0x0); bump only word 0 (`epoch[:1].add_(1)` /
   `epoch[0] += 1`). A stream fetched before `torch.cuda.graph` capture is NOT the capture stream: the
   kernels then run outside the graph and the "graph time" is just the epoch bump (fetch the stream inside).
+- `load_ptr64` (peer table) is wave-uniform: per-lane peer indices silently all write lane 0's peer and the
+  readers time out (fault at 0x0). Map one wave per peer.

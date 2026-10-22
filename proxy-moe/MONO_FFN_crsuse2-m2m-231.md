@@ -20,8 +20,10 @@ twice (contiguous; round-robin + tail split), correct, but ≤ 5 us best case / 
 **Next (pick in order, one variable each, record every run):**
 1. TP4 mono DONE (`SGLANG_AMD_MONO_LAGUNA_TP=4`, plugin @31246a4 pushed to `kk`): TPOT -14.5 / -6.1 / -2.8 / -0.5 %
    at c1/4/8/16 (1024/256). TP4 split: S3 is 89-90 % at M8-16; DOWN 5.2-5.8 TB/s is neither in-flight- nor
-   expert-order-bound (BATCH 1-4, rotated start: null). Next: weights-only DOWN probe (same addresses, no
-   MID / MFMA / route weight) → if it reaches ~6.9 TB/s the loss is the per-expert chain, else the access pattern.
+   expert-order-bound (BATCH 1-4, rotated start: null). DOWN probes: the MID loads cost 15-30 us (W2-only DOWN
+   6.3-6.5 TB/s at TP4); L2-cached MID: no. Next: stage each batch's MID in LDS, fetched by waves 0-1 only (the
+   other waves read the same MID today); issue the MID loads before the batch's W2 loads so the LDS store's
+   vmcnt wait does not drain the weights. Expected ≈ probe 5: TP4 M8 -18 us, M16 -14 us of DOWN.
 2. Prefill SP (`SGLANG_OPT_LAGUNA_PREFILL_SP=1`) together with mono: orthogonal in theory (prefill vs decode
    graphs), unverified → check mode + one serving point.
 3. S3 DOWN 5.0-5.6 TB/s at M4-16 (~20 us at M8 to the 6.9 ceiling): measure its in-flight sensitivity first
@@ -177,6 +179,8 @@ Activation precision must stay A4 (MXFP4) to match the proxy spec (MiniMax's mon
 | 2026-10-22 | crsuse2-m2m-231 | TP4 stage split (`time_layer_stages.py`, 4 GPUs, log `c231_mono_tp4_1022/stages.log`; `time_routed_phases.py`, `phases.log`, TB/s now scaled by INTER) | where TP4 goes | layer M 1/4/8/16: 123 / 319 / 527 / 865 us, S3+S4down 83 / 266 / 468 / 778 (67 / 83 / 89 / 90 %), S1 11-29, S5 7-24, router + syncs ~25. S3 alone: UG 5.5 / 5.9 / 6.2 / 6.2 TB/s, DOWN 5.3 / 5.2 / 5.6 / 5.8 TB/s → at M8 UG ~35 us and DOWN ~33 us short of 6.9 TB/s |
 | 2026-10-22 | crsuse2-m2m-231 | TP4 DOWN BATCH 1 / 2 / 3 / 4 (`LAGUNA_DN_BATCH`, 2 runs each, logs `dnb*`) | in-flight sensitivity of DOWN | full S3 M8: 505-508 / 511-513 / 510-511 / 506 us, DOWN 176-180 / 182-185 / 181-183 / 178-179 → no effect, halving the in-flight bytes (BATCH 1) costs nothing: DOWN is not in-flight-bound. Default stays 2 |
 | 2026-10-22 | crsuse2-m2m-231 | TP4 DOWN rotated start (probe: CTA b walks the union from entry b % nu, so CTAs read different experts at once; `check_routed` PASS; logs `dnrot*`) | is "all CTAs on one expert's W2" the DOWN loss? | DOWN M8 184.5 / 183.0 → 186.0 / 184.7, M16 317.4 / 314.0 → 321.8 / 321.9 us → no (slightly worse at M16); reverted. Open: what DOWN waits on — next direct probe: a weights-only DOWN (same addresses, no MID / MFMA) to split access pattern from the per-expert dependency chain |
+| 2026-10-22 | crsuse2-m2m-231 | DOWN probes (copy `/data/proxy_moe/f2/mono/routed_down_probes.py`, `LAGUNA_DN_WONLY`, wrong output, 2 runs each, logs `c231_mono_tp4_1022/wonly_*`, `wlvl*`, `wl5_*`): 1 = W2 + scales only (xor-consumed), then one thing added back: 2 + MID loads, 3 + MFMA (B const), 4 + route-weight load; 5 = full DOWN with MID traffic only for waves 0-1 (others OOB: same instructions, no traffic) | what DOWN loses to beside the weights | TP4 DOWN us M4/8/16: full 98-101 / 183-186 / 314-319; 1: 82-84 / 154-158 / 286-290 (6.3-6.5 TB/s); 2: 93-94 / 171-172 / 333-336; 3: 85 / 155-157 / 287-291; 4: 83-84 / 157 / 286-289; 5: 90-92 / 164-166 / 302-304. TP8 full vs 1: M8 95-97 vs 82-83, M16 156-157 vs 142-143 → the MID loads are the cost (MFMA and the route weight ≈ 0); most of it is their traffic / latency (5 recovers ~2/3 at M8, ~1/2 at M16), the rest instruction count. Waves w, w+2, w+4, w+6 load identical MID |
+| 2026-10-22 | crsuse2-m2m-231 | DOWN MID read L2-cached (`LAGUNA_DN_MIDCACHE`: agent-scope acquire after the rf sync, MID / MS loads policy 0 instead of SC1; `check_routed` PASS TP4 + TP8) | is MID bypassing the XCD L2 the cost? | DOWN unchanged (TP4 M8 183-185 vs 182-183; TP8 92 vs 96), but the full S3 +10-14 us (the acquire / L2 invalidate costs that alone, also with DOWN skipped) → worse; L2 hit rate not measured. Reverted |
 
 ### Notes
 - Whole-model recheck is NOT a usable check here: SGLang's own decode path differs from itself by 2.6-3.1e-2

@@ -21,9 +21,9 @@ twice (contiguous; round-robin + tail split), correct, but ≤ 5 us best case / 
 1. TP4 mono DONE (`SGLANG_AMD_MONO_LAGUNA_TP=4`, plugin @31246a4 pushed to `kk`): TPOT -14.5 / -6.1 / -2.8 / -0.5 %
    at c1/4/8/16 (1024/256). TP4 split: S3 is 89-90 % at M8-16; DOWN 5.2-5.8 TB/s is neither in-flight- nor
    expert-order-bound (BATCH 1-4, rotated start: null). DOWN probes: the MID loads cost 15-30 us (W2-only DOWN
-   6.3-6.5 TB/s at TP4); L2-cached MID: no. Next: stage each batch's MID in LDS, fetched by waves 0-1 only (the
-   other waves read the same MID today); issue the MID loads before the batch's W2 loads so the LDS store's
-   vmcnt wait does not drain the weights. Expected ≈ probe 5: TP4 M8 -18 us, M16 -14 us of DOWN.
+   6.3-6.5 TB/s at TP4); L2-cached MID: no; MID staged in LDS (3 variants): slower. Next for DOWN: read the
+   LDS build's ISA stats (VGPR, scratch spills, waitcnt placement) before another variant; or cut the OOB MID
+   load instructions of waves 2-7 (probe 5's residual ~10 us) without LDS.
 2. Prefill SP (`SGLANG_OPT_LAGUNA_PREFILL_SP=1`) together with mono: orthogonal in theory (prefill vs decode
    graphs), unverified → check mode + one serving point.
 3. S3 DOWN 5.0-5.6 TB/s at M4-16 (~20 us at M8 to the 6.9 ceiling): measure its in-flight sensitivity first
@@ -34,7 +34,7 @@ twice (contiguous; round-robin + tail split), correct, but ≤ 5 us best case / 
 6. Accuracy beyond the per-layer check needs real Laguna weights (user decision); then an upstream PR.
 Do NOT retry (recorded as failed): UG tasks-per-iteration 2/4, UG prefetch depth 2/3 (spills), LDS-staged weight
 stream (UG not in-flight-bound), seam 2 pairs a lane, DOWN BATCH 2/6/8, per-expert flags polled by DOWN,
-DOWN first-batch W2 before the grid sync, UG stream-K (contiguous deal: -5 % at full rounds; tail-only split:
+DOWN first-batch W2 before the grid sync, DOWN MID via L2-cached loads or LDS staging (as built), UG stream-K (contiguous deal: -5 % at full rounds; tail-only split:
 ~10 us fixed latency a split round). Code of both stream-K variants: `/data/proxy_moe/f2/mono/routed_streamk_*.py`.
 Logs: `/shared_nfs/kk/results/proxy_24l/c231_mono_p0_1022/` (kernels), `.../c231_mono_p1_1022/` (serving).
 **Repro:** `source /data/proxy_moe/mono_env.sh; T=/data/proxy_moe/ext/sgl-amd-mono/test/kernels/laguna`;
@@ -181,6 +181,7 @@ Activation precision must stay A4 (MXFP4) to match the proxy spec (MiniMax's mon
 | 2026-10-22 | crsuse2-m2m-231 | TP4 DOWN rotated start (probe: CTA b walks the union from entry b % nu, so CTAs read different experts at once; `check_routed` PASS; logs `dnrot*`) | is "all CTAs on one expert's W2" the DOWN loss? | DOWN M8 184.5 / 183.0 → 186.0 / 184.7, M16 317.4 / 314.0 → 321.8 / 321.9 us → no (slightly worse at M16); reverted. Open: what DOWN waits on — next direct probe: a weights-only DOWN (same addresses, no MID / MFMA) to split access pattern from the per-expert dependency chain |
 | 2026-10-22 | crsuse2-m2m-231 | DOWN probes (copy `/data/proxy_moe/f2/mono/routed_down_probes.py`, `LAGUNA_DN_WONLY`, wrong output, 2 runs each, logs `c231_mono_tp4_1022/wonly_*`, `wlvl*`, `wl5_*`): 1 = W2 + scales only (xor-consumed), then one thing added back: 2 + MID loads, 3 + MFMA (B const), 4 + route-weight load; 5 = full DOWN with MID traffic only for waves 0-1 (others OOB: same instructions, no traffic) | what DOWN loses to beside the weights | TP4 DOWN us M4/8/16: full 98-101 / 183-186 / 314-319; 1: 82-84 / 154-158 / 286-290 (6.3-6.5 TB/s); 2: 93-94 / 171-172 / 333-336; 3: 85 / 155-157 / 287-291; 4: 83-84 / 157 / 286-289; 5: 90-92 / 164-166 / 302-304. TP8 full vs 1: M8 95-97 vs 82-83, M16 156-157 vs 142-143 → the MID loads are the cost (MFMA and the route weight ≈ 0); most of it is their traffic / latency (5 recovers ~2/3 at M8, ~1/2 at M16), the rest instruction count. Waves w, w+2, w+4, w+6 load identical MID |
 | 2026-10-22 | crsuse2-m2m-231 | DOWN MID read L2-cached (`LAGUNA_DN_MIDCACHE`: agent-scope acquire after the rf sync, MID / MS loads policy 0 instead of SC1; `check_routed` PASS TP4 + TP8) | is MID bypassing the XCD L2 the cost? | DOWN unchanged (TP4 M8 183-185 vs 182-183; TP8 92 vs 96), but the full S3 +10-14 us (the acquire / L2 invalidate costs that alone, also with DOWN skipped) → worse; L2 hit rate not measured. Reverted |
+| 2026-10-22 | crsuse2-m2m-231 | DOWN MID staged in LDS (`LAGUNA_DN_LDS`, copy `/data/proxy_moe/f2/mono/routed_dn_lds.py`; 40 KB LDS double buffer [buf][slot][K half][lane]; waves 0-1 load MID, others OOB; `check_routed` PASS TP4 + TP8 every variant), 2 runs each, logs `c231_mono_tp4_1022/dnlds*` | reach probe 5 (MID traffic from 2 waves) | DOWN us M4/8/16 off → on. v1 (load, store, barrier, read in the same batch): TP4 96-98 / 181-182 / 315-319 → 104-107 / 193-196 / 337; TP8 53 / 92-94 / 154-158 → 56 / 97-102 / 171-172. v2 (pipelined: next batch's MID loaded before this batch's W2, stored after its math): TP4 99 / 181-183 / 313-314 → 101-103 / 184-188 / 332-333; TP8 54-55 / 92-97 / 156-159 → 58-59 / 103-109 / 177-181. v2 without the barrier (racy probe): TP4 M8 189 → 184, M16 334 → 337-339 (barrier is not it). v3 = v2 with b128 LDS ops: TP4 97-100 / 182-183 / 316-317 → 100 / 190 / 331-333; TP8 54-55 / 94 / 156-158 → 61-62 / 106-110 / 177-179 → every variant slower; not adopted. Unmeasured: VGPR count / spills of the LDS build (the next MID lives across the batch's math), LDS bank conflicts |
 
 ### Notes
 - Whole-model recheck is NOT a usable check here: SGLang's own decode path differs from itself by 2.6-3.1e-2

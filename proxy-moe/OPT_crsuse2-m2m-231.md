@@ -46,6 +46,8 @@ numbering.
 7. Optional: MI355X W4A8 routed experts for full iso-precision vs GB300; bench `--flush-cache` question
    (warmup hits the prefix cache; changing it breaks comparability with the GB300 sweep).
 8. Parked (small): D quantize-once kernel (~1% TPOT), B moe1 W1 read layout (<2%).
+9. **Mono decode kernel (new, analysis done)**: section "Mono feasibility": ceiling ~2.4x per layer at
+   bs1-2, ~-28% at bs16; next = clean bs2 kernel trace + persistent-MoE microbench (M 1-8) before any plugin.
 
 **Overnight summary (2026-10-21, autonomous, crsuse2-m2m-231; nothing pushed except docs):**
 - F2 prefill SP (FFN-side RS bf16 + fp4 AG, attention is bf16): 70k c8 TTT/GPU +5.3% (hip quant for
@@ -684,6 +686,39 @@ State: SGLang changes uncommitted in `/data/proxy_moe/wt/sglang` (patch
 
   vs today's default (chunk 8192, no rows) at c8: TTT 3,574.6 → 3,778.5 (+5.7%) but TTFT 8,742 → 9,235.
   Chunk per ISL stays a throughput-vs-TTFT trade; needs repeats before any default change.
+
+### Mono (monokernel) feasibility for proxy MoE decode (2026-10-22, crsuse2-m2m-231) — analysis only
+Sources: `dsv41/MONO_KERNEL_EVAL.md`, `dsv41/MONO_KERNEL_mi355-4.md` (P1 / P2a / P0.3), SGLang PR #44353
+(MERGED 2026-10-15, `--monokernel-backend`, framework in `python/sglang/srt/monokernels/`; our SGLang
+branch already has it), `sgl-project/sgl-amd-mono` (plugin: DSV4.1-Flash, GLM-5.3(-Flash), MiniMax-M3
+MXFP4 — closest template: one launch per layer, a8w4 MoE on aiter's shuffled layout, in-kernel AR by
+peer push, `wide_moe` grouping by expert from `WIDE_FROM` tokens, MAX_TOKENS 16, TP4).
+Measured here (new heads): bs16 decode trace = ~750 kernels/step but GPU idle only 0.2-2% (graph replay
+back-to-back; DSV4.1's launch-gap mechanism is NOT our cost). Per layer, op-level (`c231_mono_ops_1022/`,
+1 GPU MoE random routing, 8-GPU AR) + serving TPOT (c2 6.23 ms → 260 us/layer; bs16 15.8 ms → 658):
+
+| per layer | bs1 | bs2 | bs4 | bs8 | bs16 |
+|---|---|---|---|---|---|
+| routed MoE us (achieved TB/s on unique bytes) | 76.7 (2.79) | 89.9 (4.46) | 151.7 (5.55) | 258.0 (6.06) | 452.0 (6.09) |
+| AR wall us (x2 per layer) | — | 26.2 | 23.9 | 25.6 | 17.8 |
+
+- bs2: 260 us = MoE 90 + 2 AR ~45 + rest ~125 (bf16 qkv/o_proj, fp32 router, shared expert, attention,
+  norms, quant, elementwise). Floor if everything streams weights at ~6 TB/s and AR is in-kernel: MoE
+  ~67 + dense ~31 (qkv 75.5 MB + o_proj 67 MB bf16 + router 33.5 MB fp32 + shared 12.6 MB) + AR ~10
+  ≈ 110 us → ceiling ~2.4x per layer at bs1-2 (hypothesis: floor = bytes / assumed BW, not measured).
+- bs16: 658 vs floor ~475 (MoE already at 6.09 TB/s; expert union 206) → ceiling ~-28%, and the MoE part
+  is the hard bit (DSV4.1 FFN-only mono was break-even at M=48 / union 64-96).
+- Expectation by analogy (DSV4.1 whole-layer mono: TPOT -20..-23% at c1-c2, -4..-8% at c4-c8): a
+  proxy-MoE mono would pay at CONC 1-8 (the sweep's interactivity / low-CONC points), little at >= 16.
+- Constraints: TP8 peer AR (GLM-5.3 plugin does TP8); attention projections must stay bf16 (MiniMax
+  converts them to FP8 — not allowed by the proxy spec); top-16 of 512 → large expert unions from bs4;
+  no speculative decoding here (rows = batch). Cost: a new sgl-amd-mono plugin (MiniMax-M3's is ~240 KB
+  of FlyDSL/Python) — weeks, not days.
+- Cheap next steps before committing: (1) decode trace at bs2 without prefill contamination (the c2
+  by-stage capture mixed prefill kernels) or rocprofv3 kernel trace to pin the ~125 us "rest";
+  (2) P0.3-style microbench: MoE alone as one persistent launch over the expert union at M=1-8 vs
+  aiter fused_moe (bs1 MoE runs at only 2.79 TB/s → a persistent kernel spreading 16 experts' tiles over
+  256 CUs is the first measurable win); (3) count what an FFN-only launch would replace per layer.
 
 **Item 2 plan (CONC=1024 decode ITL jump), measurement only, runs after F's M0/M1:** one run
 1024/1024 CONC 1024 (TP8 EP1) with the server's decode-batch log lines kept; compare (a) server

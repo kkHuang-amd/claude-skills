@@ -9,7 +9,7 @@ cross-tray NCCL over MNNVL).
 ## CONTINUE HERE
 
 **Status (2026-10-21 11:15 UTC):** FULL SWEEP DONE, 25/25 points, report.py no warnings.
-Tables: `/SFS-aGqda6ct/models/kk/results/proxy_24l/fixed_seq_len_gb300_2node/RESULTS.md`.
+Tables (all 25 points + per-point MI355X comparison): `RESULTS.md` here (raw: `/shared_nfs/kk/results/proxy_24l/fixed_seq_len_gb300_2node/`).
 Sweep 06:58-11:15 UTC (4h17m). Servers torn down; `_2node` containers left running (idle).
 **Next:** none queued (tp8ep8 deliberately not run; ask user).
 **Repro (on tray05 HOST, not in a container):**
@@ -104,7 +104,7 @@ after graph capture (1 tray: 21.7 GB). Package `smoke_test.py`: passed. Mini swe
 
 ## Results
 
-Append-only; every row carries node + date. Full tables (E2EL, interactivity, P90) in RESULTS.md.
+Append-only; every row carries node + date. Full tables (E2EL, interactivity, P90) in `RESULTS.md` (this directory).
 
 | Date | Nodes | Run | Shape | Peak TTT/GPU (CONC) | c2 TTFT / ITL med (ms) | Notes |
 |---|---|---|---|---|---|---|

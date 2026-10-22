@@ -58,9 +58,19 @@ numbering.
 - PUSHED 2026-10-22 (user request): SGLang `HaiShaw/sglang` `feat/proxy-model-1020` effe332427..ed3d8b0089
   (prefill SP, debug `_SP_CHECK` stripped; prefill logprobs bit-identical to the pre-strip run; debug
   version kept as `/data/proxy_moe/f2/p1_sglang_with_spcheck_debug.patch`); AITER `kkHuang-amd/aiter`
-  `feat/proxy-model-1020` fd537aaa4..605ade939 (EP1/TP8 rows M 256/512/1024/16384/32768 in
+  `feat/proxy-model-1020` fd537aaa4..605ade939 (now e9b0b5979 after the upstream merge) (EP1/TP8 rows M 256/512/1024/16384/32768 in
   `model_configs/proxymoe_fp4_tuned_fmoe.csv`; verified active without `AITER_CONFIG_FMOE`: M512 1,174.6
   / M1024 1,399.9 us). New base = these two heads. Commits authored as the branch's existing author.
+- AITER branch merged with upstream ROCm/aiter main b20f31339 (2026-10-22, merge e9b0b5979, pushed as
+  fast-forward 605ade939..e9b0b5979; no rebase / force-push). Only conflict:
+  `aiter/ops/flydsl/kernels/mixed_moe_gemm_2stage_common.py` vs upstream #6380 (kernel API cleanup) →
+  took upstream, re-applied the stage2 b_nt fix (upstream still had `del b_nt`); dropped the default-off
+  D2 switches (`AITER_D2_STREAM_K`, `AITER_D2_DEFER_TID`). FlyDSL requirement unchanged (0.4.0).
+  Checks (`/data/proxy_moe/f2/merge/`): EP1/TP8 MoE prefill M 8192/16384/32768 bit-exact vs pre-merge;
+  decode M 256/512/1024 differ 1.5-2.3e-3 = same as post-merge run-to-run (atomic stage2); decode moe2
+  kernel name carries `_bnt2`; fused-quant check unchanged; serving 1024/256 c16 SP off 938.3 / 337.7 /
+  15.77 (pre-merge 938.2 / 337.0 / 15.77), SP on 942.3 / 336.0 / 15.71
+  (`c231_aitermerge_ep1_sp{off,on}_1022`, SP active 8 ranks).
 - USER DECISIONS: (a) DONE 2026-10-22: keep both, switch `..._SP_SHARED_QUANT=triton|hip` (default triton); (b) DONE (pushed);
   (c) DONE (rows pushed);
   (d) chunk-per-ISL default. Remaining Next: 4 iso data (FP AR tp4ep1 sweep), 5 upstream PRs.
@@ -966,6 +976,8 @@ w3, bnt0.
 | 2026-10-22 | crsuse2-m2m-231 | c231_F2_P1_check_1021 (sp, post-strip) | SP hip, code after debug strip | — | — | — | prefill logprobs bit-identical to pre-strip; pushed sglang ed3d8b0089, aiter 605ade939 |
 | 2026-10-22 | crsuse2-m2m-231 | c231_newheads_ep1_spoff_1022 | NEW HEADS (sglang ed3d8b0089, aiter 605ade939) EP1 + AR fusion + T4, SP off | 938.2 | 337.0 | 15.77 | +19.0% vs pristine EP8 |
 | 2026-10-22 | crsuse2-m2m-231 | c231_newheads_ep1_spon_1022 | same + SGLANG_OPT_LAGUNA_PREFILL_SP=1 (triton) | 941.1 | 345.5 | 15.69 | SP within noise on this bench |
+| 2026-10-22 | crsuse2-m2m-231 | c231_aitermerge_ep1_spoff_1022 | AITER merged w/ upstream main (e9b0b5979), SP off | 938.3 | 337.7 | 15.77 | = pre-merge |
+| 2026-10-22 | crsuse2-m2m-231 | c231_aitermerge_ep1_spon_1022 | same, SP on (triton) | 942.3 | 336.0 | 15.71 | = pre-merge |
 | 2026-10-21 | crsuse2-m2m-231 | c231_F2_P1_ab_1021/off | 70000/300 c8, tp8ep1 sweep flags | TTT/GPU 3574.6 | 8742 | ITL 10.75 | baseline |
 | 2026-10-21 | crsuse2-m2m-231 | c231_F2_P1_ab_1021/on | same + SGLANG_OPT_LAGUNA_PREFILL_SP=1 | TTT/GPU 3765.2 | 8210 | ITL 10.75 | +5.3% / -6.1% |
 | 2026-10-21 | crsuse2-m2m-231 | c231_F2_P1_ab_1021/off | 8192/1024 c64, tp8ep1 | TTT/GPU 1624.8 | 7828 | ITL 29.40 | baseline |

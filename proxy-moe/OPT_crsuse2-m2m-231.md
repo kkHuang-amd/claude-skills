@@ -21,9 +21,15 @@ numbering.
 - DONE: F/T3 side-stream overlap NO-GO; F2 prefill SP pushed (sglang ed3d8b0089, switch
   `SGLANG_OPT_LAGUNA_PREFILL_SP=1`, `..._SP_SHARED_QUANT=triton|hip`); item 2 CONC-1024 ITL fixed by MoE
   rows pushed (aiter 605ade939); item 4 iso-AR data (QR unset tp4ep1 sweep, GB300 0.891 → 0.854).
-1. **Re-baseline on the new heads**: (a) 1024/256 c16 repro with SP off / on (the +18.4% headline
-   predates SP and the rows); (b) full fixed_seq_len re-sweep TP8 + TP4 (RESULTS.md and the GB300
-   ratios predate SP / rows). Measurement only.
+1. **Re-baseline on the new heads**: (a) DONE 2026-10-22 (below); (b) full fixed_seq_len re-sweep
+   TP8 + TP4 (RESULTS.md and the GB300 ratios predate SP / rows) — run when the user goes offline.
+   (a) 1024/256 c16 64 req, `/data/proxy_moe/f2/rebase_1a.sh`, heads sglang ed3d8b0089 + aiter
+   605ade939, EP1 + AR fusion + bf16x3 router, vs pristine EP8 defaults 788.6 / 324.1 / 19.05:
+   SP off 938.2 (+19.0%) / TTFT 337.0 (+4.0%) / TPOT 15.77 (-17.2%) (`c231_newheads_ep1_spoff_1022`);
+   SP on (triton) 941.1 (+19.3%) / 345.5 (+6.6%) / 15.69 (-17.6%) (`c231_newheads_ep1_spon_1022`,
+   SP active on 8 ranks, 10 of 19 prefill batches eligible). One run each: on this short-prompt
+   bench SP is within noise (TTFT +8.5 ms vs the ~5 ms spread seen across old-base runs); its gain
+   is at long prompts (70k).
 2. **G — chunk per ISL** (user decision pending): chunk 32768 (+ M16k/32k rows) = 70k TTT +4-6% but
    TTFT worse at low CONC (scheduling effect, mechanism unknown) and c8 TTFT +10.9% in one run →
    repeat c8, find the mechanism (per-request timeline), then decide.
@@ -958,6 +964,8 @@ w3, bnt0.
 | 2026-10-21 | crsuse2-m2m-231 | c231_F2_M2_1021 | op-level RS bf16 + AG fp4 vs AR, [8192,16384] | — | — | — | RS 653 + AG 158 = 811 us vs QR INT8 AR 1034 us |
 | 2026-10-22 | crsuse2-m2m-231 | fixed_seq_len_qr_unset/tp4ep1 | tp4ep1 sweep, ROCM_QUICK_REDUCE_QUANTIZATION unset (25 points) | — | — | — | TTT/GPU geomean x0.958 vs INT8; vs GB300 0.854 |
 | 2026-10-22 | crsuse2-m2m-231 | c231_F2_P1_check_1021 (sp, post-strip) | SP hip, code after debug strip | — | — | — | prefill logprobs bit-identical to pre-strip; pushed sglang ed3d8b0089, aiter 605ade939 |
+| 2026-10-22 | crsuse2-m2m-231 | c231_newheads_ep1_spoff_1022 | NEW HEADS (sglang ed3d8b0089, aiter 605ade939) EP1 + AR fusion + T4, SP off | 938.2 | 337.0 | 15.77 | +19.0% vs pristine EP8 |
+| 2026-10-22 | crsuse2-m2m-231 | c231_newheads_ep1_spon_1022 | same + SGLANG_OPT_LAGUNA_PREFILL_SP=1 (triton) | 941.1 | 345.5 | 15.69 | SP within noise on this bench |
 | 2026-10-21 | crsuse2-m2m-231 | c231_F2_P1_ab_1021/off | 70000/300 c8, tp8ep1 sweep flags | TTT/GPU 3574.6 | 8742 | ITL 10.75 | baseline |
 | 2026-10-21 | crsuse2-m2m-231 | c231_F2_P1_ab_1021/on | same + SGLANG_OPT_LAGUNA_PREFILL_SP=1 | TTT/GPU 3765.2 | 8210 | ITL 10.75 | +5.3% / -6.1% |
 | 2026-10-21 | crsuse2-m2m-231 | c231_F2_P1_ab_1021/off | 8192/1024 c64, tp8ep1 | TTT/GPU 1624.8 | 7828 | ITL 29.40 | baseline |

@@ -21,13 +21,14 @@ not in-flight-bound: no-prefetch probe costs 0-7 %).
 Seams two-shot from M2 (M16 seam 32.9 → 20.6 us; fused M16 556 → 468 us/layer).
 RQ folded into UG (one grid sync left in S3). Serving now wins at every CONC (TPOT -26 / -12 / -15 / -6 / -3 % at
 CONC 1 / 4 / 6 / 8 / 16), check 2.8-3.3e-3 vs SGLang; every width served by default.
-**Next:** decide on pushing the plugin branch / upstream (ask the user); remaining ideas: S3 at M8-16 vs aiter,
+**Next:** upstream PR only when the user asks; remaining ideas: S3 at M8-16 vs aiter,
 seam latency at M1, larger ISL/OSL serving points. Logs: `/shared_nfs/kk/results/proxy_24l/c231_mono_p0_1022/`.
 **Repro:** `source /data/proxy_moe/mono_env.sh; T=/data/proxy_moe/ext/sgl-amd-mono/test/kernels/laguna;
 torchrun --standalone --nproc_per_node=8 $T/check_seam.py; for c in router mxq shared routed; do
 HIP_VISIBLE_DEVICES=0 python3 $T/check_$c.py; done`
-**Code:** plugin in `/data/proxy_moe/ext/sgl-amd-mono` branch `feat/laguna-ffn-mono` (local only; clone of
-github.com/sgl-project/sgl-amd-mono @06b8f56). SGLang = `/data/proxy_moe/wt/sglang` (ed3d8b0089), AITER =
+**Code:** plugin in `/data/proxy_moe/ext/sgl-amd-mono` branch `feat/laguna-ffn-mono` (clone of
+github.com/sgl-project/sgl-amd-mono @06b8f56), pushed to github.com/kkHuang-amd/sgl-amd-mono
+`feat/laguna-ffn-mono` @07f2583 (2026-10-22; remote `kk`). No upstream PR yet. SGLang = `/data/proxy_moe/wt/sglang` (ed3d8b0089), AITER =
 `/data/proxy_moe/wt/aiter` (e9b0b5979). Ask the user before pushing anything.
 **Rules:** one variable per experiment; every run recorded with node + date; kernels measured under CUDA graph;
 per-stage numerics checked against SGLang's own ops (not against another framework).

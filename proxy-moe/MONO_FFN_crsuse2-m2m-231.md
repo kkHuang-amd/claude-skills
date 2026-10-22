@@ -11,9 +11,10 @@ non-MoE ~200; mega_moe_tp not usable at small M).
 **Status:** all five stages exist as standalone launches and are correct (S1 seam, S5, S2 router, S4 shared
 bit-exact, S3 routed deterministic). S3 optimised (2026-10-22): MFMA version 48 / 91 / 170 / 327 / 751 us at
 M 1/2/4/8/16 vs aiter fused_moe ~77 / 90 / 152 / 258 / 452 (faster at M=1, par at M=2, slower from M=4).
-Not started: S4 / S2 performance, fusion into one launch, plugin wiring, serving.
-**Next:** S3 at M >= 4 (bandwidth 3.5-4.5 TB/s vs aiter ~5.7: per-task barrier + tail, RQ grid sync,
-DOWN prefetch) or move on to S4 (MFMA the same way) and S2 (TP-shard the router), then fuse.
+S4 MFMA (2026-10-22): 15.8 / 17.5 / 18.8 / 20.6 / 22.2 us, still bit-exact. Not started: S2 performance,
+fusion into one launch, plugin wiring, serving.
+**Next (user, 2026-10-22):** S3 at large M (M >= 4: 3.5-4.5 TB/s vs aiter ~5.7; per-task barrier + tail, RQ
+grid sync, DOWN prefetch), then S2 (TP-shard the router), fuse, plugin, serving.
 **Repro:** `source /data/proxy_moe/mono_env.sh; T=/data/proxy_moe/ext/sgl-amd-mono/test/kernels/laguna;
 torchrun --standalone --nproc_per_node=8 $T/check_seam.py; for c in router mxq shared routed; do
 HIP_VISIBLE_DEVICES=0 python3 $T/check_$c.py; done`
@@ -109,6 +110,8 @@ Activation precision must stay A4 (MXFP4) to match the proxy spec (MiniMax's mon
 | 2026-10-22 | crsuse2-m2m-231 | S3 routed experts (`check_routed.py`, 1 GPU, `ep_moe_check.build` weights = quark layout) | `laguna/gfx950/routed.py`: union in LDS, Q (hip rule), UG per union expert (dynamic loop), RQ, DOWN (route-weighted fp32 sum per CTA rows, no atomics) | rel_l2 vs aiter fused_moe 5.4-5.7e-3 at M 1-16, fused_moe vs itself 2.0-5.6e-3 (atomic stage 2); deterministic, graph stable; 178.7 / 297.4 / 653.4 / 1919 / 5641 us vs fused_moe ~77 / 90 / 152 / 258 / 452 us |
 
 | 2026-10-22 | crsuse2-m2m-231 | S3 optimisation (`check_routed.py`, 1 GPU; logs `/data/proxy_moe/f2/mono/s3_*.log`) | (1) routed-only DOWN, 16 B loads, prefetch: 176 / 276 / 509 / 1495 / 4015 us; (2) whole (16,16) shuffle-group loads (the 4-row tasks used 1/8 of each 256 B line), parallel flag polls (RQ 25 → 2 us): 74 / 168 / 319 / 682 / 1612; (3) batched x loads per token: 66 / 137 / 289 / 629 / 1199; (4) all weight loads up front: worse (VGPR pressure), reverted; (6) quarter double-buffering: 68 / 153 / 297 / 564 / 1108; (7) scaled fp4 x fp4 MFMA 16x16x128 in UG and DOWN (A = 16 weight rows of a shuffle group, B = 16 token columns, zero where not routed): **48 / 91 / 170 / 327 / 751 us** | rel_l2 vs fused_moe 5.4-5.7e-3 throughout (fused_moe vs itself 1.9-5.6e-3); deterministic; graph stable. rocprofv3: VGPR 128 + AGPR 128, scratch 0 at M<=2, 1076 B at M=16 (scalar version) |
+
+| 2026-10-22 | crsuse2-m2m-231 | S4 MFMA (`check_shared.py`, log `c231_mono_p0_1022/s4_shared_mfma_check.log`) | GU: CTA = (16-channel block, 1/8 of K), scaled fp4 x fp4 MFMA (A = 16 row-major quark rows, B = 16 token columns), slice partials in fp32 → GR sums slices in order, bf16, silu*up → RQ → DOWN MFMA | output still bit-identical to the quark path at M 1-16; 15.8 / 17.5 / 18.8 / 20.6 / 22.2 us (scalar: 21.4 ... 263.9) |
 
 ### Notes
 - Whole-model recheck is NOT a usable check here: SGLang's own decode path differs from itself by 2.6-3.1e-2

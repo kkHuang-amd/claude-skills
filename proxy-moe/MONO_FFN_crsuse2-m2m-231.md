@@ -8,23 +8,30 @@ non-MoE ~200; mega_moe_tp not usable at small M).
 
 ## CONTINUE HERE
 
-**Status (2026-10-22 end of session):** the plugin serves a fused FFN launch per layer (`laguna/gfx950/layer.py`:
+**Status (2026-10-22, second session):** the plugin serves a fused FFN launch per layer (`laguna/gfx950/layer.py`:
 S1 seam → `xf` sync → S2 TP router (S4 Q/GU behind the logit exchange) → `rt` sync → S3 routed (RQ folded into
 UG, one grid sync) + S4 DOWN → S5 seam), every decode width 1..16 (`SGLANG_AMD_MONO_LAGUNA_MAX_ROWS` caps it).
 Kernel: 84.8 / 121.3 / 184.0 / 295.4 / 469.8 us/layer at M 1/2/4/8/16, bit-exact vs the standalone chain.
-Serving (TP8, 1024/256, graphs): TPOT 3.95 / 6.73 / 8.30 / 9.74 / 15.29 ms at CONC 1/4/6/8/16 vs base 5.36 / 7.63 /
-9.81 / 10.31 / 15.78 (-26 / -12 / -15 / -6 / -3 %); eager check vs SGLang 2.8-3.3e-3 (SGLang run-to-run 2.9e-3).
+Serving TPOT vs base: 1024/256 -26 / -12 / -15 / -6 / -3 % at CONC 1/4/6/8/16; ISL 4096 and 8192 / OSL 1024
+-25.5 / -11 / -5 / -3 % at CONC 1/4/8/16, TTFT unchanged. Eager check vs SGLang 2.8-3.3e-3 (run-to-run 2.9e-3).
+This session (rows of 2026-10-22 "Next 1/2/3/5"): S3+S4down = 75-78 % of the launch at M8-16; UG time steps
+with ceil(union/16) rounds (a part-full round costs ≈ a full one, ~20 us); balancing it by stream-K was built
+twice (contiguous; round-robin + tail split), correct, but ≤ 5 us best case / losses elsewhere → not adopted.
 **Next (pick in order, one variable each, record every run):**
-1. Where the M8-16 time goes now: `time_layer_stages.py --widths 8,16` (TP8) and `time_routed_phases.py 8,16`;
-   S3 is still ~75-85 % of the launch, 269 / 447 us vs aiter 258 / 452 at M8 / M16 standalone.
-2. S3 UG at small/mid M: UG 5.8-5.9 TB/s at M4/M8 vs 6.4 at M16 and a 6.9 TB/s read ceiling
-   (`/data/proxy_moe/tools/read_bw.py`); task-count imbalance (M4: 1952 tasks / 256 CTAs) and the per-task tail.
-3. S3 DOWN: 4.8-5.4 TB/s at M4/M8 (BATCH and sched_barrier had no effect); try prefetching the first DOWN
-   batch's W2 before the grid-sync wait (W2 does not depend on MID).
-4. M1 latency: S1 / S5 one-shot seams ~8 us each; S2 + exchange ~11 us (rt sync); per-layer fixed costs.
-5. Serving at other points (ISL 4096/8192, OSL 1024) and an accuracy run (gsm8k-style) before any upstream PR.
+1. TP4 mono (T11: TP4 EP1 serves 1090 vs TP8 934 tok/s): `INTER` is hard-coded 512 (per rank at TP8) →
+   1024; seam / router already take the world size. Twice the tasks an expert → relatively smaller round tail.
+2. Prefill SP (`SGLANG_OPT_LAGUNA_PREFILL_SP=1`) together with mono: orthogonal in theory (prefill vs decode
+   graphs), unverified → check mode + one serving point.
+3. S3 DOWN 5.0-5.6 TB/s at M4-16 (~20 us at M8 to the 6.9 ceiling): measure its in-flight sensitivity first
+   (a no-prefetch probe as done for UG), then decide (BATCH and the pre-sync W2 prefetch had no effect).
+4. UG round tail, cheaper than a split: smaller rounds (512 CTAs, 2 a CU, if registers / LDS allow
+   co-residency) halve the quantum; measure occupancy first.
+5. M1 latency: S1 / S5 one-shot seams ~8 us each; S2 + exchange ~11 us (rt sync); per-layer fixed costs.
+6. Accuracy beyond the per-layer check needs real Laguna weights (user decision); then an upstream PR.
 Do NOT retry (recorded as failed): UG tasks-per-iteration 2/4, UG prefetch depth 2/3 (spills), LDS-staged weight
-stream (UG not in-flight-bound), seam 2 pairs a lane, DOWN BATCH 2/6/8, per-expert flags polled by DOWN.
+stream (UG not in-flight-bound), seam 2 pairs a lane, DOWN BATCH 2/6/8, per-expert flags polled by DOWN,
+DOWN first-batch W2 before the grid sync, UG stream-K (contiguous deal: -5 % at full rounds; tail-only split:
+~10 us fixed latency a split round). Code of both stream-K variants: `/data/proxy_moe/f2/mono/routed_streamk_*.py`.
 Logs: `/shared_nfs/kk/results/proxy_24l/c231_mono_p0_1022/` (kernels), `.../c231_mono_p1_1022/` (serving).
 **Repro:** `source /data/proxy_moe/mono_env.sh; T=/data/proxy_moe/ext/sgl-amd-mono/test/kernels/laguna`;
 kernels: `torchrun --standalone --nproc_per_node=8 $T/check_seam.py`, `... $T/check_router_tp.py`,
@@ -159,6 +166,10 @@ Activation precision must stay A4 (MXFP4) to match the proxy spec (MiniMax's mon
 | 2026-10-22 | crsuse2-m2m-231 | Next 1: stage split at M 1/4/8/16 (`time_layer_stages.py`, TP8 prof build, log `c231_mono_p0_1022/stages_1022b.log`) and `time_routed_phases.py 4,8,16` (`phases_1022b.log`) | where M8-16 goes | layer 93.6 / 196.7 / 318.6 / 480.8 us: S3+S4down 48 / 140 / 239 / 377 (75-78 % at M8-16), S1 16 / 23 / 41 / 50 (includes the CPU-barrier launch skew of this harness, not graph-chained: use `check_seam.py` for the seam), S5 8 / 10 / 15 / 25. S3 alone M4/8/16: UG 92.5 / 172.5 / 274.5 us (5.70 / 5.72 / 6.43 TB/s), DOWN 57 / 95 / 156 (4.6 / 5.2 / 5.7 TB/s) |
 | 2026-10-22 | crsuse2-m2m-231 | Next 3: DOWN issues its first BATCH's W2 loads before the UG→DOWN grid-sync wait (`LAGUNA_DN_PRE` 0 vs 1, `check_routed.py` PASS both; 2 runs each, logs `dnpre{0,1}_*`) | hide the first batch's latency | full S3 M4/8/16: 151.9 / 268.9 / 453.2 and 154.9 / 266.1 / 449.7 (off) vs 151.2 / 272.5 / 450.3 and 153.4 / 266.5 / 451.1 (on) → within the ±3 us run-to-run noise (expected ceiling one batch ≈ 3 us); reverted |
 | 2026-10-22 | crsuse2-m2m-231 | UG time vs union size at M8 (`/data/proxy_moe/f2/mono/ug_union_sweep.py 8 ...`, log `ug_union_m8.log`; FOLD_RQ pairs: nu·16 pairs over 256 CTAs, rounds = ceil(nu/16)) | is the partial last round the M4/M8 UG gap? | UG us at union 48/49: 73.4/82.9, 64/65: 89.2/103.0, 96/97: 130.6/139.7, 112/113: 148.5/167.4, 120: 167.1, 128: 169.0 → a step per round: one expert past a round boundary costs +9..19 us, 113→128 only +1.6. A part-full round costs ≈ a full one (a CTA's pair-task is bound by its own stream rate, ~20 us, not by aggregate BW). Full rounds run 6.2-6.55 TB/s. Balanced UG at the real unions would be ≈ 1.32-1.36 us/expert: M4 (61) ~83 vs 90.5, M8 (114) ~151 vs 167, M16 (204) ~270 vs 274 |
+| 2026-10-22 | crsuse2-m2m-231 | UG stream-K, contiguous (`LAGUNA_UG_STREAMK`, copy `/data/proxy_moe/f2/mono/routed_streamk_contig.py`): CTA b takes units (task, quarter) [bN/256, (b+1)N/256); a cut task finished by the lower CTA with the upper's fp32 partial (tagged mailbox), fold RQ across CTAs via a MID-ready flag | remove the part-full round | correct (`check_routed` PASS, rel_l2 unchanged). M8 sweep (`ug_union_m8_sk{0,1}.log`): step gone (65: 102.6 → 95.5, 113: 166.5 → 158.6) but whole rounds slower (112: 148.3 → 154.2, 128: 167.3 → 173.9) |
+| 2026-10-22 | crsuse2-m2m-231 | Probe: old kernel, only the deal changed round-robin → contiguous blocks of pairs (exact unions 64/96/112/128, 2 runs, `ug_contig{0,1}{a,b}.log`) | is the stream-K loss the access order? | 112: 149.0 / 147.7 → 156.1 / 156.2, 128: 167.6 / 167.1 → 175.8 / 173.8 us → a contiguous deal costs ~5 % at full rounds (all CTAs streaming far-apart experts at once; mechanism not measured). A probe of masked-load codegen (`g_k >= 0` predicate) read 0 cost but is invalid: the predicate likely folds to true |
+| 2026-10-22 | crsuse2-m2m-231 | UG hybrid: whole rounds round-robin (old loop, unchanged code), stream-K only over the tail tasks (a task split over up to 4 CTAs, finisher adds the partials in quarter order; copy `routed_streamk_tail.py`) | keep the full-round rate, balance the tail | correct (PASS). `check_routed` M1/2/4/8/16 48.1 / 92.9 / 165.1 / 272.5 / 455.8 vs 47.9 / 83.7 / 156.4 / 271.5 / 449.7 (off). M8 sweep (`ug_sktail2_{0,1}.log`) UG off/on: 113 165.9/160.4, 114 162.5/157.7, 116 163.5/159.2, 118 163.3/162.8, 120 166.0/161.6, 124 166.1/167.6, 128 168.2/167.0 → ≤ 5 us at small tails (run-to-run of the same setting here up to 10 us), losses when the tail is large (M2/M4: ~7 units a CTA). A split round has ~10 us fixed latency (two task epilogues, partial hand-off, MID-ready wait), so it cannot recover the ~20 us round. Not adopted (code reverted) |
+| 2026-10-22 | crsuse2-m2m-231 | Next 5: serving at long inputs, OSL 1024, base vs mono (widths 1..16), `p1_serve.sh` STEPS="base_long mono_long" (new optional ISL field), logs `c231_mono_p1_1022/{base,mono}_long/` | does the win hold at ISL 4096 / 8192? | TPOT median base → mono: ISL 4096 c1 5.68 → 4.23 (-25.5 %), c4 8.04 → 7.12 (-11.4 %), c8 10.94 → 10.35 (-5.4 %), c16 16.23 → 15.70 (-3.3 %); ISL 8192 c1 5.69 → 4.24 (-25.5 %), c8 10.94 → 10.36 (-5.3 %), c16 16.24 → 15.71 (-3.3 %). TTFT equal (146 / 655-664 / 1130-1143 ms) except 4096 c4 443 → 470 (one run, 8 prompts). No guard / Traceback in the mono server log. Accuracy: the dummy ckpt makes gsm8k / end-to-end logprob meaningless (OPT doc); the per-layer check mode is the numeric check |
 
 ### Notes
 - Whole-model recheck is NOT a usable check here: SGLang's own decode path differs from itself by 2.6-3.1e-2

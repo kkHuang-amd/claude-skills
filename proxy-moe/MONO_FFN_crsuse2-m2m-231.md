@@ -8,13 +8,12 @@ non-MoE ~200; mega_moe_tp not usable at small M).
 
 ## CONTINUE HERE
 
-**Status:** all five stages exist as standalone launches and are correct: S1 seam, S5 (seam phase 1), S2
-router, S4 shared expert (bit-exact vs the quark path), S3 routed experts (functional prototype,
-deterministic, within fused_moe's own run-to-run noise). Performance is NOT there yet (S3 2.3-12x slower than
-aiter fused_moe; S2 / S4 slow at M >= 8). Not started: fusion into one launch, plugin wiring, serving.
-**Next (proposed):** S3 performance first (it is ~2/3 of the FFN time): 16-byte weight loads in DOWN, fewer
-barriers per expert (batch several experts per sync), and MFMA (fp4 x fp4 scaled) tiles instead of scalar
-FMA where tokens per expert > 1; then S4 / S2 (TP-shard the router); then fuse and wire into the plugin.
+**Status:** all five stages exist as standalone launches and are correct (S1 seam, S5, S2 router, S4 shared
+bit-exact, S3 routed deterministic). S3 optimised (2026-10-22): MFMA version 48 / 91 / 170 / 327 / 751 us at
+M 1/2/4/8/16 vs aiter fused_moe ~77 / 90 / 152 / 258 / 452 (faster at M=1, par at M=2, slower from M=4).
+Not started: S4 / S2 performance, fusion into one launch, plugin wiring, serving.
+**Next:** S3 at M >= 4 (bandwidth 3.5-4.5 TB/s vs aiter ~5.7: per-task barrier + tail, RQ grid sync,
+DOWN prefetch) or move on to S4 (MFMA the same way) and S2 (TP-shard the router), then fuse.
 **Repro:** `source /data/proxy_moe/mono_env.sh; T=/data/proxy_moe/ext/sgl-amd-mono/test/kernels/laguna;
 torchrun --standalone --nproc_per_node=8 $T/check_seam.py; for c in router mxq shared routed; do
 HIP_VISIBLE_DEVICES=0 python3 $T/check_$c.py; done`
@@ -109,6 +108,8 @@ Activation precision must stay A4 (MXFP4) to match the proxy spec (MiniMax's mon
 | 2026-10-22 | crsuse2-m2m-231 | S4 shared expert (`check_shared.py`, 1 GPU) | `laguna/gfx950/shared.py`: Q (triton rule) → GU (exact fp4 decode, fp32 FMA, waves in order, bf16) → silu*up → RQ → DOWN | output bit-identical to SGLang's quark W4A4 path (rel 0) at M 1-16; MID bf16 100% (one 1-ulp element at M=4, exp approx); graph stable; 21.4 / 25.3 / 32.5 / 61.4 / 263.9 us (today ~27 us/layer at bs2) |
 | 2026-10-22 | crsuse2-m2m-231 | S3 routed experts (`check_routed.py`, 1 GPU, `ep_moe_check.build` weights = quark layout) | `laguna/gfx950/routed.py`: union in LDS, Q (hip rule), UG per union expert (dynamic loop), RQ, DOWN (route-weighted fp32 sum per CTA rows, no atomics) | rel_l2 vs aiter fused_moe 5.4-5.7e-3 at M 1-16, fused_moe vs itself 2.0-5.6e-3 (atomic stage 2); deterministic, graph stable; 178.7 / 297.4 / 653.4 / 1919 / 5641 us vs fused_moe ~77 / 90 / 152 / 258 / 452 us |
 
+| 2026-10-22 | crsuse2-m2m-231 | S3 optimisation (`check_routed.py`, 1 GPU; logs `/data/proxy_moe/f2/mono/s3_*.log`) | (1) routed-only DOWN, 16 B loads, prefetch: 176 / 276 / 509 / 1495 / 4015 us; (2) whole (16,16) shuffle-group loads (the 4-row tasks used 1/8 of each 256 B line), parallel flag polls (RQ 25 → 2 us): 74 / 168 / 319 / 682 / 1612; (3) batched x loads per token: 66 / 137 / 289 / 629 / 1199; (4) all weight loads up front: worse (VGPR pressure), reverted; (6) quarter double-buffering: 68 / 153 / 297 / 564 / 1108; (7) scaled fp4 x fp4 MFMA 16x16x128 in UG and DOWN (A = 16 weight rows of a shuffle group, B = 16 token columns, zero where not routed): **48 / 91 / 170 / 327 / 751 us** | rel_l2 vs fused_moe 5.4-5.7e-3 throughout (fused_moe vs itself 1.9-5.6e-3); deterministic; graph stable. rocprofv3: VGPR 128 + AGPR 128, scratch 0 at M<=2, 1076 B at M=16 (scalar version) |
+
 ### Notes
 - Whole-model recheck is NOT a usable check here: SGLang's own decode path differs from itself by 2.6-3.1e-2
   at layer-0 attention output when the same step is run twice in one process (attention input identical;
@@ -120,3 +121,6 @@ Activation precision must stay A4 (MXFP4) to match the proxy spec (MiniMax's mon
   accumulators is fine as loop state; `buffer_load` takes at most 4 dwords; no 1-element vector store
   (store the scalar); kernel cache keys must include every helper module's source (`kernel_sources(mxq)`),
   or a changed helper keeps the old binary.
+- Stage-cutoff timing (`time_routed_stages.py`) stops being reliable once builds differ in register
+  allocation (negative deltas); use it only for coarse splits. Scalar fp4 decode + FMA was VALU-bound
+  (~7 us per UG task); the 16x16x128 scaled MFMA lane layout equals the (16,16) shuffle tile layout.

@@ -8,12 +8,14 @@ non-MoE ~200; mega_moe_tp not usable at small M).
 
 ## CONTINUE HERE
 
-**Status:** all five stages exist as standalone launches and are correct (S1 seam, S5, S2 router, S4 shared
-bit-exact, S3 routed deterministic; optional shared-fused S3). S3 now 48 / 97 / 169 / 288 / 536 us at M
-1/2/4/8/16 vs aiter fused_moe ~77 / 90 / 152 / 258 / 452 (UG / DOWN at 5.0-6.5 TB/s; "rest" = U + Q + RQ +
-grid syncs + launch 13-27 us, to revisit inside the fused launch). S4 MFMA 16-22 us. S2 TP-sharded
-(`router_tp.py`) 13.6-21.9 us at M 1-16. Not started: fusion into one launch, plugin wiring, serving.
-**Next:** fuse S1-S5 into one launch per layer and wire it into the plugin; serving TPOT at CONC 1-16.
+**Status:** all stages run fused in one launch per layer (`laguna/gfx950/layer.py`), bit-exact vs the
+standalone launches chained (S1 seam, S2 TP-sharded router, S3 routed, S4 shared, bf16 add, S5) over 3 layers
+at M 1-16: 89 / 141 / 218 / 341 / 575 us/layer at M 1/2/4/8/16 (today's SGLang FFN path ≈ 185 us/layer at
+bs2). S3 is ~55-85 % of the launch (S4 is hidden behind the router's logit exchange). Not started: plugin
+wiring, check mode, serving.
+**Next:** wire `build_layer` into the plugin (`spec.py` `_ffn`: peer buffer + scratch, precompile all widths
+before capture, layer index as the tag slot, epoch bump per step), check mode vs SGLang, then serving TPOT at
+CONC 1-16 vs today. Logs: `/shared_nfs/kk/results/proxy_24l/c231_mono_p0_1022/`.
 **Repro:** `source /data/proxy_moe/mono_env.sh; T=/data/proxy_moe/ext/sgl-amd-mono/test/kernels/laguna;
 torchrun --standalone --nproc_per_node=8 $T/check_seam.py; for c in router mxq shared routed; do
 HIP_VISIBLE_DEVICES=0 python3 $T/check_$c.py; done`
@@ -119,6 +121,8 @@ Activation precision must stay A4 (MXFP4) to match the proxy spec (MiniMax's mon
 
 | 2026-10-22 | crsuse2-m2m-231 | S3 items 1 + 2 tried (user): wave-level UG tasks (one wave = (expert, 32-channel block) over all K, no cross-wave reduction / CTA barrier) with the MID requant folded in (no RQ stage, one grid sync fewer); kept as `/data/proxy_moe/f2/mono/routed_waveug.py`, NOT committed | `time_routed_phases.py` M4 / M8 / M16: full 284.5 / 348.8 / 638.7 us (was 165.6 / 291.3 / 541.9): UG 225.3 (2.34 TB/s) / 243.5 (4.05) / 439.9 (4.01) vs 101.6 / 179.4 / 353.2 before; rest 12.5 / 14.7 / 23.3 (was 17.1 / 19.4 / 27.3: the folded requant saves ~4-5 us as expected); DOWN slightly faster. Static unroll of the wave's K loop: worse (UG 345.8 / 374.5 / 704.1, register pressure). Reverted to 50acaf9 | per-wave load → wait → MFMA is serial and 2 waves / SIMD cannot hide it; at M4 only ~1000 tasks for 2048 waves (half idle, a busy wave streams 512 KB alone at ~2.3 GB/s) |
 | 2026-10-22 | crsuse2-m2m-231 | S2 TP-sharded router (`check_router_tp.py`, torchrun TP8, log `c231_mono_p0_1022/s2_router_tp_check.log`) | `laguna/gfx950/router_tp.py`: rank r owns experts 64r..64r+63 (4 MiB fp32 instead of 32 MiB); CTA = (local expert, K quarter), 8 waves x 512 K; quarter partials via scratch mailbox, summed in order by the quarter-0 CTA and pushed to every rank (wave w -> rank w); every rank runs the same top-16 | expert ids identical (order too) for all 4 trials x M at M 1/2/4/8/16; weights rel_l2 <= 1.1e-7; all 8 ranks agree; graph stable; 13.6 / 14.1 / 15.0 / 16.7 / 21.9 us (was 14.4 / 15.8 / 18.8 / 36.6 / 115.3) → M16 5.3x; small M is launch + one cross-GPU hop, which the fused launch hides |
+| 2026-10-22 | crsuse2-m2m-231 | Fused FFN launch, 1st try (`check_layer.py`, torchrun TP8, 3 chained layers, log `c231_mono_p0_1022/layer_check_first_try.log`) | `laguna/gfx950/layer.py`: S1 → `xf` grid sync → S2 TP router → `rt` sync → S3 with shared fused in → S5 in one launch, stage bodies shared with the standalone launches (`emit_*`) | NOT equal to the standalone chain and unstable: H hand-off stored with plain stores, read on other XCDs (L2s are not coherent inside a launch) → fixed by CM_DEV stores of every cross-CTA hand-off (H, RES_MID, ids, wts); then bit-exact, but 117 / 236 us at M1 / M4 vs 104.5 / 218 standalone |
+| 2026-10-22 | crsuse2-m2m-231 | Fused FFN launch, S4 behind the logit exchange (`check_layer.py`, TP8, 3 chained layers, log `c231_mono_p0_1022/layer_check.log`; stage marks `layer_stage_marks.log`) | S3 routed-only + S4 split: S4 Q + GU between the router's logit push and its top-k wait, S4 GR / RQ before the `rt` wait, S4 DOWN after S3's DOWN; S5 adds MOE + SH in bf16 before the push (= SGLang's bf16 add) | x and residual bit-exact vs the standalone chain (S1, S2 TP, S3, S4, torch bf16 add, S5) for all 3 layers at M 1/2/4/8/16; graph stable; errors 0. 89.4 / 140.9 / 218.1 / 340.8 / 574.6 us/layer (standalone launches 99.1 / 152.2 / 219.8 / 339.0 / 582.4). Marks (M1): S1 19 (incl. rank skew), xf 3, router + S4 Q/GU 7, top-k + exchange 11, S3 + S4 DOWN 48, S5 9 → S3 is ~55-85 % of the launch. Today's SGLang FFN path ≈ 185 us/layer at bs2 |
 
 ### Notes
 - Whole-model recheck is NOT a usable check here: SGLang's own decode path differs from itself by 2.6-3.1e-2
@@ -140,3 +144,10 @@ Activation precision must stay A4 (MXFP4) to match the proxy spec (MiniMax's mon
   kernels then run outside the graph and the "graph time" is just the epoch bump (fetch the stream inside).
 - `load_ptr64` (peer table) is wave-uniform: per-lane peer indices silently all write lane 0's peer and the
   readers time out (fault at 0x0). Map one wave per peer.
+- Inside one launch, a hand-off read by other CTAs must be stored AND loaded with CM_DEV: the XCDs' L2s
+  are not coherent (a plain store can sit in the writer's L2; the standalone launches were safe only
+  because a launch boundary writes L2 back). Symptom: right values after the launch, wrong consumers.
+- Helpers that hold traced `if` / `for range` must be `@flyc.jit` (only kernel / jit bodies are AST-
+  rewritten: "cannot evaluate dynamic 'Boolean' as Python bool"). In a body moved into a helper, a loop
+  or tuple target named like a parameter (`for c in ...`, `a, b = ...`) rebinds the dict inside a
+  traced branch → "Cannot extract IR values from Mailbox"; name the dict parameters `ctx` / `args`.

@@ -50,8 +50,14 @@ numbering.
 - Combined (SP exact + rows): 70k c8 +3.3%, 8k/1k c64 +1.5%, 1k/1k c512 +2.5%.
 - G: chunk 32768 TTFT penalty at low CONC is a scheduling effect (single unqueued prefill is equal);
   M16k/M32k rows add +4-5% TTT with chunk 32768.
-- USER DECISIONS: (a) DONE 2026-10-22: keep both, switch `..._SP_SHARED_QUANT=triton|hip` (default triton); (b) commit/push SGLang SP code (strip `_SP_CHECK`);
-  (c) install decode rows (`f2/item2/t256_512.csv` + `row1024.csv`) and/or M16k/32k rows into AITER CSV;
+- PUSHED 2026-10-22 (user request): SGLang `HaiShaw/sglang` `feat/proxy-model-1020` effe332427..ed3d8b0089
+  (prefill SP, debug `_SP_CHECK` stripped; prefill logprobs bit-identical to the pre-strip run; debug
+  version kept as `/data/proxy_moe/f2/p1_sglang_with_spcheck_debug.patch`); AITER `kkHuang-amd/aiter`
+  `feat/proxy-model-1020` fd537aaa4..605ade939 (EP1/TP8 rows M 256/512/1024/16384/32768 in
+  `model_configs/proxymoe_fp4_tuned_fmoe.csv`; verified active without `AITER_CONFIG_FMOE`: M512 1,174.6
+  / M1024 1,399.9 us). New base = these two heads. Commits authored as the branch's existing author.
+- USER DECISIONS: (a) DONE 2026-10-22: keep both, switch `..._SP_SHARED_QUANT=triton|hip` (default triton); (b) DONE (pushed);
+  (c) DONE (rows pushed);
   (d) chunk-per-ISL default. Remaining Next: 4 iso data (FP AR tp4ep1 sweep), 5 upstream PRs.
 
 **Rules:** one variable per experiment; measure kernels under CUDA graph / profiler (not eager
@@ -952,6 +958,7 @@ w3, bnt0.
 | 2026-10-21 | crsuse2-m2m-231 | c231_qr_quant_op_1021 | op-level QR AR FP/INT8/INT6/INT4, [8192,16384] | — | — | — | 1301/1034/918/857 us; rel_l2 1.7e-3/7.7e-3/3.0e-2/1.2e-1 |
 | 2026-10-21 | crsuse2-m2m-231 | c231_F2_M2_1021 | op-level RS bf16 + AG fp4 vs AR, [8192,16384] | — | — | — | RS 653 + AG 158 = 811 us vs QR INT8 AR 1034 us |
 | 2026-10-22 | crsuse2-m2m-231 | fixed_seq_len_qr_unset/tp4ep1 | tp4ep1 sweep, ROCM_QUICK_REDUCE_QUANTIZATION unset (25 points) | — | — | — | TTT/GPU geomean x0.958 vs INT8; vs GB300 0.854 |
+| 2026-10-22 | crsuse2-m2m-231 | c231_F2_P1_check_1021 (sp, post-strip) | SP hip, code after debug strip | — | — | — | prefill logprobs bit-identical to pre-strip; pushed sglang ed3d8b0089, aiter 605ade939 |
 | 2026-10-21 | crsuse2-m2m-231 | c231_F2_P1_ab_1021/off | 70000/300 c8, tp8ep1 sweep flags | TTT/GPU 3574.6 | 8742 | ITL 10.75 | baseline |
 | 2026-10-21 | crsuse2-m2m-231 | c231_F2_P1_ab_1021/on | same + SGLANG_OPT_LAGUNA_PREFILL_SP=1 | TTT/GPU 3765.2 | 8210 | ITL 10.75 | +5.3% / -6.1% |
 | 2026-10-21 | crsuse2-m2m-231 | c231_F2_P1_ab_1021/off | 8192/1024 c64, tp8ep1 | TTT/GPU 1624.8 | 7828 | ITL 29.40 | baseline |

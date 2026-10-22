@@ -111,6 +111,14 @@ flag hand-offs between CTAs cost ~2-5 us each on MI355X — fewer hand-offs on t
 - Seam all-reduce from 2 rows on: two-shot (reduce-scatter to the column owner, all-gather the bf16
   sum) beats one-shot once xGMI bytes dominate (M16 33 -> 21 us).
 
+### 6. Spin-waits: one pending load an iteration
+
+When all 256 CTAs spin on mailbox flags at once, each spin iteration's load count is multiplied by
+the whole grid. A norm that waited for 8 tagged values a thread with one 4-load poll made the seam
+slower (M16 19.9 -> 27.0 us); polling them one at a time (one pending load a spin) brought it back
+(20.3 us) and the restructured norm then saved 1-5 us a layer. Prefer fewer polling threads and one
+outstanding load each.
+
 ## Measured dead ends (save the time)
 
 - Balancing a part-full last round of tasks: a split round costs ~10 us fixed latency (partial

@@ -8,14 +8,16 @@ non-MoE ~200; mega_moe_tp not usable at small M).
 
 ## CONTINUE HERE
 
-**Status:** P0, S1 seam, S5 (MoE AR + next norm, seam phase 1) and S2 router DONE as standalone launches
-(correct, graph-stable). S2 is slow at M >= 8 (see Results). Not started: S4 shared expert, S3 routed MoE,
-fusion into one launch, plugin wiring of the stages.
-**Next:** S4 shared expert (W4A4, quark layout) → S3 routed MoE (hardest) → fuse → serving. Perf debt: S2 at
-M >= 8 (re-reads x per CTA: restructure tiles or TP-shard the router, 64 experts / rank + logit exchange);
-S1 at M=16 (norm loops tokens serially).
+**Status:** all five stages exist as standalone launches and are correct: S1 seam, S5 (seam phase 1), S2
+router, S4 shared expert (bit-exact vs the quark path), S3 routed experts (functional prototype,
+deterministic, within fused_moe's own run-to-run noise). Performance is NOT there yet (S3 2.3-12x slower than
+aiter fused_moe; S2 / S4 slow at M >= 8). Not started: fusion into one launch, plugin wiring, serving.
+**Next (proposed):** S3 performance first (it is ~2/3 of the FFN time): 16-byte weight loads in DOWN, fewer
+barriers per expert (batch several experts per sync), and MFMA (fp4 x fp4 scaled) tiles instead of scalar
+FMA where tokens per expert > 1; then S4 / S2 (TP-shard the router); then fuse and wire into the plugin.
 **Repro:** `source /data/proxy_moe/mono_env.sh; T=/data/proxy_moe/ext/sgl-amd-mono/test/kernels/laguna;
-torchrun --standalone --nproc_per_node=8 $T/check_seam.py; HIP_VISIBLE_DEVICES=0 python3 $T/check_router.py`
+torchrun --standalone --nproc_per_node=8 $T/check_seam.py; for c in router mxq shared routed; do
+HIP_VISIBLE_DEVICES=0 python3 $T/check_$c.py; done`
 **Code:** plugin in `/data/proxy_moe/ext/sgl-amd-mono` branch `feat/laguna-ffn-mono` (local only; clone of
 github.com/sgl-project/sgl-amd-mono @06b8f56). SGLang = `/data/proxy_moe/wt/sglang` (ed3d8b0089), AITER =
 `/data/proxy_moe/wt/aiter` (e9b0b5979). Ask the user before pushing anything.
@@ -103,9 +105,18 @@ Activation precision must stay A4 (MXFP4) to match the proxy spec (MiniMax's mon
 | 2026-10-22 | crsuse2-m2m-231 | S1/S5 chained check (`check_seam.py`, log `c231_mono_p0_1022/s15_seam_check.log`) | seam phases: 0 = S1, 1 = S5 (MoE AR + residual + next input / final norm); own peer region and scratch per phase, tag slot 2*layer+phase; 3 layers S1→S5 chained in one graph | x and residual 0 ulp vs exact reference at M 1-16; stable over 200 replays; guard clean; 8.1 / 10.2 / 13.3 / 19.4 / 33.1 us per launch back to back |
 | 2026-10-22 | crsuse2-m2m-231 | S2 router check (`check_router.py`, 1 GPU, log `c231_mono_p0_1022/s2_router_check.log`) | `laguna/gfx950/router.py`: CTA = 2 experts, wave = expert x K quarter, fp32 GEMV; logits via scratch mailbox; top-16 sigmoid + bias, lowest-id ties, renorm (sum + 1e-20) as `_router_triton_kernel` | expert ids identical (same order) for all 8 trials x M tokens at M 1/2/4/8/16; weights rel_l2 <= 1.4e-7; graph stable; 14.4 / 15.8 / 18.8 / 36.6 / 115.3 us (today's router at bs2 ~14 us/layer) → slow at M >= 8: every CTA re-reads all tokens' x from L2 |
 
+| 2026-10-22 | crsuse2-m2m-231 | MXFP4 quantizers (`check_mxq.py`) | `laguna/gfx950/mxq.py`: triton rule (shared expert) and hip rule (routed; amax clamped to 1e-10) in-kernel, packed with v_cvt_scalef32_pk_fp4_f32 | fp4 bytes and scales 100% equal to aiter's triton / hip quant on [16, 16384] incl. all-zero groups; decode exact |
+| 2026-10-22 | crsuse2-m2m-231 | S4 shared expert (`check_shared.py`, 1 GPU) | `laguna/gfx950/shared.py`: Q (triton rule) → GU (exact fp4 decode, fp32 FMA, waves in order, bf16) → silu*up → RQ → DOWN | output bit-identical to SGLang's quark W4A4 path (rel 0) at M 1-16; MID bf16 100% (one 1-ulp element at M=4, exp approx); graph stable; 21.4 / 25.3 / 32.5 / 61.4 / 263.9 us (today ~27 us/layer at bs2) |
+| 2026-10-22 | crsuse2-m2m-231 | S3 routed experts (`check_routed.py`, 1 GPU, `ep_moe_check.build` weights = quark layout) | `laguna/gfx950/routed.py`: union in LDS, Q (hip rule), UG per union expert (dynamic loop), RQ, DOWN (route-weighted fp32 sum per CTA rows, no atomics) | rel_l2 vs aiter fused_moe 5.4-5.7e-3 at M 1-16, fused_moe vs itself 2.0-5.6e-3 (atomic stage 2); deterministic, graph stable; 178.7 / 297.4 / 653.4 / 1919 / 5641 us vs fused_moe ~77 / 90 / 152 / 258 / 452 us |
+
 ### Notes
 - Whole-model recheck is NOT a usable check here: SGLang's own decode path differs from itself by 2.6-3.1e-2
   at layer-0 attention output when the same step is run twice in one process (attention input identical;
   cause not investigated, possibly the repeated fp8 KV write). The plugin check compares at the FFN input.- FlyDSL gotchas met: no `from __future__ import annotations` in a kernel module (`@fx.struct` needs real
   types); Python objects (Mailbox, Addr) used inside traced if/for must live in a dict (traced branches carry
   IR values only); do not reuse a dict's name as a `range_constexpr` loop variable.
+- FlyDSL: a dynamic `for x in range(n)` carries any name assigned before the loop and reassigned inside as
+  loop state (type must match: reusing a name across stages breaks it; prefix stage locals); a list of fp32
+  accumulators is fine as loop state; `buffer_load` takes at most 4 dwords; no 1-element vector store
+  (store the scalar); kernel cache keys must include every helper module's source (`kernel_sources(mxq)`),
+  or a changed helper keeps the old binary.

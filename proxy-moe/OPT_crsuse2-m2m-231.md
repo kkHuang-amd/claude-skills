@@ -714,6 +714,26 @@ back-to-back; DSV4.1's launch-gap mechanism is NOT our cost). Per layer, op-leve
   converts them to FP8 — not allowed by the proxy spec); top-16 of 512 → large expert unions from bs4;
   no speculative decoding here (rows = batch). Cost: a new sgl-amd-mono plugin (MiniMax-M3's is ~240 KB
   of FlyDSL/Python) — weeks, not days.
+- [2026-10-22] Step (1) DONE: clean bs2 decode trace (`/data/proxy_moe/f2/decode_prof.sh` with ISL 1024,
+  OSL 4096, NP=2, CONC=2 → no prefill in the window; `c231_mono_decode_c2clean_1022`, TPOT 6.36 ms,
+  GPU kernel time 6.91 ms/step incl. profiler stretch, ~33 kernels/layer). Per layer (TP0 ≈ TP1):
+  routed MoE ~88 us (moe1 51 + moe2 24 + small sort / quant-sort 4 x ~4); bf16 qkv 20 + o_proj 16
+  (3.7-4.2 TB/s); fp32 router GEMM + post 14; attention 26 + rotary 4 + KV write 4; 2 x AR-fusion
+  (RS store 10.6 + local rmsnorm 5) ≈ 31; shared expert (2 fp4 GEMM + split-K reduce + 2 quant) ≈ 27;
+  ~12 tiny kernels at the ~4 us minimum (bf16→fp32 copy, add, act_and_mul, scaled_quant, elementwise
+  x2, ...) ≈ 50. → non-MoE ≈ 200 us/layer (70%), MoE ≈ 88 (30%).
+- Step (2) partial: existing persistent fused MoE+AR (aiter mega_moe_tp, `t9_fair8.py`, 8 GPUs, CUDA
+  graph, slowest rank; `c231_mono_mega_small_1022`): M=8 299.6 vs fused_moe+AR 255.7 us (+17%), M=16
+  498.4 vs 460.9 (+8%); M=1/2/4 unsupported ("ar: tokens not a multiple of tp=8"). Real AR at decode
+  ≈ 10 us/layer (base - moe_only). → mega_moe_tp is not the persistent MoE we need.
+- MoE headroom at 7.0 TB/s (moe2's achieved rate on real weights, T9): M1 0.21 GB 30 us vs 76.7,
+  M2 57 vs 90, M4 120 vs 152, M8 223 vs 258, M16 393 vs 452 us. A Triton streaming probe
+  (`tools/stream_floor.py`) reached only 4.6-4.7 TB/s — below aiter itself, so it is NOT a floor.
+- Reading: at bs1-2 the mono opportunity is mostly the ~200 us of non-MoE kernels per layer (floor
+  ≈ 27 us weights at 7 TB/s + attention + ~10 us AR), not the MoE (-33 us at M2). An FFN-only launch
+  (AR + norm + router + shared + routed + AR) covers ~185 us/layer of today's bs2 time; whole-layer
+  covers all ~288. Ceilings, not predictions (DSV4.1 realised -10..-17% FFN-only, -20..-23% whole-layer
+  at c1-c2).
 - Cheap next steps before committing: (1) decode trace at bs2 without prefill contamination (the c2
   by-stage capture mixed prefill kernels) or rocprofv3 kernel trace to pin the ~125 us "rest";
   (2) P0.3-style microbench: MoE alone as one persistent launch over the expert union at M=1-8 vs

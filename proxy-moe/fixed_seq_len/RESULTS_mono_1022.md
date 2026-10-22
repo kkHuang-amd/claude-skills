@@ -88,3 +88,40 @@ TTT/GPU in tok/s/GPU; ITL = median inter-token latency (decode step time); TTFT 
   ITL -11..-23 %; TP4 +8..+19 % / +7..+18 %, ITL -8..-17 %. 70000/300 (prefill-bound): +1..+8 % (TP8),
   +1..+6 % (TP4). TTFT within ±1 % of base except TP4 70k c8 (+11 %, one run) and TP8 70k c16 (-5 %).
 - CONC >= 32 (mono idle): within a few % of 10-21; TP8 TTFT -3..-6 % there (heads / SP).
+
+## Geomean MI355X / GB300 (10-21 → 10-22 mono)
+
+Same method as `RESULTS.md` (MI355X value / GB300 value per point, geometric mean; TTT/GPU and P90
+interactivity: > 1 = MI355X ahead; ITL and TTFT: < 1 = MI355X faster). GB300: `../fixed_seq_len_gb300/`
+(tp4ep1, 1 tray) and `../fixed_seq_len_gb300_2node/` (tp8ep1, 2 trays). The 10-21 column reproduces the
+published tables exactly (TP4 all 0.891, TP8 all 0.944). Script `/data/proxy_moe/f2/mono/gb300_geomean.py`.
+
+### tp4ep1: MI355X / GB300 geomean, 10-21 → 10-22 mono (25 matched points)
+
+| Shape / subset | points | TTT/GPU | P90 interactivity | Median ITL | Median TTFT |
+|---|---|---|---|---|---|
+| 1024/1024 | 10 | 0.923 → **0.966** | 0.946 → **0.991** | 1.067 → **1.015** | 1.091 → **1.111** |
+| 8192/1024 | 10 | 0.885 → **0.919** | 0.928 → **0.986** | 1.084 → **1.028** | 1.172 → **1.205** |
+| 70000/300 | 5 | 0.843 → **0.851** | 0.874 → **0.957** | 1.145 → **1.044** | 1.209 → **1.260** |
+| all 3 shapes | 25 | 0.891 → **0.923** | 0.924 → **0.982** | 1.089 → **1.026** | 1.146 → **1.177** |
+| all, CONC <= 512 | 23 | 0.874 → **0.909** | 0.898 → **0.955** | 1.131 → **1.062** | 1.151 → **1.180** |
+| all, CONC <= 16 (mono acts) | 12 | 0.864 → **0.935** | 0.870 → **0.979** | 1.148 → **1.019** | 1.125 → **1.163** |
+
+### tp8ep1: MI355X / GB300 geomean, 10-21 → 10-22 mono (25 matched points)
+
+| Shape / subset | points | TTT/GPU | P90 interactivity | Median ITL | Median TTFT |
+|---|---|---|---|---|---|
+| 1024/1024 | 10 | 0.947 → **1.028** | 0.941 → **1.018** | 1.040 → **0.963** | 1.032 → **0.994** |
+| 8192/1024 | 10 | 0.940 → **1.020** | 0.960 → **1.041** | 1.051 → **0.965** | 1.084 → **1.022** |
+| 70000/300 | 5 | 0.946 → **1.003** | 0.887 → **1.023** | 1.128 → **0.978** | 1.071 → **1.019** |
+| all 3 shapes | 25 | 0.944 → **1.020** | 0.938 → **1.028** | 1.061 → **0.967** | 1.060 → **1.010** |
+| all, CONC <= 512 | 23 | 0.933 → **1.011** | 0.919 → **1.014** | 1.097 → **0.994** | 1.065 → **1.013** |
+| all, CONC <= 16 (mono acts) | 12 | 0.907 → **1.041** | 0.877 → **1.049** | 1.136 → **0.948** | 1.089 → **1.028** |
+
+- The 10-21 → 10-22 change mixes the monokernel (CONC <= 16) with the newer heads (SP, MoE rows for
+  M <= 1024, aiter merge), which act at every CONC. The clean mono effect is the "vs base" table above;
+  e.g. TP8 CONC > 16 gains come from the heads, not from mono (mono is idle there).
+- The platform differences listed in `RESULTS.md` (routed experts W4A4 here vs W4A8 on GB300, prefill AR
+  QR INT8 vs bf16) still apply to every ratio.
+- TP4 TTFT ratio got worse (1.146 → 1.177): the new heads' TP4 TTFT is +1..+7 % vs 10-21 at most points
+  (mono does not touch prefill); not investigated.

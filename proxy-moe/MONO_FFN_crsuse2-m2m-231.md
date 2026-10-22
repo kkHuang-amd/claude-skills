@@ -8,9 +8,9 @@ non-MoE ~200; mega_moe_tp not usable at small M).
 
 ## CONTINUE HERE
 
-**Status:** design written (section Design). P0 scaffolding in progress (spec + reference forward). No kernel
-code yet.
-**Next:** P0 → S1 seam stage with a check_ffn-style 8-GPU harness.
+**Status:** P0 DONE (plugin commit in local branch, see Results). Kernel work not started.
+**Next:** S1 seam stage (o_proj partial push + rank-ordered sum + residual + RMSNorm) as a FlyDSL launch with
+a check_ffn-style 8-GPU harness, starting from DSV4.1 `stages/seam.py`.
 **Code:** plugin in `/data/proxy_moe/ext/sgl-amd-mono` branch `feat/laguna-ffn-mono` (local only; clone of
 github.com/sgl-project/sgl-amd-mono @06b8f56). SGLang = `/data/proxy_moe/wt/sglang` (ed3d8b0089), AITER =
 `/data/proxy_moe/wt/aiter` (e9b0b5979). Ask the user before pushing anything.
@@ -91,3 +91,9 @@ Activation precision must stay A4 (MXFP4) to match the proxy spec (MiniMax's mon
 
 | Date | Node | Run | What | Result |
 |---|---|---|---|---|
+| 2026-10-22 | crsuse2-m2m-231 | c231_mono_p0_1022 | P0: plugin `laguna_ffn_hip` (clone branch feat/laguna-ffn-mono 1st commit), reference FFN = SGLang ops | loads on 8 ranks, widths 1..16, 16/16 decode graphs routed to the plugin; c16 1024/256 TPOT 16.17 ms (normal path ~15.8: reference uses unfused AR + norm); check (FFN-input level): residual exact, FFN out 2.9e-3 = run-to-run noise of MoE atomics + AR |
+
+### Notes
+- Whole-model recheck is NOT a usable check here: SGLang's own decode path differs from itself by 2.6-3.1e-2
+  at layer-0 attention output when the same step is run twice in one process (attention input identical;
+  cause not investigated, possibly the repeated fp8 KV write). The plugin check compares at the FFN input.

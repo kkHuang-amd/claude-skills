@@ -8,11 +8,14 @@ non-MoE ~200; mega_moe_tp not usable at small M).
 
 ## CONTINUE HERE
 
-**Status:** P0 DONE; S1 seam DONE (bit-exact, graph-stable; standalone launch). Next stages not started.
-**Next:** S5 MoE AR (same push / rank-ordered sum, no norm) → S2 router → S4 shared → S3 routed; later fuse.
-Optimise S1 at M=16 (35.8 us: the norm stage loops tokens serially with block barriers).
-**Repro S1:** `source /data/proxy_moe/mono_env.sh; torchrun --standalone --nproc_per_node=8
-/data/proxy_moe/ext/sgl-amd-mono/test/kernels/laguna/check_seam.py --widths 1,2,4,8,16`
+**Status:** P0, S1 seam, S5 (MoE AR + next norm, seam phase 1) and S2 router DONE as standalone launches
+(correct, graph-stable). S2 is slow at M >= 8 (see Results). Not started: S4 shared expert, S3 routed MoE,
+fusion into one launch, plugin wiring of the stages.
+**Next:** S4 shared expert (W4A4, quark layout) → S3 routed MoE (hardest) → fuse → serving. Perf debt: S2 at
+M >= 8 (re-reads x per CTA: restructure tiles or TP-shard the router, 64 experts / rank + logit exchange);
+S1 at M=16 (norm loops tokens serially).
+**Repro:** `source /data/proxy_moe/mono_env.sh; T=/data/proxy_moe/ext/sgl-amd-mono/test/kernels/laguna;
+torchrun --standalone --nproc_per_node=8 $T/check_seam.py; HIP_VISIBLE_DEVICES=0 python3 $T/check_router.py`
 **Code:** plugin in `/data/proxy_moe/ext/sgl-amd-mono` branch `feat/laguna-ffn-mono` (local only; clone of
 github.com/sgl-project/sgl-amd-mono @06b8f56). SGLang = `/data/proxy_moe/wt/sglang` (ed3d8b0089), AITER =
 `/data/proxy_moe/wt/aiter` (e9b0b5979). Ask the user before pushing anything.
@@ -96,6 +99,9 @@ Activation precision must stay A4 (MXFP4) to match the proxy spec (MiniMax's mon
 | 2026-10-22 | crsuse2-m2m-231 | c231_mono_p0_1022 | P0: plugin `laguna_ffn_hip` (clone branch feat/laguna-ffn-mono 1st commit), reference FFN = SGLang ops | loads on 8 ranks, widths 1..16, 16/16 decode graphs routed to the plugin; c16 1024/256 TPOT 16.17 ms (normal path ~15.8: reference uses unfused AR + norm); check (FFN-input level): residual exact, FFN out 2.9e-3 = run-to-run noise of MoE atomics + AR |
 
 | 2026-10-22 | crsuse2-m2m-231 | S1 seam check (`check_seam.py`, log `c231_mono_p0_1022/s1_seam_check.log`) | `laguna/gfx950/seam.py`: 256 CTAs x 512 thr, CTA = 64 hidden cols; push wave w → peer w; rank-ordered fp32 sum → bf16 + residual; sumsq per CTA → scratch mailbox; norm | vs exact torch reference (rank-order fp32 sum, bf16 round, fused add-RMSNorm semantics): x and residual 0 ulp at M 1/2/4/8/16; 200 graph replays bit-stable, guard words clean; 10.9 / 12.7 / 15.8 / 22.2 / 35.8 us per launch (slowest rank) |
+
+| 2026-10-22 | crsuse2-m2m-231 | S1/S5 chained check (`check_seam.py`, log `c231_mono_p0_1022/s15_seam_check.log`) | seam phases: 0 = S1, 1 = S5 (MoE AR + residual + next input / final norm); own peer region and scratch per phase, tag slot 2*layer+phase; 3 layers S1→S5 chained in one graph | x and residual 0 ulp vs exact reference at M 1-16; stable over 200 replays; guard clean; 8.1 / 10.2 / 13.3 / 19.4 / 33.1 us per launch back to back |
+| 2026-10-22 | crsuse2-m2m-231 | S2 router check (`check_router.py`, 1 GPU, log `c231_mono_p0_1022/s2_router_check.log`) | `laguna/gfx950/router.py`: CTA = 2 experts, wave = expert x K quarter, fp32 GEMV; logits via scratch mailbox; top-16 sigmoid + bias, lowest-id ties, renorm (sum + 1e-20) as `_router_triton_kernel` | expert ids identical (same order) for all 8 trials x M tokens at M 1/2/4/8/16; weights rel_l2 <= 1.4e-7; graph stable; 14.4 / 15.8 / 18.8 / 36.6 / 115.3 us (today's router at bs2 ~14 us/layer) → slow at M >= 8: every CTA re-reads all tokens' x from L2 |
 
 ### Notes
 - Whole-model recheck is NOT a usable check here: SGLang's own decode path differs from itself by 2.6-3.1e-2

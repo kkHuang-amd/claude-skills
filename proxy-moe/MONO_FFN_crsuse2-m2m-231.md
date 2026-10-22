@@ -8,27 +8,34 @@ non-MoE ~200; mega_moe_tp not usable at small M).
 
 ## CONTINUE HERE
 
-**Status:** all stages run fused in one launch per layer (`laguna/gfx950/layer.py`), bit-exact vs the
-standalone launches chained (S1 seam, S2 TP-sharded router, S3 routed, S4 shared, bf16 add, S5) over 3 layers
-at M 1-16: 89 / 141 / 218 / 341 / 575 us/layer at M 1/2/4/8/16 (today's SGLang FFN path ≈ 185 us/layer at
-bs2). S3 is ~55-85 % of the launch (S4 is hidden behind the router's logit exchange). Not started: plugin
-serving TPOT. The plugin serves it (`runner.py`, `spec.py`); eager check vs SGLang 2.7e-3..8.7e-3 at the
-next layer's input (SGLang run-to-run 2.9e-3) after matching SGLang's SiluAndMul and fused add-RMSNorm.
-Serving A/B (graphs, CONC 1/4/16): TPOT -23.7 % / -2.5 % / +14.6 % (c16 worse: S3 at large M).
-Widths capped at 6 by default (CONC 8 / 16 now equal to base, CONC 1 -23.7 %).
-S3 now = aiter at M16 (455 vs 452 us), 157 / 272 vs 152 / 258 at M4 / M8. LDS-staged stream dropped (UG is
-not in-flight-bound: no-prefetch probe costs 0-7 %).
-Seams two-shot from M2 (M16 seam 32.9 → 20.6 us; fused M16 556 → 468 us/layer).
-RQ folded into UG (one grid sync left in S3). Serving now wins at every CONC (TPOT -26 / -12 / -15 / -6 / -3 % at
-CONC 1 / 4 / 6 / 8 / 16), check 2.8-3.3e-3 vs SGLang; every width served by default.
-**Next:** upstream PR only when the user asks; remaining ideas: S3 at M8-16 vs aiter,
-seam latency at M1, larger ISL/OSL serving points. Logs: `/shared_nfs/kk/results/proxy_24l/c231_mono_p0_1022/`.
-**Repro:** `source /data/proxy_moe/mono_env.sh; T=/data/proxy_moe/ext/sgl-amd-mono/test/kernels/laguna;
-torchrun --standalone --nproc_per_node=8 $T/check_seam.py; for c in router mxq shared routed; do
-HIP_VISIBLE_DEVICES=0 python3 $T/check_$c.py; done`
+**Status (2026-10-22 end of session):** the plugin serves a fused FFN launch per layer (`laguna/gfx950/layer.py`:
+S1 seam → `xf` sync → S2 TP router (S4 Q/GU behind the logit exchange) → `rt` sync → S3 routed (RQ folded into
+UG, one grid sync) + S4 DOWN → S5 seam), every decode width 1..16 (`SGLANG_AMD_MONO_LAGUNA_MAX_ROWS` caps it).
+Kernel: 84.8 / 121.3 / 184.0 / 295.4 / 469.8 us/layer at M 1/2/4/8/16, bit-exact vs the standalone chain.
+Serving (TP8, 1024/256, graphs): TPOT 3.95 / 6.73 / 8.30 / 9.74 / 15.29 ms at CONC 1/4/6/8/16 vs base 5.36 / 7.63 /
+9.81 / 10.31 / 15.78 (-26 / -12 / -15 / -6 / -3 %); eager check vs SGLang 2.8-3.3e-3 (SGLang run-to-run 2.9e-3).
+**Next (pick in order, one variable each, record every run):**
+1. Where the M8-16 time goes now: `time_layer_stages.py --widths 8,16` (TP8) and `time_routed_phases.py 8,16`;
+   S3 is still ~75-85 % of the launch, 269 / 447 us vs aiter 258 / 452 at M8 / M16 standalone.
+2. S3 UG at small/mid M: UG 5.8-5.9 TB/s at M4/M8 vs 6.4 at M16 and a 6.9 TB/s read ceiling
+   (`/data/proxy_moe/tools/read_bw.py`); task-count imbalance (M4: 1952 tasks / 256 CTAs) and the per-task tail.
+3. S3 DOWN: 4.8-5.4 TB/s at M4/M8 (BATCH and sched_barrier had no effect); try prefetching the first DOWN
+   batch's W2 before the grid-sync wait (W2 does not depend on MID).
+4. M1 latency: S1 / S5 one-shot seams ~8 us each; S2 + exchange ~11 us (rt sync); per-layer fixed costs.
+5. Serving at other points (ISL 4096/8192, OSL 1024) and an accuracy run (gsm8k-style) before any upstream PR.
+Do NOT retry (recorded as failed): UG tasks-per-iteration 2/4, UG prefetch depth 2/3 (spills), LDS-staged weight
+stream (UG not in-flight-bound), seam 2 pairs a lane, DOWN BATCH 2/6/8, per-expert flags polled by DOWN.
+Logs: `/shared_nfs/kk/results/proxy_24l/c231_mono_p0_1022/` (kernels), `.../c231_mono_p1_1022/` (serving).
+**Repro:** `source /data/proxy_moe/mono_env.sh; T=/data/proxy_moe/ext/sgl-amd-mono/test/kernels/laguna`;
+kernels: `torchrun --standalone --nproc_per_node=8 $T/check_seam.py`, `... $T/check_router_tp.py`,
+`... $T/check_layer.py` (fused vs standalone, timing), `... $T/time_layer_stages.py`; 1 GPU:
+`HIP_VISIBLE_DEVICES=0 python3 $T/check_{mxq,shared,routed,fused}.py`, `$T/time_routed_phases.py 4,8,16`.
+Serving: `/data/proxy_moe/f2/mono/p1_serve.sh` (STEPS=check|base|mono|mono_v2|..., CHECK_MODE=1|2; each step
+starts and kills its own server; base TPOT above is from this script on 2026-10-22).
 **Code:** plugin in `/data/proxy_moe/ext/sgl-amd-mono` branch `feat/laguna-ffn-mono` (clone of
 github.com/sgl-project/sgl-amd-mono @06b8f56), pushed to github.com/kkHuang-amd/sgl-amd-mono
-`feat/laguna-ffn-mono` @07f2583 (2026-10-22; remote `kk`). No upstream PR yet. SGLang = `/data/proxy_moe/wt/sglang` (ed3d8b0089), AITER =
+`feat/laguna-ffn-mono` @07f2583 (2026-10-22; remote `kk`; commits authored as kk via GIT_AUTHOR_* /
+GIT_COMMITTER_* env, no AI attribution). No upstream PR yet. SGLang = `/data/proxy_moe/wt/sglang` (ed3d8b0089), AITER =
 `/data/proxy_moe/wt/aiter` (e9b0b5979). Ask the user before pushing anything.
 **Rules:** one variable per experiment; every run recorded with node + date; kernels measured under CUDA graph;
 per-stage numerics checked against SGLang's own ops (not against another framework).

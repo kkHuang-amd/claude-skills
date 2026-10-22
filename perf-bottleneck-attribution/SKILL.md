@@ -49,6 +49,11 @@ be attributed to your hypothesis.
 - Trap: freed the resource so 2 units/slot were *allowed*, saw no change, concluded "more units do not help."
   But the scheduler/launcher only ever placed 1 unit/slot, so the allowed-but-unused headroom changed nothing;
   the outcome was never verified.
+- Trap: an A/B that flips an env switch read at JIT time, while the kernel cache key holds only the source
+  text: the cache (which outlives the process) hands both sides the first binary, so "no effect" is
+  measured twice. Two optimizations were wrongly dropped this way (later: -18 us and -3 us a layer).
+  Falsify: a probe that MUST move the time (an injected delay) — if it does not, the switch never reached
+  the binary. Put every code-changing switch in the cache key.
 
 ### 4. "X-bound" without a roofline number
 Do not infer "compute/memory/bandwidth/latency-bound" purely from which levers helped. Measure achieved-X
@@ -90,6 +95,14 @@ and did I MEASURE it, or infer it?"** Actively seek the experiment that would FA
 Treat a sharp challenge to a conclusion as a gift: it usually points straight at an unverified assumption.
 Hold diagnoses as hypotheses with explicit confidence until a direct measurement pins them.
 
+## Critical path of a fused / persistent kernel
+A stage that gets faster alone may not shorten the whole launch (another chain gates it). Before
+optimizing a stage of a fused kernel, show it is on the critical path: per-CTA timestamps at stage
+boundaries in the served configuration (e.g. layers chained in one CUDA graph), then **inject a delay**
+right after the stage; the whole launch must slow by about the delay. If it does not, the stage is off
+the path (or the change never reached the binary, see pattern 3). Note that the instrumented build itself
+can shift timings; take the decision from the uninstrumented outcome.
+
 ## Pre-conclusion checklist
 Run before saying "X-bound", "occupancy/compute/memory/bandwidth/latency-limited", or "exhausted / at the
 ceiling":
@@ -99,9 +112,15 @@ ceiling":
 - [ ] For a "stall on op X": ran the cheaper-X test to separate "unit saturated" from "waiting for inputs"?
 - [ ] Cross-system/config claims compare ACHIEVED utilization, not peak specs?
 - [ ] Benchmarked the existing ALTERNATIVE; named my design's structural constraints?
+- [ ] For a stage of a fused kernel: delay-injection shows it is on the critical path?
+- [ ] The A/B really changed the binary (cache key carries the switch, or a must-move probe moved)?
 - [ ] Stated as a proven bound or a hypothesis, and named the single measurement that would falsify it?
 
-## Worked case study
+## Worked case studies
+The Laguna FFN monokernel (`proxy-moe/MONO_FFN_crsuse2-m2m-231.md`, 2026-10-22): the cache-key trap and the
+delay-injection test (rows "[CORRECTION] fused-layer kernel cache key", "REDO with a valid key"); the
+techniques that came out of it are in `amd-kernel-opt-techniques`.
+
 A full worked example of every pattern (a GPU MoE GEMM successively mis-labeled MFMA/compute-bound ->
 occupancy-limited -> bandwidth-bound, each corrected by a direct measurement) is recorded in the
 `[CORRECTION]`/`[RETRACTED]` notes of `dsv4/megamoe/GEMM_CODESIGN_WIP.md` and `KERNEL_OWNER_DECODE_PLAN.md`.

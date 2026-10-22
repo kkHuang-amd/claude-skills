@@ -19,8 +19,9 @@ Widths capped at 6 by default (CONC 8 / 16 now equal to base, CONC 1 -23.7 %).
 S3 now = aiter at M16 (455 vs 452 us), 157 / 272 vs 152 / 258 at M4 / M8. LDS-staged stream dropped (UG is
 not in-flight-bound: no-prefetch probe costs 0-7 %).
 Seams two-shot from M2 (M16 seam 32.9 → 20.6 us; fused M16 556 → 468 us/layer).
-**Next:** per-expert readiness instead of the UG→RQ→DOWN grid syncs (rest 17-28 us), then re-sweep serving
-(check mode + CONC 6/8/16) and the width cap. Logs: `/shared_nfs/kk/results/proxy_24l/c231_mono_p0_1022/`.
+RQ folded into UG (one grid sync left in S3).
+**Next:** serving re-check (check mode) and uncapped sweep CONC 1/4/6/8/16 (`p1_serve.sh` steps check, mono_v2)
+→ new width cap. Logs: `/shared_nfs/kk/results/proxy_24l/c231_mono_p0_1022/`.
 **Repro:** `source /data/proxy_moe/mono_env.sh; T=/data/proxy_moe/ext/sgl-amd-mono/test/kernels/laguna;
 torchrun --standalone --nproc_per_node=8 $T/check_seam.py; for c in router mxq shared routed; do
 HIP_VISIBLE_DEVICES=0 python3 $T/check_$c.py; done`
@@ -143,6 +144,7 @@ Activation precision must stay A4 (MXFP4) to match the proxy spec (MiniMax's mon
 | 2026-10-22 | crsuse2-m2m-231 | S3 UG probe: no prefetch at all (each quarter loaded right before use) | is in-flight depth the limiter? | UG M4/8/16 97.3 / 166.6 / 281.3 us vs 90.5 / 168 / 274 with prefetch → halving in-flight bytes costs 0-7 %: **not in-flight-bound**, so an LDS-staged stream (only adds in-flight bytes) is not expected to pay; not built |
 | 2026-10-22 | crsuse2-m2m-231 | Seam: 2 tagged pairs a lane (16 B stores, `check_seam.py`, TP8) | fewer xGMI write transactions | 8.1 / 10.3 / 15.4 / 21.7 / 34.9 us vs 8.0 / 10.3 / 13.2 / 19.3 / 33.0 (1 pair) → no gain, reverted: the seam is xGMI-byte-bound (one-shot: every rank's full partial, tag words doubling it, to all 7 peers ≈ 3.5 MB out a rank at M16) |
 | 2026-10-22 | crsuse2-m2m-231 | Seam two-shot (`check_seam.py` with `LAGUNA_SEAM_TWO_SHOT_MIN` 17 vs 1, TP8, 3 chained layers) | reduce-scatter: a CTA's columns to their owner rank (rank = CTA // 32) only; owner sums the ranks in order, rounds to bf16, all-gathers it; ~4x fewer bytes, one more hop | one-shot 8.0 / 10.2 / 13.1 / 19.2 / 32.9 us, two-shot 8.5 / 9.2 / 10.9 / 13.9 / 20.6 at M 1/2/4/8/16; both within 1 ulp of the reference (residual 0 ulp). Default two-shot from M2. Fused launch (`check_layer`): 87.0 / 123.5 / 187.2 / 295.7 / **468.3** us/layer (was 87.2 / 124.2 / 190.5 / 303.7 / 556.0), bit-exact vs standalone |
+| 2026-10-22 | crsuse2-m2m-231 | S3 fold RQ into UG (`check_routed.py`, `LAGUNA_FOLD_RQ` 0 vs 1) | a CTA takes both 16-channel halves of a 32-channel MID group back to back (pairs round-robin) and requantizes the group after the second tail: no RQ stage, no UG→RQ grid sync | S3 M1/2/4/8/16 50.7 / 86.8 / 158.5 / 268.9 / 455.2 → 47.5 / 82.5 / 156.7 / 269.5 / 447.3 us; error vs fused_moe unchanged. Per-expert flags polled by DOWN not built (a poll round trip per batch of 4 experts would cost more than the sync). Fused launch 84.8 / 121.3 / 184.0 / 295.4 / 469.8 us/layer, bit-exact vs standalone |
 
 ### Notes
 - Whole-model recheck is NOT a usable check here: SGLang's own decode path differs from itself by 2.6-3.1e-2

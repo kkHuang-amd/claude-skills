@@ -12,10 +12,9 @@ non-MoE ~200; mega_moe_tp not usable at small M).
 standalone launches chained (S1 seam, S2 TP-sharded router, S3 routed, S4 shared, bf16 add, S5) over 3 layers
 at M 1-16: 89 / 141 / 218 / 341 / 575 us/layer at M 1/2/4/8/16 (today's SGLang FFN path ≈ 185 us/layer at
 bs2). S3 is ~55-85 % of the launch (S4 is hidden behind the router's logit exchange). Not started: plugin
-wiring, check mode, serving.
-**Next:** wire `build_layer` into the plugin (`spec.py` `_ffn`: peer buffer + scratch, precompile all widths
-before capture, layer index as the tag slot, epoch bump per step), check mode vs SGLang, then serving TPOT at
-CONC 1-16 vs today. Logs: `/shared_nfs/kk/results/proxy_24l/c231_mono_p0_1022/`.
+serving TPOT. The plugin serves it (`runner.py`, `spec.py`); eager check vs SGLang 2.7e-3..8.7e-3 at the
+next layer's input (SGLang run-to-run 2.9e-3) after matching SGLang's SiluAndMul and fused add-RMSNorm.
+**Next:** serving TPOT A/B at CONC 1/4/16 (`/data/proxy_moe/f2/mono/p1_serve.sh`, base vs mono), then S3. Logs: `/shared_nfs/kk/results/proxy_24l/c231_mono_p0_1022/`.
 **Repro:** `source /data/proxy_moe/mono_env.sh; T=/data/proxy_moe/ext/sgl-amd-mono/test/kernels/laguna;
 torchrun --standalone --nproc_per_node=8 $T/check_seam.py; for c in router mxq shared routed; do
 HIP_VISIBLE_DEVICES=0 python3 $T/check_$c.py; done`
@@ -123,6 +122,7 @@ Activation precision must stay A4 (MXFP4) to match the proxy spec (MiniMax's mon
 | 2026-10-22 | crsuse2-m2m-231 | S2 TP-sharded router (`check_router_tp.py`, torchrun TP8, log `c231_mono_p0_1022/s2_router_tp_check.log`) | `laguna/gfx950/router_tp.py`: rank r owns experts 64r..64r+63 (4 MiB fp32 instead of 32 MiB); CTA = (local expert, K quarter), 8 waves x 512 K; quarter partials via scratch mailbox, summed in order by the quarter-0 CTA and pushed to every rank (wave w -> rank w); every rank runs the same top-16 | expert ids identical (order too) for all 4 trials x M at M 1/2/4/8/16; weights rel_l2 <= 1.1e-7; all 8 ranks agree; graph stable; 13.6 / 14.1 / 15.0 / 16.7 / 21.9 us (was 14.4 / 15.8 / 18.8 / 36.6 / 115.3) → M16 5.3x; small M is launch + one cross-GPU hop, which the fused launch hides |
 | 2026-10-22 | crsuse2-m2m-231 | Fused FFN launch, 1st try (`check_layer.py`, torchrun TP8, 3 chained layers, log `c231_mono_p0_1022/layer_check_first_try.log`) | `laguna/gfx950/layer.py`: S1 → `xf` grid sync → S2 TP router → `rt` sync → S3 with shared fused in → S5 in one launch, stage bodies shared with the standalone launches (`emit_*`) | NOT equal to the standalone chain and unstable: H hand-off stored with plain stores, read on other XCDs (L2s are not coherent inside a launch) → fixed by CM_DEV stores of every cross-CTA hand-off (H, RES_MID, ids, wts); then bit-exact, but 117 / 236 us at M1 / M4 vs 104.5 / 218 standalone |
 | 2026-10-22 | crsuse2-m2m-231 | Fused FFN launch, S4 behind the logit exchange (`check_layer.py`, TP8, 3 chained layers, log `c231_mono_p0_1022/layer_check.log`; stage marks `layer_stage_marks.log`) | S3 routed-only + S4 split: S4 Q + GU between the router's logit push and its top-k wait, S4 GR / RQ before the `rt` wait, S4 DOWN after S3's DOWN; S5 adds MOE + SH in bf16 before the push (= SGLang's bf16 add) | x and residual bit-exact vs the standalone chain (S1, S2 TP, S3, S4, torch bf16 add, S5) for all 3 layers at M 1/2/4/8/16; graph stable; errors 0. 89.4 / 140.9 / 218.1 / 340.8 / 574.6 us/layer (standalone launches 99.1 / 152.2 / 219.8 / 339.0 / 582.4). Marks (M1): S1 19 (incl. rank skew), xf 3, router + S4 Q/GU 7, top-k + exchange 11, S3 + S4 DOWN 48, S5 9 → S3 is ~55-85 % of the launch. Today's SGLang FFN path ≈ 185 us/layer at bs2 |
+| 2026-10-22 | crsuse2-m2m-231 | Plugin serves the fused launch: eager check (`SGLANG_AMD_MONO_CHECK=1`, CONC 1/4/16, logs `c231_mono_p1_1022/check*/server.log`) | `laguna/gfx950/runner.py` + `spec.py` wiring (peer / scratch / epoch, 16 widths precompiled, per-layer weight pointers from SGLang's loaded params) | 1st: next-input rel 5.6e-2..1.3e-1 vs SGLang (guard 0). Per-part check (`=2`) over all 24 layers: routing identical, routed 5.5e-3 (= fused_moe self-noise), S5 alone exact, but (a) shared expert 0 or 2-11e-2: SGLang's `SiluAndMul` is bf16(silu(g)) * u, not fp32 silu*up; (b) H 2e-3 off: SGLang's fused add-RMSNorm (aiter opus, hidden > 8192) squares the fp32 sum, normalizes columns < 8192 from the fp32 sum and the rest from the rounded residual, one rounding. Both matched → next-input rel 2.7e-3..8.7e-3 (rows 1/4; SGLang run-to-run 2.9e-3), guard 0 |
 
 ### Notes
 - Whole-model recheck is NOT a usable check here: SGLang's own decode path differs from itself by 2.6-3.1e-2
@@ -151,3 +151,6 @@ Activation precision must stay A4 (MXFP4) to match the proxy spec (MiniMax's mon
   rewritten: "cannot evaluate dynamic 'Boolean' as Python bool"). In a body moved into a helper, a loop
   or tuple target named like a parameter (`for c in ...`, `a, b = ...`) rebinds the dict inside a
   traced branch → "Cannot extract IR values from Mailbox"; name the dict parameters `ctx` / `args`.
+- Match SGLang's real ops, not the textbook ones: `SiluAndMul` = bf16(silu(gate)) * up; the fused add-RMSNorm
+  for hidden 16384 (aiter opus) uses the fp32 sum for the squares and for columns < 8192, the rounded
+  residual for the rest. A 1-ulp bf16 change in H flips fp4 bins and shows as 1-10 % at the next input.

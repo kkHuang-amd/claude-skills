@@ -8,9 +8,11 @@ non-MoE ~200; mega_moe_tp not usable at small M).
 
 ## CONTINUE HERE
 
-**Status:** P0 DONE (plugin commit in local branch, see Results). Kernel work not started.
-**Next:** S1 seam stage (o_proj partial push + rank-ordered sum + residual + RMSNorm) as a FlyDSL launch with
-a check_ffn-style 8-GPU harness, starting from DSV4.1 `stages/seam.py`.
+**Status:** P0 DONE; S1 seam DONE (bit-exact, graph-stable; standalone launch). Next stages not started.
+**Next:** S5 MoE AR (same push / rank-ordered sum, no norm) → S2 router → S4 shared → S3 routed; later fuse.
+Optimise S1 at M=16 (35.8 us: the norm stage loops tokens serially with block barriers).
+**Repro S1:** `source /data/proxy_moe/mono_env.sh; torchrun --standalone --nproc_per_node=8
+/data/proxy_moe/ext/sgl-amd-mono/test/kernels/laguna/check_seam.py --widths 1,2,4,8,16`
 **Code:** plugin in `/data/proxy_moe/ext/sgl-amd-mono` branch `feat/laguna-ffn-mono` (local only; clone of
 github.com/sgl-project/sgl-amd-mono @06b8f56). SGLang = `/data/proxy_moe/wt/sglang` (ed3d8b0089), AITER =
 `/data/proxy_moe/wt/aiter` (e9b0b5979). Ask the user before pushing anything.
@@ -93,7 +95,11 @@ Activation precision must stay A4 (MXFP4) to match the proxy spec (MiniMax's mon
 |---|---|---|---|---|
 | 2026-10-22 | crsuse2-m2m-231 | c231_mono_p0_1022 | P0: plugin `laguna_ffn_hip` (clone branch feat/laguna-ffn-mono 1st commit), reference FFN = SGLang ops | loads on 8 ranks, widths 1..16, 16/16 decode graphs routed to the plugin; c16 1024/256 TPOT 16.17 ms (normal path ~15.8: reference uses unfused AR + norm); check (FFN-input level): residual exact, FFN out 2.9e-3 = run-to-run noise of MoE atomics + AR |
 
+| 2026-10-22 | crsuse2-m2m-231 | S1 seam check (`check_seam.py`, log `c231_mono_p0_1022/s1_seam_check.log`) | `laguna/gfx950/seam.py`: 256 CTAs x 512 thr, CTA = 64 hidden cols; push wave w → peer w; rank-ordered fp32 sum → bf16 + residual; sumsq per CTA → scratch mailbox; norm | vs exact torch reference (rank-order fp32 sum, bf16 round, fused add-RMSNorm semantics): x and residual 0 ulp at M 1/2/4/8/16; 200 graph replays bit-stable, guard words clean; 10.9 / 12.7 / 15.8 / 22.2 / 35.8 us per launch (slowest rank) |
+
 ### Notes
 - Whole-model recheck is NOT a usable check here: SGLang's own decode path differs from itself by 2.6-3.1e-2
   at layer-0 attention output when the same step is run twice in one process (attention input identical;
-  cause not investigated, possibly the repeated fp8 KV write). The plugin check compares at the FFN input.
+  cause not investigated, possibly the repeated fp8 KV write). The plugin check compares at the FFN input.- FlyDSL gotchas met: no `from __future__ import annotations` in a kernel module (`@fx.struct` needs real
+  types); Python objects (Mailbox, Addr) used inside traced if/for must live in a dict (traced branches carry
+  IR values only); do not reuse a dict's name as a `range_constexpr` loop variable.

@@ -17,8 +17,7 @@ description: >-
 Source: the Laguna (proxy MoE) FFN monokernel work, 2026-10-22, node crsuse2-m2m-231. Every number
 below is from `proxy-moe/MONO_FFN_crsuse2-m2m-231.md` (Results table, same date) unless noted. Code:
 github.com/kkHuang-amd/sgl-amd-mono branch `feat/laguna-ffn-mono`, `sgl_amd_mono/laguna/gfx950/`
-(FlyDSL; techniques 1, 2, 4, 5 are pushed at 7399139; 3 and the shared-expert scale runs are in
-local commit 98ec598 until pushed). None of the techniques depends on the model; most do not depend on the kernel being a
+(FlyDSL; all of it pushed at 98ec598). None of the techniques depends on the model; most do not depend on the kernel being a
 monokernel (marked where they do).
 
 ## Workflow that found them (read before applying any)

@@ -8,7 +8,7 @@ non-MoE ~200; mega_moe_tp not usable at small M).
 
 ## CONTINUE HERE
 
-**Status (2026-10-22, second session; plugin @a39f3cb pushed):** the plugin serves a fused FFN launch per layer (`laguna/gfx950/layer.py`:
+**Status (2026-10-22, second session; plugin @98ec598 pushed):** the plugin serves a fused FFN launch per layer (`laguna/gfx950/layer.py`:
 S1 seam → `xf` sync → S2 TP router (S4 Q/GU behind the logit exchange) → `rt` sync → S3 routed (RQ folded into
 UG, one grid sync) + S4 DOWN → S5 seam), every decode width 1..16 (`SGLANG_AMD_MONO_LAGUNA_MAX_ROWS` caps it).
 Kernel: 84.8 / 121.3 / 184.0 / 295.4 / 469.8 us/layer at M 1/2/4/8/16, bit-exact vs the standalone chain.
@@ -37,8 +37,9 @@ twice (contiguous; round-robin + tail split), correct, but ≤ 5 us best case / 
    -15.1 / -18.3 / -8.5 / -5.6 % vs base. One unexplained TP0 exit in a serving run (see the v4 row). (2) faster top-16 (7399139): layer -4.3..-5.8 us.
    [CORRECTION] the layer's kernel cache key lacked the env switches until 7399139: redo the S4 scale-run and
    S3 U-scatter layer A/Bs (code in `/data/proxy_moe/f2/mono/{shared_spack,routed_u_scatter}.py`, re-apply on
-   the current tree). Redos DONE (98ec598): S4 runs TP4 -3 us, U scatter M16 -18..-19 us.
-   Next: serving A/B of 98ec598; (3) seams; (4) Next 2.
+   the current tree). Redos DONE (98ec598, pushed): S4 runs TP4 -3 us, U scatter M16 -18..-19 us.
+   Serving (v5): TP4 -21.0 / -11.9 / -8.7 / -5.7 %, TP8 -32.1 / -17.4 / -20.4 / -10.9 / -8.4 % vs base.
+   Next: (3) seams (S1 + S5, 2 x 6-20 us); (4) Next 2 (prefill SP + mono).
 2. Prefill SP (`SGLANG_OPT_LAGUNA_PREFILL_SP=1`) together with mono: orthogonal in theory (prefill vs decode
    graphs), unverified → check mode + one serving point.
 3. S3 DOWN 5.0-5.6 TB/s at M4-16 (~20 us at M8 to the 6.9 ceiling): measure its in-flight sensitivity first
@@ -216,6 +217,7 @@ Activation precision must stay A4 (MXFP4) to match the proxy spec (MiniMax's mon
 | 2026-10-22 | crsuse2-m2m-231 | **[CORRECTION] fused-layer kernel cache key**: `layer.build_layer`'s key held the sub-modules' sources but not their env switches, and the compiled binary is cached across processes → a layer A/B that only flips an env reuses the first binary. Found with a delay probe (spin X us after the top-k: router alone +6-10 us, layer +0). Fixed in 7399139 (`routed / router_tp / seam .ENV_KEY` in the layer key); with it, 10 us after the top-k costs the layer +8.6..+9.4 us (top-k is on the critical path) | which earlier layer A/Bs are void | **void**: S4 scale runs (`LAGUNA_SH_SPACK`) and S3 U scatter (`LAGUNA_U_SCATTER`) "no layer gain" rows — both sides ran one binary; **redo them**. Valid: Q early (Q_EARLY was in the key), the routed-kernel A/Bs (`time_routed_*` builds key the env), and every layer number taken after a default change in source |
 | 2026-10-22 | crsuse2-m2m-231 | Faster top-16 (`LAGUNA_TOPK_FAST`, commit 7399139 local, default on; the GLM plugin's pattern): ordered u32 keys, each lane presorts its 8 (Batcher 19-comparator network, key desc / id asc), a round = 2 `wave_umax` (key, then lowest id) + shift of the winner's list, activations gathered once (bpermute), renorm sum still in pick order | cut the 7 us top-k | `check_router_tp` PASS: ids identical incl. order, weights rel 1.1e-7 as before; router alone 13.5 / 13.9 / 14.9 / 16.9 / 22.3 → 9.8 / 9.5 / 10.7 / 12.2 / 16.2 us. Layer (valid key, bit-exact): TP8 76.7 / 112.1 / 172.3 / 280.2 / 448.7 → **72.2 / 107.2 / 167.4 / 275.7 / 443.4**; TP4 111.1 / 176.6 / 291.4 / 487.3 / 809.8 → **106.3 / 171.6 / 287.0 / 481.5 / 805.5** (-4.3..-5.8 us). Prof build: CTA 0 top-k 7.0 → 2.4 us, median rt wait 9.7 → 5.0 |
 | 2026-10-22 | crsuse2-m2m-231 | REDO with a valid key (after 7399139): S4 scale runs (`LAGUNA_SH_SPACK`) and S3 U scatter (`LAGUNA_U_SCATTER`), each its own layer A/B, `check_layer` bit-exact; logs `path/shsp2_*`, `path/usc2_*`; commit 98ec598 local, both default on | the two voided rows | S4 runs: TP8 72.5 / 107.3 / 167.1 / 274.4 / 443.4 → 71.4 / 106.6 / 165.9 / 274.0 / 444.2 (-0.4..-1.2, M16 noise); TP4 106.4 / 171.9 / 286.9 / 481.8 / 805.5 → 103.6 / 168.6 / 283.8 / 478.8 / 804.7 (**-2.8..-3.3** at M1-8). U scatter: TP8 71.4 / 106.9 / 166.2 / 273.7 / 443.8 → 72.1 / 105.4 / 163.5 / 269.2 / **425.4** (M16 -18.4, M8 -4.5); TP4 104.7 / 169.1 / 284.5 / 478.6 / 804.0 → 103.5 / 167.4 / 281.8 / 474.6 / **784.9** (M16 -19.1, M8 -4.0) → both pay; the earlier "no layer gain" was the cache-key bug. Current TP8 layer: **71.5 / 105.5 / 164.0 / 269.4 / 424.4** us |
+| 2026-10-22 | crsuse2-m2m-231 | Serving A/B of 98ec598 (fast top-16 + U scatter + S4 scale runs on top of a39f3cb), same session, `p1_serve.sh` TAG=v5 STEPS="ab_tp4 ab_tp8", 1024/256, logs `c231_mono_p1_1022/*_v5/` | net serving effect | TPOT median base → mono: TP4 c1 3.52 → **2.78 (-21.0 %)**, c4 5.89 → 5.19 (-11.9 %), c8 8.58 → 7.83 (-8.7 %), c16 13.66 → 12.88 (-5.7 %); TP8 c1 5.33 → **3.62 (-32.1 %)**, c4 7.60 → 6.28 (-17.4 %), c6 9.77 → 7.78 (-20.4 %), c8 10.26 → 9.14 (-10.9 %), c16 15.77 → 14.45 (-8.4 %); TTFT equal (±3 ms). Check mode: TP4 200 checks median 2.99e-3 max 3.23e-3, TP8 400 median 3.11e-3 max 3.28e-3, guard 0; no scheduler exceptions in any server. Plugin 98ec598 pushed to `kk` |
 
 ### Notes
 - Whole-model recheck is NOT a usable check here: SGLang's own decode path differs from itself by 2.6-3.1e-2

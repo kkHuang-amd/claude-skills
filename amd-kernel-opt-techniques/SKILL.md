@@ -119,6 +119,16 @@ slower (M16 19.9 -> 27.0 us); polling them one at a time (one pending load a spi
 (20.3 us) and the restructured norm then saved 1-5 us a layer. Prefer fewer polling threads and one
 outstanding load each.
 
+### 7. Piggy-back a reduction's partials on a message you already send
+
+A two-shot all-reduce + RMSNorm had two hand-offs after the all-gather: the AG data, then every CTA's
+partial sum of squares to every other CTA of the rank. The owner of a column block already holds the
+final sums (and the residual, replicated on every rank), so it can compute the block's sum of squares
+and push it with the AG data; the norm then reads it from the peer region, and the CTA-to-CTA round
+is gone. Seam alone M16 20.1 -> 13.3 us; layer -2..-14 us at M2-16 (bit-identical: same values, same
+order). General rule: when a stage waits on data X and then exchanges f(X) among peers, let the
+producer of X send f(X) along.
+
 ## Measured dead ends (save the time)
 
 - Balancing a part-full last round of tasks: a split round costs ~10 us fixed latency (partial

@@ -13,7 +13,7 @@ Owner node: crsuse2-m2m-231
   the standard path), all 50 points → `/shared_nfs/kk/results/proxy_24l/fixed_seq_len_mono_1022/`.
 - **base**: same env, no `--monokernel-backend`, CONC 2..16 only (24 points; the points mono can change)
   → `/shared_nfs/kk/results/proxy_24l/fixed_seq_len_base_1022/`.
-- Driver `/data/proxy_moe/f2/mono/sweep_1022.sh`, log `.../sweep_1022_night.log`: 14:00 → 21:27 UTC (7 h 27 min).
+- Driver `proxy-moe/scripts/sweep_1022.sh`, log `.../sweep_1022_night.log`: 14:00 → 21:27 UTC (7 h 27 min).
 - "vs 10-21" compares with `RESULTS.md` (older heads: no SP, no MoE rows for M <= 1024, pre aiter merge),
   so it mixes the head changes with mono; "vs base" is the clean mono effect (same night, same heads).
 
@@ -94,7 +94,7 @@ TTT/GPU in tok/s/GPU; ITL = median inter-token latency (decode step time); TTFT 
 Same method as `RESULTS.md` (MI355X value / GB300 value per point, geometric mean; TTT/GPU and P90
 interactivity: > 1 = MI355X ahead; ITL and TTFT: < 1 = MI355X faster). GB300: `../fixed_seq_len_gb300/`
 (tp4ep1, 1 tray) and `../fixed_seq_len_gb300_2node/` (tp8ep1, 2 trays). The 10-21 column reproduces the
-published tables exactly (TP4 all 0.891, TP8 all 0.944). Script `/data/proxy_moe/f2/mono/gb300_geomean.py`.
+published tables exactly (TP4 all 0.891, TP8 all 0.944). Script `proxy-moe/scripts/gb300_geomean.py`.
 
 ### tp4ep1: MI355X / GB300 geomean, 10-21 → 10-22 mono (25 matched points)
 

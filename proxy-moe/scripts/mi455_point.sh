@@ -18,7 +18,7 @@ export HSA_DISABLE_COREDUMP_ON_EXCEPTION=1 SGLANG_USE_AITER=1 PYTHONUNBUFFERED=1
 NAME=isl$ISL-osl$OSL-c$CONC
 
 python3 -m sglang.launch_server --model-path "$MODEL" \
-  --tp-size 8 --ep-size 8 --kv-cache-dtype fp8_e4m3 \
+  --tp-size 8 --ep-size ${EP:-8} --kv-cache-dtype fp8_e4m3 \
   --context-length $CTX --mem-fraction-static 0.80 \
   --max-running-requests $CONC --cuda-graph-max-bs-decode $CONC \
   --chunked-prefill-size 8192 --attention-backend triton \

@@ -11,10 +11,11 @@ import re
 from collections import defaultdict
 
 CATS = [
-    ("moe", r"moe|fused_moe|flydsl.*(gemm|mm)|mxfp4_moe|ck_moe|topk|sort"),
+    ("router", r"router|gemv2_f32"),
+    ("moe", r"moe|a8w4|a4w4|fused_moe|flydsl.*(gemm|mm)|mxfp4_moe|ck_moe|topk|sort"),
     ("quant", r"quant|mxfp4|fp4|e8m0"),
-    ("attn", r"attn|attention|paged|mha|fmha|flash|decode_|kv_cache|rope|rotary"),
-    ("comm", r"all_reduce|allreduce|nccl|rccl|cross_device|all_gather|reduce_scatter"),
+    ("attn", r"attn|attention|_fwd_grouped|_fwd_kernel_stage|paged|mha|fmha|flash|decode_|kv_cache|rope|rotary"),
+    ("comm", r"all_reduce|allreduce|ar_ll|ag_gfx1250|nccl|rccl|cross_device|all_gather|reduce_scatter"),
     ("gemm", r"gemm|cijk|Cijk|matmul|hipblaslt|wvSplitK|_mm_"),
     ("norm", r"norm|rms"),
 ]

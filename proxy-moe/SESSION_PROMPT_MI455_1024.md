@@ -20,7 +20,7 @@ Next task: <pick from the CONTINUE HERE "Next" list>
 ## Node-local state on h13-17 (re-check before trusting: `hostname`, `ps`, `git status`)
 
 - **RCCL:** the container's SDK `librccl.so.1` is REPLACED by RCCL 2.32.3 (rocm-systems `4ca8623`). Restore with `bash /workspace/proxy_work/rccl_swap.sh restore`.
-- **sglang** `/sgl-workspace/sglang`: branch `feat/proxy-model-gfx1250-1023` @ `ac677aad64`, clean.
+- **sglang** `/sgl-workspace/sglang`: branch `feat/proxy-model-gfx1250-1023` @ `204430a4f0` (pushed); untracked image hipify outputs only.
   - The old-base work is in `git stash` "oldbase-1023: ...".
   - The image's build-only edits (`pyproject.toml`, `kernels/aot`) stay in that stash.
 - **aiter** `/sgl-workspace/aiter`: branch `feat/proxy-model-gfx1250-1023` @ `dae49be2b`.

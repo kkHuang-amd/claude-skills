@@ -24,7 +24,7 @@ Node facts that change conclusions (h13-17, B0):
 - 8 GPUs are 4 sockets x 2 partitions; amd-smi reports socket power, throttle and temperature
   only on even GPUs; odd GPUs read N/A, clock included.
 - 96 CUs per GPU.
-- Measured streaming-read ceiling: 32 MiB fp32 read in 6.1 us = 5.47 TB/s (Triton, grid 384).
+- Measured HBM read ceiling per partition: 8.09 / 7.92 TB/s (4 GiB persistent Triton read, grid 8/CU, block 2048 int32, 4 warps; `proxy-moe/scripts/hbm_read_ceiling.py`). Theoretical ~10.1 TB/s (amd-smi 20.3 TB/s is per SOCKET). The old 5.47 TB/s (32 MiB buffer) was not a ceiling.
 
 ## 1. Small-M fp32 GEMV / router: VALU for M <= 2, fp32 WMMA above
 

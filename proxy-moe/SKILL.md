@@ -27,6 +27,14 @@ flags, in-node parallelism.
 | `SESSION_PROMPT_OPT_1021.md` | Handoff prompt: continue optimization on crsuse2-m2m-231 after the sweep |
 | `fixed_seq_len/` | InferenceX-style sweep (1k/1k, 8k/1k, 70k/300; TP8 + TP4): scripts, README, session prompt |
 | `fixed_seq_len_gb300/` | Same sweep on GB300 (TP4, 12L): Quark MXFP4 on CUDA patch, scripts, RESULTS |
+| `MI455_RUN.md` | MI455 (gfx1250) run recipe on h13-16: container, AITER patches, 1K1K / 8K1K / 70K300 commands |
+| `MI455_RUN_h13-17.md` | MI455 optimization log on h13-17: P0 attribution, RCCL CUMEM/DDA, FlyDSL fp32 router, aiter custom AR, results (CONTINUE HERE on top) |
+| `MI355X_OPT_CATALOG.md` | Catalog of MI355X optimizations with gains and gfx950 assumptions, plus the target numbers |
+| `RCCL_DDA_HANG_REPRO.md` | Repro of the RCCL DDA all-reduce hang on gfx1250 TP8 (`NCCL_CUMEM_ENABLE=1`) |
+| `SESSION_PROMPT_MI455_1024.md` | Handoff prompt and node-local state for continuing the MI455 work |
+
+Kernels (`kernels/`): `router_gemv_gfx1250.py` (FlyDSL fp32 router GEMV/WMMA), `wmma_f32_layout_probe.py`.
+Techniques learned on gfx1250: `../amd-kernel-opt-techniques-gfx1250/SKILL.md`.
 
 Tools (`scripts/`): `trace_kernels.py <trace.json.gz> --steps N` (kernel time by name/category),
 `rank_skew.py` / `ar_wait_attrib.py` (cross-rank AR wait attribution), `ep_moe_check.py`

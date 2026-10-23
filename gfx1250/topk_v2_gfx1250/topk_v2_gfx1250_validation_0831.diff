@@ -1,0 +1,121 @@
+diff --git a/benchmark/kernels/deepseek/benchmark_dsv4_topk_v2_gfx1250.py b/benchmark/kernels/deepseek/benchmark_dsv4_topk_v2_gfx1250.py
+new file mode 100644
+index 0000000000..8b1cc9ec22
+--- /dev/null
++++ b/benchmark/kernels/deepseek/benchmark_dsv4_topk_v2_gfx1250.py
+@@ -0,0 +1,115 @@
++"""Benchmark DSV4 TopK v1 vs v2 on gfx1250 TP1 serving shapes.
++
++The 8k1k workload compresses sequence lengths by four before the DSV4 indexer,
++so its decode range is approximately 1,640--2,304 C4 tokens. Run with:
++
++    HIP_VISIBLE_DEVICES=0 python3 \
++      benchmark/kernels/deepseek/benchmark_dsv4_topk_v2_gfx1250.py
++"""
++
++import sgl_kernel  # noqa: F401  # Registers the ROCm v1 AOT operator.
++import torch
++
++from sglang.kernels.jit.benchmark import marker
++from sglang.kernels.ops.attention.dsv4.topk import (
++    plan_topk_v2,
++    topk_transform_512,
++    topk_transform_512_v2,
++)
++
++PAGE_SIZE = 64
++TOPK = 512
++BATCH_SIZES = (4, 8, 16, 32, 64)
++C4_SEQ_LENS = (1640, 2048, 2304)
++WARMUP_ITERS = 20
++REPLAY_ITERS = 100
++
++
++def make_inputs(batch_size: int, seq_len: int):
++    torch.manual_seed(batch_size * 100_003 + seq_len)
++    scores = torch.randn(
++        batch_size, seq_len, dtype=torch.float32, device="cuda"
++    )
++    seq_lens = torch.full(
++        (batch_size,), seq_len, dtype=torch.int32, device="cuda"
++    )
++    num_pages = (seq_len + PAGE_SIZE - 1) // PAGE_SIZE
++    page_table = (
++        torch.arange(num_pages, dtype=torch.int32, device="cuda")
++        .unsqueeze(0)
++        .expand(batch_size, -1)
++        .contiguous()
++    )
++    out_v1 = torch.empty(
++        batch_size, TOPK, dtype=torch.int32, device="cuda"
++    )
++    out_v2 = torch.empty_like(out_v1)
++    metadata = plan_topk_v2(seq_lens)
++    torch.cuda.synchronize()
++    return scores, seq_lens, page_table, out_v1, out_v2, metadata
++
++
++def benchmark_shape(batch_size: int, seq_len: int):
++    scores, seq_lens, page_table, out_v1, out_v2, metadata = make_inputs(
++        batch_size, seq_len
++    )
++
++    def v1():
++        topk_transform_512(
++            scores, seq_lens, page_table, out_v1, PAGE_SIZE
++        )
++
++    def v2():
++        topk_transform_512_v2(
++            scores, seq_lens, page_table, out_v2, PAGE_SIZE, metadata
++        )
++
++    v1()
++    v2()
++    torch.cuda.synchronize()
++    mismatches = [
++        len(set(row_v1) ^ set(row_v2))
++        for row_v1, row_v2 in zip(out_v1.cpu().tolist(), out_v2.cpu().tolist())
++    ]
++    if max(mismatches, default=0) != 0:
++        raise AssertionError(
++            f"v1/v2 output mismatch for batch={batch_size}, "
++            f"seq={seq_len}: {mismatches}"
++        )
++
++    common = {
++        "use_cuda_graph": False,
++        "warmup_iters": WARMUP_ITERS,
++        "replay_iters": REPLAY_ITERS,
++        "metrics": (0.5, "avg"),
++        "memory_args": (scores, seq_lens, page_table),
++    }
++    v1_times = marker.do_bench(v1, **common).times
++    v2_times = marker.do_bench(v2, **common).times
++    return v1_times, v2_times
++
++
++def main():
++    props = torch.cuda.get_device_properties(torch.cuda.current_device())
++    print(f"device: {props.name} ({getattr(props, 'gcnArchName', 'unknown')})")
++    print(
++        f"correctness: exact v1/v2 output-set equality; "
++        f"timing: {WARMUP_ITERS} warmups, {REPLAY_ITERS} GPU-event iterations"
++    )
++    print(
++        "| batch | C4 seq | v1 median us | v2 median us | "
++        "v1 avg us | v2 avg us | speedup |"
++    )
++    print("| ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
++    for seq_len in C4_SEQ_LENS:
++        for batch_size in BATCH_SIZES:
++            v1_times, v2_times = benchmark_shape(batch_size, seq_len)
++            print(
++                f"| {batch_size} | {seq_len} | {v1_times[0] * 1e6:.2f} | "
++                f"{v2_times[0] * 1e6:.2f} | {v1_times[1] * 1e6:.2f} | "
++                f"{v2_times[1] * 1e6:.2f} | {v1_times[0] / v2_times[0]:.3f}x |"
++            )
++
++
++if __name__ == "__main__":
++    main()

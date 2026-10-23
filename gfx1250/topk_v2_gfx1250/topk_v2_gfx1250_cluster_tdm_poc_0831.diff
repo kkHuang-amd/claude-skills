@@ -1,0 +1,808 @@
+diff --git a/python/sglang/kernels/jit/csrc/deepseek_v4/topk_tdm_hist_probe.cuh b/python/sglang/kernels/jit/csrc/deepseek_v4/topk_tdm_hist_probe.cuh
+new file mode 100644
+index 0000000000..685d4448db
+--- /dev/null
++++ b/python/sglang/kernels/jit/csrc/deepseek_v4/topk_tdm_hist_probe.cuh
+@@ -0,0 +1,492 @@
++// EXPERIMENTAL gfx1250 TopK/TDM probe.
++//
++// This source is intentionally not wired into production dispatch. The
++// correctness-checked full kernel was slower than v2 streaming for every
++// DeepSeek-V4-Flash-valid shape tested. Keep it only as a starting point for
++// future TDM/cluster work.
++
++#include <sgl_kernel/tensor.h>
++#include <sgl_kernel/utils.h>
++
++#include <sgl_kernel/utils.cuh>
++#include <sgl_kernel/deepseek_v4/topk_impl.cuh>
++
++#include <opus/opus.hpp>
++#include <hip/hip_cooperative_groups.h>
++
++#include <dlpack/dlpack.h>
++#include <tvm/ffi/container/tensor.h>
++
++#include <cstdint>
++
++namespace sglang::topk_tdm_probe {
++
++namespace cg = cooperative_groups;
++namespace topk = device::topk;
++
++#ifndef TOPK_TDM_PROBE_CLUSTER_SIZE
++#define TOPK_TDM_PROBE_CLUSTER_SIZE 8
++#endif
++
++constexpr uint32_t kBlockSize = 1024;
++constexpr uint32_t kClusterSize = TOPK_TDM_PROBE_CLUSTER_SIZE;
++constexpr uint32_t kHistSize = 1024;
++
++#if TOPK_TDM_PROBE_CLUSTER_SIZE == 2
++using HistMulticast = opus::tdm_traits::multicast<0, 1>;
++#elif TOPK_TDM_PROBE_CLUSTER_SIZE == 4
++using HistMulticast = opus::tdm_traits::multicast<0, 1, 2, 3>;
++#elif TOPK_TDM_PROBE_CLUSTER_SIZE == 8
++using HistMulticast = opus::tdm_traits::multicast<0, 1, 2, 3, 4, 5, 6, 7>;
++#else
++#error "TOPK_TDM_PROBE_CLUSTER_SIZE must be 2, 4, or 8"
++#endif
++
++using HistTdm = opus::tdm<
++    uint32_t,
++    opus::seq<kHistSize, kClusterSize>,
++    HistMulticast>;
++
++struct Params {
++  const float* scores;
++  uint32_t* scratch;
++  uint32_t* thresholds;
++  int64_t score_stride;
++  uint32_t seq_len;
++  uint32_t topk;
++};
++
++struct FullParams {
++  const float* scores;
++  uint32_t* histogram_scratch;
++  uint32_t* count_scratch;
++  topk::TieValue* tie_scratch;
++  int32_t* output;
++  int64_t score_stride;
++  uint32_t seq_len;
++  uint32_t topk;
++};
++
++struct ProbeRadix : topk::TopKRadixBase<10> {
++  template <typename F>
++  SGL_DEVICE static void scan(
++      const float* input,
++      uint32_t seq_len,
++      F&& fn) {
++    for_each_input(input, seq_len, static_cast<F&&>(fn));
++  }
++};
++
++SGL_DEVICE void find_threshold_parallel(
++    const uint32_t* histogram,
++    uint32_t seq_len,
++    uint32_t topk_count,
++    uint32_t* warp_sums,
++    uint32_t* threshold) {
++  const auto tx = threadIdx.x;
++  const auto lane = tx % topk::kWarpSize;
++  const auto warp = tx / topk::kWarpSize;
++  const auto count = histogram[tx];
++  const auto warp_prefix = topk::warp_inclusive_sum(lane, count);
++  if (lane == topk::kWarpSize - 1) warp_sums[warp] = warp_prefix;
++  __syncthreads();
++  const auto prior_warps = device::warp::reduce_sum(
++      lane < warp ? warp_sums[lane] : 0);
++  const auto prefix = prior_warps + warp_prefix;
++  const auto above = seq_len - prefix;
++  if (above < topk_count && above + count >= topk_count) {
++    *threshold = tx;
++  }
++}
++
++__global__ __launch_bounds__(kBlockSize, 2)
++void streaming_histogram_kernel(Params params) {
++  __shared__ uint32_t histogram[kHistSize];
++  __shared__ uint32_t warp_sums[kBlockSize / topk::kWarpSize];
++  const auto tx = threadIdx.x;
++  histogram[tx] = 0;
++  __syncthreads();
++
++  const auto* row = params.scores + blockIdx.x * params.score_stride;
++  ProbeRadix::scan(row, params.seq_len, [&](float value, uint32_t) {
++    atomicAdd(&histogram[topk::extract_coarse_bin<10>(value)], 1);
++  });
++  __syncthreads();
++  find_threshold_parallel(
++      histogram,
++      params.seq_len,
++      params.topk,
++      warp_sums,
++      params.thresholds + blockIdx.x);
++}
++
++__global__ __launch_bounds__(kBlockSize, 1)
++__cluster_dims__(TOPK_TDM_PROBE_CLUSTER_SIZE, 1, 1)
++void cluster_tdm_histogram_kernel(Params params) {
++  __shared__ uint32_t histogram_matrix[kClusterSize][kHistSize];
++  __shared__ uint32_t warp_sums[kBlockSize / topk::kWarpSize];
++  const auto tx = threadIdx.x;
++  const auto cluster_id = __builtin_amdgcn_cluster_id_x();
++  const auto rank = __builtin_amdgcn_cluster_workgroup_id_x();
++  const auto cluster = cg::this_cluster();
++
++  auto* local_histogram = histogram_matrix[0];
++  local_histogram[tx] = 0;
++  __syncthreads();
++
++  const auto* row = params.scores + cluster_id * params.score_stride;
++  const uint32_t chunk_size =
++      (params.seq_len + kClusterSize - 1) / kClusterSize;
++  const uint32_t begin = min(rank * chunk_size, params.seq_len);
++  const uint32_t end = min(begin + chunk_size, params.seq_len);
++  ProbeRadix::scan(row + begin, end - begin, [&](float value, uint32_t) {
++    atomicAdd(&local_histogram[topk::extract_coarse_bin<10>(value)], 1);
++  });
++  __syncthreads();
++
++  auto* staged =
++      params.scratch +
++      (cluster_id * kClusterSize + rank) * kHistSize;
++  staged[tx] = local_histogram[tx];
++  __threadfence();
++  cluster.sync();
++
++  if (tx < 32) {
++    const auto lds_base =
++        static_cast<opus::u32_t>(
++            reinterpret_cast<__UINTPTR_TYPE__>(histogram_matrix));
++    auto window = opus::make_tdm<HistTdm>(
++        lds_base,
++        params.scratch + cluster_id * kClusterSize * kHistSize,
++        kHistSize,
++        kClusterSize,
++        kHistSize,
++        0,
++        0);
++    window.async_load();
++#if defined(__HIP_DEVICE_COMPILE__)
++    opus::s_wait_tensorcnt<0>();
++#endif
++  }
++  __syncthreads();
++
++  uint32_t sum = 0;
++#pragma unroll
++  for (uint32_t peer = 0; peer < kClusterSize; ++peer) {
++    sum += histogram_matrix[peer][tx];
++  }
++  local_histogram[tx] = sum;
++  __syncthreads();
++
++  find_threshold_parallel(
++      local_histogram,
++      params.seq_len,
++      params.topk,
++      warp_sums,
++      params.thresholds + cluster_id * kClusterSize + rank);
++}
++
++struct CollectSmem {
++  topk::TopKConfig::TieHandleSmem tie_handle;
++};
++
++__global__ __launch_bounds__(kBlockSize, 1)
++__cluster_dims__(TOPK_TDM_PROBE_CLUSTER_SIZE, 1, 1)
++void cluster_tdm_topk_kernel(FullParams params) {
++  constexpr uint32_t kMatrixBytes =
++      kClusterSize * kHistSize * sizeof(uint32_t);
++  constexpr uint32_t kStorageBytes =
++      kMatrixBytes > sizeof(CollectSmem)
++      ? kMatrixBytes
++      : sizeof(CollectSmem);
++  __shared__ __align__(128) char smem_storage[kStorageBytes];
++  auto* histogram_matrix =
++      reinterpret_cast<uint32_t (*)[kHistSize]>(smem_storage);
++  auto* collect = reinterpret_cast<CollectSmem*>(smem_storage);
++  __shared__ uint32_t warp_sums[kBlockSize / topk::kWarpSize];
++  __shared__ uint32_t threshold_bin;
++
++  const auto tx = threadIdx.x;
++  const auto cluster_id = __builtin_amdgcn_cluster_id_x();
++  const auto rank = __builtin_amdgcn_cluster_workgroup_id_x();
++  const auto cluster = cg::this_cluster();
++  const auto* row = params.scores + cluster_id * params.score_stride;
++  const uint32_t chunk_size =
++      (params.seq_len + kClusterSize - 1) / kClusterSize;
++  const uint32_t begin = min(rank * chunk_size, params.seq_len);
++  const uint32_t end = min(begin + chunk_size, params.seq_len);
++
++  auto* local_histogram = histogram_matrix[0];
++  local_histogram[tx] = 0;
++  __syncthreads();
++  ProbeRadix::scan(row + begin, end - begin, [&](float value, uint32_t) {
++    atomicAdd(&local_histogram[topk::extract_coarse_bin<10>(value)], 1);
++  });
++  __syncthreads();
++
++  auto* staged_histogram =
++      params.histogram_scratch +
++      (cluster_id * kClusterSize + rank) * kHistSize;
++  staged_histogram[tx] = local_histogram[tx];
++  __threadfence();
++  cluster.sync();
++
++  if (tx < 32) {
++    const auto lds_base =
++        static_cast<opus::u32_t>(
++            reinterpret_cast<__UINTPTR_TYPE__>(histogram_matrix));
++    auto window = opus::make_tdm<HistTdm>(
++        lds_base,
++        params.histogram_scratch +
++            cluster_id * kClusterSize * kHistSize,
++        kHistSize,
++        kClusterSize,
++        kHistSize,
++        0,
++        0);
++    window.async_load();
++#if defined(__HIP_DEVICE_COMPILE__)
++    opus::s_wait_tensorcnt<0>();
++#endif
++  }
++  __syncthreads();
++
++  uint32_t histogram_sum = 0;
++#pragma unroll
++  for (uint32_t peer = 0; peer < kClusterSize; ++peer) {
++    histogram_sum += histogram_matrix[peer][tx];
++  }
++  local_histogram[tx] = histogram_sum;
++  __syncthreads();
++  find_threshold_parallel(
++      local_histogram,
++      params.seq_len,
++      params.topk,
++      warp_sums,
++      &threshold_bin);
++  __syncthreads();
++
++  auto* global_counts =
++      params.count_scratch + cluster_id * kClusterSize * 2;
++  if (rank == 0 && tx == 0) {
++    global_counts[0] = 0;
++    global_counts[1] = 0;
++  }
++  __threadfence();
++  cluster.sync();
++
++  const auto v_hi =
++      topk::coarse_bin_lower_bound<10>(threshold_bin + 1);
++  const auto v_lo =
++      topk::coarse_bin_lower_bound<10>(threshold_bin);
++  auto* output = params.output + cluster_id * params.topk;
++  auto* global_ties =
++      params.tie_scratch +
++      cluster_id * topk::TopKConfig::kMaxNumTie;
++  ProbeRadix::scan(
++      row + begin,
++      end - begin,
++      [&](float value, uint32_t local_idx) {
++        const auto idx = begin + local_idx;
++        if (value >= v_hi) {
++          const auto pos = atomicAdd(&global_counts[0], 1);
++          if (pos < params.topk) output[pos] = static_cast<int32_t>(idx);
++        } else if (value >= v_lo) {
++          const auto pos = atomicAdd(&global_counts[1], 1);
++          if (pos < topk::TopKConfig::kMaxNumTie) {
++            global_ties[pos] = {value, idx};
++          }
++        }
++      });
++  __threadfence();
++  cluster.sync();
++
++  if (rank == 0) {
++    const auto total_above = global_counts[0];
++    const auto total_ties = global_counts[1];
++    const topk::TopKProblem problem{
++        .in = row,
++        .out = output,
++        .page_table = nullptr,
++        .topk = params.topk,
++        .seq_len = params.seq_len,
++        .page_bits = 0,
++    };
++    const auto remain =
++        total_above < params.topk ? params.topk - total_above : 0;
++    topk::TopKConfig::handle_tie(
++        global_ties,
++        problem,
++        total_above,
++        min(total_ties, topk::TopKConfig::kMaxNumTie),
++        remain,
++        &collect->tie_handle);
++  }
++  __threadfence();
++  cluster.sync();
++}
++
++struct TopKTdmHistProbe {
++  static void streaming(
++      const tvm::ffi::TensorView scores,
++      const tvm::ffi::TensorView thresholds,
++      const uint32_t topk_count) {
++    using namespace host;
++    auto B = SymbolicSize{"batch_size"};
++    auto L = SymbolicSize{"seq_len"};
++    auto S = SymbolicSize{"score_stride"};
++    auto device = SymbolicDevice{};
++    device.set_options<kDLGPU>();
++    TensorMatcher({B, L})
++        .with_strides({S, 1})
++        .with_dtype<float>()
++        .with_device(device)
++        .verify(scores);
++    TensorMatcher({B})
++        .with_dtype<int32_t>()
++        .with_device(device)
++        .verify(thresholds);
++
++    const Params params{
++        .scores = static_cast<const float*>(scores.data_ptr()),
++        .scratch = nullptr,
++        .thresholds = static_cast<uint32_t*>(thresholds.data_ptr()),
++        .score_stride = S.unwrap(),
++        .seq_len = static_cast<uint32_t>(L.unwrap()),
++        .topk = topk_count,
++    };
++    LaunchKernel(
++        static_cast<uint32_t>(B.unwrap()),
++        kBlockSize,
++        device.unwrap())(streaming_histogram_kernel, params);
++  }
++
++  static void cluster_tdm(
++      const tvm::ffi::TensorView scores,
++      const tvm::ffi::TensorView scratch,
++      const tvm::ffi::TensorView thresholds,
++      const uint32_t topk_count) {
++    using namespace host;
++    auto B = SymbolicSize{"batch_size"};
++    auto L = SymbolicSize{"seq_len"};
++    auto S = SymbolicSize{"score_stride"};
++    auto device = SymbolicDevice{};
++    device.set_options<kDLGPU>();
++    TensorMatcher({B, L})
++        .with_strides({S, 1})
++        .with_dtype<float>()
++        .with_device(device)
++        .verify(scores);
++    TensorMatcher({B, kClusterSize, kHistSize})
++        .with_dtype<int32_t>()
++        .with_device(device)
++        .verify(scratch);
++    TensorMatcher({B, kClusterSize})
++        .with_dtype<int32_t>()
++        .with_device(device)
++        .verify(thresholds);
++
++    const Params params{
++        .scores = static_cast<const float*>(scores.data_ptr()),
++        .scratch = static_cast<uint32_t*>(scratch.data_ptr()),
++        .thresholds = static_cast<uint32_t*>(thresholds.data_ptr()),
++        .score_stride = S.unwrap(),
++        .seq_len = static_cast<uint32_t>(L.unwrap()),
++        .topk = topk_count,
++    };
++
++    hipLaunchAttribute attrs[1]{};
++    attrs[0].id = hipLaunchAttributeClusterDimension;
++    attrs[0].val.clusterDim = {kClusterSize, 1, 1};
++    hipLaunchConfig_t config{};
++    config.gridDim = {
++        static_cast<uint32_t>(B.unwrap()) * kClusterSize,
++        1,
++        1};
++    config.blockDim = {kBlockSize, 1, 1};
++    config.dynamicSmemBytes = 0;
++    config.stream = LaunchKernel::resolve_device(device.unwrap());
++    config.attrs = attrs;
++    config.numAttrs = 1;
++    RuntimeDeviceCheck(
++        ::hipLaunchKernelEx(
++            &config,
++            cluster_tdm_histogram_kernel,
++            params));
++  }
++
++  static void full_cluster_tdm(
++      const tvm::ffi::TensorView scores,
++      const tvm::ffi::TensorView histogram_scratch,
++      const tvm::ffi::TensorView count_scratch,
++      const tvm::ffi::TensorView tie_scratch,
++      const tvm::ffi::TensorView output) {
++    using namespace host;
++    auto B = SymbolicSize{"batch_size"};
++    auto L = SymbolicSize{"seq_len"};
++    auto S = SymbolicSize{"score_stride"};
++    auto K = SymbolicSize{"topk"};
++    auto device = SymbolicDevice{};
++    device.set_options<kDLGPU>();
++    TensorMatcher({B, L})
++        .with_strides({S, 1})
++        .with_dtype<float>()
++        .with_device(device)
++        .verify(scores);
++    TensorMatcher({B, kClusterSize, kHistSize})
++        .with_dtype<int32_t>()
++        .with_device(device)
++        .verify(histogram_scratch);
++    TensorMatcher({B, kClusterSize, 2})
++        .with_dtype<int32_t>()
++        .with_device(device)
++        .verify(count_scratch);
++    TensorMatcher({B, topk::TopKConfig::kMaxNumTie, 2})
++        .with_dtype<int32_t>()
++        .with_device(device)
++        .verify(tie_scratch);
++    TensorMatcher({B, K})
++        .with_dtype<int32_t>()
++        .with_device(device)
++        .verify(output);
++    RuntimeCheck(
++        K.unwrap() > 0 &&
++            K.unwrap() <= topk::TopKConfig::kMaxTopK,
++        "invalid topk");
++
++    const FullParams params{
++        .scores = static_cast<const float*>(scores.data_ptr()),
++        .histogram_scratch =
++            static_cast<uint32_t*>(histogram_scratch.data_ptr()),
++        .count_scratch =
++            static_cast<uint32_t*>(count_scratch.data_ptr()),
++        .tie_scratch =
++            reinterpret_cast<topk::TieValue*>(tie_scratch.data_ptr()),
++        .output = static_cast<int32_t*>(output.data_ptr()),
++        .score_stride = S.unwrap(),
++        .seq_len = static_cast<uint32_t>(L.unwrap()),
++        .topk = static_cast<uint32_t>(K.unwrap()),
++    };
++
++    hipLaunchAttribute attrs[1]{};
++    attrs[0].id = hipLaunchAttributeClusterDimension;
++    attrs[0].val.clusterDim = {kClusterSize, 1, 1};
++    hipLaunchConfig_t config{};
++    config.gridDim = {
++        static_cast<uint32_t>(B.unwrap()) * kClusterSize,
++        1,
++        1};
++    config.blockDim = {kBlockSize, 1, 1};
++    config.dynamicSmemBytes = 0;
++    config.stream = LaunchKernel::resolve_device(device.unwrap());
++    config.attrs = attrs;
++    config.numAttrs = 1;
++    RuntimeDeviceCheck(
++        ::hipLaunchKernelEx(
++            &config,
++            cluster_tdm_topk_kernel,
++            params));
++  }
++};
++
++}  // namespace sglang::topk_tdm_probe
+diff --git a/benchmark/kernels/deepseek/benchmark_dsv4_topk_tdm_hist_gfx1250.py b/benchmark/kernels/deepseek/benchmark_dsv4_topk_tdm_hist_gfx1250.py
+new file mode 100644
+index 0000000000..06907a944c
+--- /dev/null
++++ b/benchmark/kernels/deepseek/benchmark_dsv4_topk_tdm_hist_gfx1250.py
+@@ -0,0 +1,138 @@
++"""Benchmark the histogram/threshold phase of a gfx1250 TDM TopK cluster.
++
++This is an isolated development probe. It imports AITER's header-only Opus TDM
++descriptor implementation through an explicit include path; production SGLang
++integration must vendor the required descriptor subset or add a real dependency.
++"""
++
++import torch
++
++from sglang.kernels.jit.benchmark import marker
++from sglang.kernels.jit.utils import cache_once, load_jit
++
++TOPK = 512
++HIST_SIZE = 1024
++CLUSTER_SIZES = (2, 4, 8)
++BATCH_SIZES = (1, 2, 4, 8)
++C4_SEQ_LENS = (131072, 196608, 262144, 393216, 524288)
++WARMUP_ITERS = 20
++REPLAY_ITERS = 100
++
++
++@cache_once
++def load_probe(cluster_size: int):
++    return load_jit(
++        f"topk_tdm_hist_probe_gfx1250_c{cluster_size}",
++        cuda_files=["deepseek_v4/topk_tdm_hist_probe.cuh"],
++        cuda_wrappers=[
++            (
++                "streaming",
++                "sglang::topk_tdm_probe::TopKTdmHistProbe::streaming",
++            ),
++            (
++                "cluster_tdm",
++                "sglang::topk_tdm_probe::TopKTdmHistProbe::cluster_tdm",
++            ),
++            (
++                "full_cluster_tdm",
++                "sglang::topk_tdm_probe::TopKTdmHistProbe::full_cluster_tdm",
++            ),
++        ],
++        extra_cuda_cflags=[
++            "-DSGL_ROCM_ARCH_GFX1250=1",
++            f"-DTOPK_TDM_PROBE_CLUSTER_SIZE={cluster_size}",
++        ],
++        extra_include_paths=["/sgl-workspace/aiter/csrc/include"],
++    )
++
++
++def coarse_bin_10(values: torch.Tensor) -> torch.Tensor:
++    bits = values.half().view(torch.uint16).to(torch.int32)
++    key = torch.where(
++        (bits & 0x8000) != 0,
++        (~bits) & 0xFFFF,
++        bits | 0x8000,
++    )
++    return key >> 6
++
++
++def benchmark_shape(batch_size: int, seq_len: int, cluster_size: int):
++    torch.manual_seed(batch_size * 100_003 + seq_len)
++    scores = torch.randn(
++        batch_size, seq_len, dtype=torch.float32, device="cuda"
++    )
++    scratch = torch.empty(
++        batch_size,
++        cluster_size,
++        HIST_SIZE,
++        dtype=torch.int32,
++        device="cuda",
++    )
++    streaming_out = torch.empty(
++        batch_size, dtype=torch.int32, device="cuda"
++    )
++    cluster_out = torch.empty(
++        batch_size, cluster_size, dtype=torch.int32, device="cuda"
++    )
++    module = load_probe(cluster_size)
++
++    def streaming():
++        module.streaming(scores, streaming_out, TOPK)
++
++    def cluster_tdm():
++        module.cluster_tdm(scores, scratch, cluster_out, TOPK)
++
++    streaming()
++    cluster_tdm()
++    torch.cuda.synchronize()
++
++    kth_values = torch.topk(scores, TOPK, dim=1, sorted=False).values.min(dim=1).values
++    reference = coarse_bin_10(kth_values)
++    if not torch.equal(streaming_out, reference):
++        raise AssertionError("streaming threshold differs from torch.topk")
++    expected_cluster = reference[:, None].expand(-1, cluster_size)
++    if not torch.equal(cluster_out, expected_cluster):
++        raise AssertionError("TDM cluster thresholds differ from torch.topk")
++
++    common = {
++        "use_cuda_graph": False,
++        "warmup_iters": WARMUP_ITERS,
++        "replay_iters": REPLAY_ITERS,
++        "metrics": (0.5, "avg"),
++        "memory_args": (scores,),
++    }
++    streaming_times = marker.do_bench(streaming, **common).times
++    cluster_times = marker.do_bench(cluster_tdm, **common).times
++    return streaming_times, cluster_times
++
++
++def main():
++    props = torch.cuda.get_device_properties(torch.cuda.current_device())
++    print(f"device: {props.name} ({getattr(props, 'gcnArchName', 'unknown')})")
++    print(
++        f"correctness: threshold bin versus torch.topk; "
++        f"timing: {WARMUP_ITERS} warmups, {REPLAY_ITERS} GPU-event iterations"
++    )
++    print(
++        "| cluster | batch | C4 seq | streaming median us | TDM cluster median us | "
++        "streaming avg us | TDM cluster avg us | speedup |"
++    )
++    print("| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
++    for seq_len in C4_SEQ_LENS:
++        for batch_size in BATCH_SIZES:
++            for cluster_size in CLUSTER_SIZES:
++                streaming_times, cluster_times = benchmark_shape(
++                    batch_size, seq_len, cluster_size
++                )
++                print(
++                    f"| {cluster_size} | {batch_size} | {seq_len} | "
++                    f"{streaming_times[0] * 1e6:.2f} | "
++                    f"{cluster_times[0] * 1e6:.2f} | "
++                    f"{streaming_times[1] * 1e6:.2f} | "
++                    f"{cluster_times[1] * 1e6:.2f} | "
++                    f"{streaming_times[0] / cluster_times[0]:.3f}x |"
++                )
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/benchmark/kernels/deepseek/benchmark_dsv4_topk_tdm_full_gfx1250.py b/benchmark/kernels/deepseek/benchmark_dsv4_topk_tdm_full_gfx1250.py
+new file mode 100644
+index 0000000000..80b811d955
+--- /dev/null
++++ b/benchmark/kernels/deepseek/benchmark_dsv4_topk_tdm_full_gfx1250.py
+@@ -0,0 +1,160 @@
++"""Benchmark a full gfx1250 TDM-cluster TopK prototype against v2 streaming.
++
++This is retained research code, not a production candidate. The measured full
++kernel was slower than v2 streaming at every DeepSeek-V4-Flash-valid shape.
++"""
++
++import torch
++
++from sglang.kernels.jit.benchmark import marker
++from sglang.kernels.jit.utils import cache_once, load_jit
++from sglang.kernels.ops.attention.dsv4.topk import (
++    plan_topk_v2,
++    topk_transform_512_v2,
++)
++
++TOPK = 512
++PAGE_SIZE = 64
++HIST_SIZE = 1024
++MAX_TIES = 2048
++CLUSTER_SIZES = (2, 4)
++BATCH_SIZES = (1, 2, 4)
++C4_SEQ_LENS = (131072, 196608, 262144, 393216, 524288)
++WARMUP_ITERS = 20
++REPLAY_ITERS = 100
++
++
++@cache_once
++def load_probe(cluster_size: int):
++    return load_jit(
++        f"topk_tdm_hist_probe_gfx1250_c{cluster_size}",
++        cuda_files=["deepseek_v4/topk_tdm_hist_probe.cuh"],
++        cuda_wrappers=[
++            (
++                "streaming",
++                "sglang::topk_tdm_probe::TopKTdmHistProbe::streaming",
++            ),
++            (
++                "cluster_tdm",
++                "sglang::topk_tdm_probe::TopKTdmHistProbe::cluster_tdm",
++            ),
++            (
++                "full_cluster_tdm",
++                "sglang::topk_tdm_probe::TopKTdmHistProbe::full_cluster_tdm",
++            ),
++        ],
++        extra_cuda_cflags=[
++            "-DSGL_ROCM_ARCH_GFX1250=1",
++            f"-DTOPK_TDM_PROBE_CLUSTER_SIZE={cluster_size}",
++        ],
++        extra_include_paths=["/sgl-workspace/aiter/csrc/include"],
++    )
++
++
++def benchmark_shape(batch_size: int, seq_len: int, cluster_size: int):
++    torch.manual_seed(batch_size * 100_003 + seq_len + cluster_size)
++    scores = torch.randn(
++        batch_size, seq_len, dtype=torch.float32, device="cuda"
++    )
++    seq_lens = torch.full(
++        (batch_size,), seq_len, dtype=torch.int32, device="cuda"
++    )
++    metadata = plan_topk_v2(seq_lens)
++    baseline = torch.empty(
++        batch_size, TOPK, dtype=torch.int32, device="cuda"
++    )
++    candidate = torch.empty_like(baseline)
++    histogram_scratch = torch.empty(
++        batch_size,
++        cluster_size,
++        HIST_SIZE,
++        dtype=torch.int32,
++        device="cuda",
++    )
++    count_scratch = torch.empty(
++        batch_size, cluster_size, 2, dtype=torch.int32, device="cuda"
++    )
++    tie_scratch = torch.empty(
++        batch_size, MAX_TIES, 2, dtype=torch.int32, device="cuda"
++    )
++    module = load_probe(cluster_size)
++
++    def streaming():
++        topk_transform_512_v2(
++            scores,
++            seq_lens,
++            None,
++            baseline,
++            PAGE_SIZE,
++            metadata,
++        )
++
++    def cluster_tdm():
++        module.full_cluster_tdm(
++            scores,
++            histogram_scratch,
++            count_scratch,
++            tie_scratch,
++            candidate,
++        )
++
++    streaming()
++    cluster_tdm()
++    torch.cuda.synchronize()
++
++    reference = torch.topk(scores, TOPK, dim=1, sorted=False).indices
++    for row, (ref, got_streaming, got_cluster) in enumerate(
++        zip(
++            reference.cpu().tolist(),
++            baseline.cpu().tolist(),
++            candidate.cpu().tolist(),
++        )
++    ):
++        ref_set = set(ref)
++        if set(got_streaming) != ref_set:
++            raise AssertionError(f"streaming mismatch in row {row}")
++        if set(got_cluster) != ref_set:
++            raise AssertionError(f"TDM cluster mismatch in row {row}")
++
++    common = {
++        "use_cuda_graph": False,
++        "warmup_iters": WARMUP_ITERS,
++        "replay_iters": REPLAY_ITERS,
++        "metrics": (0.5, "avg"),
++        "memory_args": (scores,),
++    }
++    streaming_times = marker.do_bench(streaming, **common).times
++    cluster_times = marker.do_bench(cluster_tdm, **common).times
++    return streaming_times, cluster_times
++
++
++def main():
++    props = torch.cuda.get_device_properties(torch.cuda.current_device())
++    print(f"device: {props.name} ({getattr(props, 'gcnArchName', 'unknown')})")
++    print(
++        f"correctness: exact output-set equality versus torch.topk; "
++        f"timing: {WARMUP_ITERS} warmups, {REPLAY_ITERS} GPU-event iterations"
++    )
++    print(
++        "| cluster | batch | C4 seq | streaming median us | TDM cluster median us | "
++        "streaming avg us | TDM cluster avg us | speedup |"
++    )
++    print("| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
++    for seq_len in C4_SEQ_LENS:
++        for batch_size in BATCH_SIZES:
++            for cluster_size in CLUSTER_SIZES:
++                streaming_times, cluster_times = benchmark_shape(
++                    batch_size, seq_len, cluster_size
++                )
++                print(
++                    f"| {cluster_size} | {batch_size} | {seq_len} | "
++                    f"{streaming_times[0] * 1e6:.2f} | "
++                    f"{cluster_times[0] * 1e6:.2f} | "
++                    f"{streaming_times[1] * 1e6:.2f} | "
++                    f"{cluster_times[1] * 1e6:.2f} | "
++                    f"{streaming_times[0] / cluster_times[0]:.3f}x |"
++                )
++
++
++if __name__ == "__main__":
++    main()

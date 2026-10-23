@@ -1,0 +1,217 @@
+diff --git a/python/sglang/kernels/jit/csrc/deepseek_v4/topk_v2.cuh b/python/sglang/kernels/jit/csrc/deepseek_v4/topk_v2.cuh
+--- a/python/sglang/kernels/jit/csrc/deepseek_v4/topk_v2.cuh	2026-10-06 17:26:48.034484153 +0000
++++ b/python/sglang/kernels/jit/csrc/deepseek_v4/topk_v2.cuh	2026-10-06 17:26:48.038484081 +0000
+@@ -23,6 +23,7 @@
+ #include <bit>
+ #include <climits>
+ #include <cstdint>
++#include <cstdlib>
+ #include <iterator>
+ #include <mutex>
+ #include <utility>
+@@ -942,6 +943,15 @@
+ }
+ #endif  // USE_ROCM
+ 
++#if defined(SGL_ROCM_ARCH_GFX1250)
++// Default stays on the ROCm split/streaming path. Set to exactly "1" to test
++// the cooperative cluster route.
++inline bool gfx1250_topk_cluster_enabled() {
++  const char* value = std::getenv("SGLANG_GFX1250_TOPK_CLUSTER");
++  return value != nullptr && value[0] == '1' && value[1] == '\0';
++}
++#endif
++
+ template <bool kUsePDL>
+ struct TopKKernel {
+   static void plan(  //
+@@ -966,6 +976,12 @@
+     RuntimeCheck(metadata.size(0) == B.unwrap() + 1, "invalid metadata shape");
+ #if SUPPORT_CLUSTER
+     const auto batch_size = static_cast<uint32_t>(B.unwrap());
++#if defined(SGL_ROCM_ARCH_GFX1250)
++    if (!gfx1250_topk_cluster_enabled()) {
++      static_cast<void>(static_cluster_threshold);
++      return;
++    }
++#endif
+     // persistent cluster not supported
+     if (kNumPersistentClusters == 0) return;
+     // will not route to persistent cluster
+@@ -1058,7 +1074,12 @@
+       } else if constexpr (SGL_ARCH_HOPPER_OR_GREATER) {
+         return batch_size <= 15 ? 32768 : 65536;
+       } else {
++#if defined(SGL_ROCM_ARCH_GFX1250)
++        // Hopper small-batch floor. Used only when SGLANG_GFX1250_TOPK_CLUSTER=1.
++        return batch_size <= 15 ? 32768u : 65536u;
++#else
+         return UINT_MAX;
++#endif
+       }
+     };
+ 
+@@ -1096,7 +1117,10 @@
+     };
+     dispatch([&]<TopKMode kMode>() {
+ #if SUPPORT_CLUSTER
+-      const bool use_cluster = (max_seq_len > params.static_cluster_floor) && (batch_size <= kClusterMaxBatch);
++      bool use_cluster = (max_seq_len > params.static_cluster_floor) && (batch_size <= kClusterMaxBatch);
++#if defined(SGL_ROCM_ARCH_GFX1250)
++      use_cluster = use_cluster && gfx1250_topk_cluster_enabled();
++#endif
+       if (use_cluster) {
+         if constexpr (kMaxCluster16BatchSize > 0) {
+           if (batch_size <= kMaxCluster16BatchSize) {
+@@ -1134,7 +1158,8 @@
+           }
+         }
+       }
+-#elif defined(USE_ROCM)
++#endif
++#if defined(USE_ROCM)
+       // Split dispatch. One block per row leaves a long row latency bound on one
+       // CU however idle the rest is; split_plan decides where a second launch pays.
+       // PDL stays off: the hist -> select kernel boundary is the barrier.
+diff --git a/python/sglang/kernels/jit/include/sgl_kernel/deepseek_v4/topk_impl.cuh b/python/sglang/kernels/jit/include/sgl_kernel/deepseek_v4/topk_impl.cuh
+--- a/python/sglang/kernels/jit/include/sgl_kernel/deepseek_v4/topk_impl.cuh	2026-10-06 17:26:48.034484153 +0000
++++ b/python/sglang/kernels/jit/include/sgl_kernel/deepseek_v4/topk_impl.cuh	2026-10-06 17:26:48.034484153 +0000
+@@ -31,14 +31,20 @@
+ #if !defined(USE_ROCM)
+ // currently only apply cluster for SM90 & SM100, SM120 has poor cluster performance
+ #define SUPPORT_CLUSTER (SGL_CUDA_ARCH >= 900 && SGL_CUDA_ARCH < 1100)
++#elif defined(SGL_ROCM_ARCH_GFX1250)
++// Test-only: gfx1250 cluster launch. CDNA (gfx942/gfx950) stays off.
++#define SUPPORT_CLUSTER true
+ #else
+-// AMD doesn't support cluster
+ #define SUPPORT_CLUSTER false
+ #endif
+ 
+ #if SUPPORT_CLUSTER
++#ifdef USE_ROCM
++#include <hip/hip_cooperative_groups.h>
++#else
+ #include <cooperative_groups.h>
+ #endif
++#endif
+ 
+ namespace sglang {
+ 
+@@ -713,8 +719,7 @@
+ // Cluster path: very long seq_len, small batch. `kClusterSize` blocks cooperate
+ // on one batch element via distributed shared memory (one cluster per element).
+ //
+-// CUDA only: thread-block clusters and distributed shared memory have no CDNA
+-// equivalent.
++// CUDA SM90/SM100, plus a gfx1250 test route. CDNA has no cluster launch.
+ // ---------------------------------------------------------------------------
+ 
+ #if SUPPORT_CLUSTER
+@@ -741,15 +746,31 @@
+   };
+ 
+   SGL_DEVICE static void barrier_cluster_arrive_relaxed() {
++#ifndef USE_ROCM
+     asm volatile("barrier.cluster.arrive.relaxed.aligned;" ::: "memory");
++#else
++    // gfx1250's combined cluster.sync() path hangs. HIP's split helper uses a
++    // workgroup barrier, signals cluster barrier -3 once per workgroup, and
++    // returns an empty arrival token.
++    static_cast<void>(cooperative_groups::this_cluster().barrier_arrive());
++#endif
+   }
+ 
+   SGL_DEVICE static void barrier_cluster_arrive_release() {
++#ifndef USE_ROCM
+     asm volatile("barrier.cluster.arrive.release.aligned;" ::: "memory");
++#else
++    static_cast<void>(cooperative_groups::this_cluster().barrier_arrive());
++#endif
+   }
+ 
+   SGL_DEVICE static void barrier_cluster_wait() {
++#ifndef USE_ROCM
+     asm volatile("barrier.cluster.wait.acquire.aligned;" ::: "memory");
++#else
++    using Token = cooperative_groups::cluster_group::arrival_token;
++    cooperative_groups::this_cluster().barrier_wait(Token{});
++#endif
+   }
+ 
+   template <bool kUsePDL>
+@@ -787,6 +806,14 @@
+     __syncthreads();
+     if (this_rank != 0) {
+       const auto smem_0 = cluster.map_shared_rank(smem, 0);
++#ifdef USE_ROCM
++      // The installed HIP header returns nullptr when
++      // __builtin_amdgcn_map_shared_rank is missing. Trap here instead of
++      // faulting on that null.
++      if (smem_0 == nullptr) {
++        __builtin_trap();
++      }
++#endif
+       // Phase 2. atomic flush all histogram into rank 0
+       static_assert(kHistSize == kBlockSize);  // one bin per thread
+ 
+diff --git a/python/sglang/kernels/jit/include/sgl_kernel/utils.cuh b/python/sglang/kernels/jit/include/sgl_kernel/utils.cuh
+--- a/python/sglang/kernels/jit/include/sgl_kernel/utils.cuh	2026-10-06 17:26:48.030484224 +0000
++++ b/python/sglang/kernels/jit/include/sgl_kernel/utils.cuh	2026-10-06 17:26:48.034484153 +0000
+@@ -472,7 +472,15 @@
+   }
+ 
+   auto enable_cluster(dim3 cluster_dim) -> LaunchKernel& {
+-#ifdef USE_ROCM
++#if defined(USE_ROCM) && defined(SGL_ROCM_ARCH_GFX1250)
++    // y-oriented (1, 8, 1). An x-oriented {8, 1, 1} launch was rejected on gfx1250.
++    // dim3{1, N} value-initializes z to 0; HIP cluster dims must be positive.
++    const unsigned int z = cluster_dim.z == 0 ? 1u : cluster_dim.z;
++    auto& attr = m_attrs[m_config.numAttrs++];
++    attr.id = hipLaunchAttributeClusterDimension;
++    attr.val.clusterDim = {cluster_dim.x, cluster_dim.y, z};
++    m_config.attrs = m_attrs;
++#elif defined(USE_ROCM)
+     (void)cluster_dim;
+ #else
+     auto& attr = m_attrs[m_config.numAttrs++];
+@@ -507,14 +515,19 @@
+   auto operator()(T&& kernel, Args&&... args) const -> void {
+     if (m_prefer_l1) apply_prefer_l1(kernel);
+ #ifdef USE_ROCM
+-    hipLaunchKernelGGL(
+-        std::forward<T>(kernel),
+-        m_config.gridDim,
+-        m_config.blockDim,
+-        m_config.dynamicSmemBytes,
+-        m_config.stream,
+-        std::forward<Args>(args)...);
+-    RuntimeDeviceCheck(m_location);
++    if (m_config.numAttrs > 0) {
++      RuntimeDeviceCheck(
++          ::hipLaunchKernelEx(&m_config, std::forward<T>(kernel), std::forward<Args>(args)...), m_location);
++    } else {
++      hipLaunchKernelGGL(
++          std::forward<T>(kernel),
++          m_config.gridDim,
++          m_config.blockDim,
++          m_config.dynamicSmemBytes,
++          m_config.stream,
++          std::forward<Args>(args)...);
++      RuntimeDeviceCheck(m_location);
++    }
+ #else
+     RuntimeDeviceCheck(::cudaLaunchKernelEx(&m_config, kernel, std::forward<Args>(args)...), m_location);
+ #endif
+diff --git a/python/sglang/kernels/jit/utils/arch.py b/python/sglang/kernels/jit/utils/arch.py
+--- a/python/sglang/kernels/jit/utils/arch.py	2026-10-06 17:26:48.030484224 +0000
++++ b/python/sglang/kernels/jit/utils/arch.py	2026-10-06 17:26:48.034484153 +0000
+@@ -123,6 +123,8 @@
+                 flags.append("-DHIP_FP8_TYPE_FNUZ=1")
+             else:
+                 flags.append("-DHIP_FP8_TYPE_E4M3=1")
++            if "gfx1250" in gcn_arch:
++                flags.append("-DSGL_ROCM_ARCH_GFX1250=1")
+         except Exception:
+             flags.append("-DHIP_FP8_TYPE_E4M3=1")
+         return flags

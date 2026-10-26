@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Catch the intermittent warmup hang (NCCL_CUMEM_ENABLE=1) and dump every sglang process's stack.
 # Starts the server up to TRIES times; a start that is not ready within WAIT seconds counts as hung.
-# Usage: mi455_hang_dump.sh [run-tag]   env: TRIES (6), WAIT (300), MAX_BS (64)
+# Usage: mi455_hang_dump.sh [run-tag]   env: TRIES (6), WAIT (300), MAX_BS (64), TP (8, also EP),
+#   KEEP=1 (keep going after a hang to get a hang-rate tally), ROCGDB=1
 set -u
 OUT=/shared_nfs/kk/results/proxy_12l/${1:-hang_dump_$(hostname -s)_$(date +%m%d_%H%M)}
 MODEL=${MODEL:-/workspace/proxy_work/proxy_12l}
-PORT=18030; MAX_BS=${MAX_BS:-64}
+PORT=18030; MAX_BS=${MAX_BS:-64}; TP=${TP:-8}; HUNG=0
 mkdir -p "$OUT"; cd /tmp
 export HSA_DISABLE_COREDUMP_ON_EXCEPTION=1 SGLANG_USE_AITER=1 PYTHONUNBUFFERED=1 NCCL_CUMEM_ENABLE=1
 
@@ -16,7 +17,7 @@ stop() {  # kill the server tree
 
 for t in $(seq 1 ${TRIES:-6}); do
   python3 -m sglang.launch_server --model-path "$MODEL" \
-    --tp-size 8 --ep-size 8 --kv-cache-dtype fp8_e4m3 \
+    --tp-size $TP --ep-size $TP --kv-cache-dtype fp8_e4m3 \
     --context-length 32768 --mem-fraction-static 0.80 \
     --max-running-requests $MAX_BS --cuda-graph-max-bs-decode $MAX_BS \
     --chunked-prefill-size 8192 --attention-backend triton \
@@ -42,10 +43,10 @@ for t in $(seq 1 ${TRIES:-6}); do
       timeout 180 rocgdb -q -nx -batch -p $p -ex 'set pagination off' -ex 'info agents' \
         -ex 'info queues' -ex 'info dispatches' -ex 'info threads' \
         > "$OUT/rocgdb_try${t}_$p.txt" 2>&1
-      echo "  rocgdb $p ($name): $(grep -c 'AMDGPU Wave' "$OUT/rocgdb_try${t}_$p.txt") waves, $(grep -cE '^\s*\*?\s*[0-9]+\s+\(' "$OUT/rocgdb_try${t}_$p.txt") dispatch lines"
+      echo "  rocgdb $p ($name): $(grep 'AMDGPU Wave' "$OUT/rocgdb_try${t}_$p.txt" | grep -oE 'in void [A-Za-z_:]+<[^(]*' | sort | uniq -c | tr -s ' ' | cut -c1-120)"
     done
   fi
-  stop
-  exit 0
+  stop; HUNG=$((HUNG+1))
+  [ "${KEEP:-0}" = 1 ] || exit 0
 done
-echo "no hang in ${TRIES:-6} tries"
+echo "hung $HUNG of ${TRIES:-6} tries (TP$TP)"

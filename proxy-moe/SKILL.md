@@ -29,6 +29,10 @@ flags, in-node parallelism.
 | `fixed_seq_len_gb300/` | Same sweep on GB300 (TP4, 12L): Quark MXFP4 on CUDA patch, scripts, RESULTS |
 | `MI455_RUN.md` | MI455 (gfx1250) run recipe on h13-16: container, AITER patches, 1K1K / 8K1K / 70K300 commands |
 | `MI455_RUN_h13-17.md` | MI455 optimization log on h13-17: P0 attribution, RCCL CUMEM/DDA, FlyDSL fp32 router, aiter custom AR, results (CONTINUE HERE on top) |
+| `NODE_DOWN_f19-14_1027.md` | f19-14 node reset at the first TP8 start after the RCCL DDA fix swap (cause not confirmed) |
+| `TP2_4L_f19-14_1027.md` | f19-14 TP2 4-layer work: aiter backend + FlyDSL attention, gluon a16w16 scratch-fault root cause, clean A/B (CONTINUE HERE on top) |
+| `ROCM_ISSUE_gfx1250_scratch_fault.md` | Draft ROCm issue: gfx1250 page fault on scratch (spill) stores under concurrent dispatches |
+| `AITER_ISSUE_2bafed472_i32_overflow.md` | Draft aiter issue: grouped a8w4 int32 ABI overflow after 2bafed472, with fix |
 | `MI355X_OPT_CATALOG.md` | Catalog of MI355X optimizations with gains and gfx950 assumptions, plus the target numbers |
 | `RCCL_DDA_HANG_REPRO.md` | Repro of the RCCL DDA all-reduce hang on gfx1250 TP8 (`NCCL_CUMEM_ENABLE=1`) |
 | `SESSION_PROMPT_MI455_1024.md` | Handoff prompt and node-local state for continuing the MI455 work |

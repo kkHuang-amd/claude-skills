@@ -8,25 +8,28 @@ grouped a8w4 MoE, T=8192, one EP2 rank of the TP2 4L model (E=256, topk 8, H 163
 
 ## CONTINUE HERE
 
-**NOW (user, 2026-10-28 ~01:30 UTC): tile work PAUSED. Priority = get every f19-14 10/27 optimization working on TP8.**
-Ported config: `/workspace/proxy_work/allon_tp8.env` (+ `--attention-backend aiter --page-size 64`), TP8 attention-projection CSV
-`/workspace/proxy_work/bf16_prefill_torch_tp8.csv` (14 rows, qkv 2304x16384 + o 16384x2048, padded M 128..8192 -> torch; microbench
-`bench/attn_proj_tp8_bench.py` on GPU 0: hipBLASLt 1.0-2.9x faster than gluon at every M 64..8192, `/tmp/attn_proj_tp8.log`).
-RUNNING: `/workspace/proxy_work/allon_tp8_1028.sh` -> `/shared_nfs/kk/results/proxy_12l/allon_tp8_h13-17_1028/` (EP1, EP8; smoke, 8k/1k c=2/16).
-Still blocked from f19-14: `SGLANG_OPT_USE_AITER_SILU_MUL` (module_activation build error). Not ported: a16w16 M=32-64 tuning (open item there too).
+**Status (2026-10-28 04:15 UTC, h13-17):** TP8 runs every f19-14 10/27 optimization ("all-on"); 8k/1k TTFT -34..39% vs the old
+h13-17 config on EP1 and EP8, reproduced, smoke + teacher-forced logprob check OK. AR default changed to CAR <= 1 MB + RCCL DDA on
+(arm B; neutral end to end, faster in microbench). Prefill MoE tile work paused; next item to be picked by the user (list below).
+**Best config (TP8, 12L):** `/workspace/proxy_work/allon_tp8.env` (DDA on since 04:15) + `--attention-backend aiter --page-size 64`,
+EP1 adds `AITER_CONFIG_GROUPED_FMOE=/workspace/proxy_work/ep1_grouped_fmoe_gfx1250_v3.csv`. Code: aiter kk `7ea6f2f46` + 3 image edits
++ local CK `amd_tdm_store` brace fix; sglang haishaw `08db4167c7`; image RCCL 2.32.3 (has the DDA fix per user).
+**Repro (one EP, 8k/1k c=2,16 + smoke):**
+```bash
+EPS=8 CONCS="2 16" bash /workspace/proxy_work/allon_tp8_1028.sh <run-tag>   # -> /shared_nfs/kk/results/proxy_12l/<run-tag>/
+```
+**Pass criteria:** smoke passed=True, bench 100% success; 8k/1k mean TTFT EP8 c=2 ~330 ms, c=16 ~1693 ms (EP1 ~363 / ~1881).
 
-**Earlier status (2026-10-28, h13-17):** env switched (below); user gave all 8 GPUs. DONE: server A/B of the f19-14 tiles on TP8 EP1 / EP8,
-12L proxy, 8k/1k c=2 and c=16, arms A (best config) -> B (A + tile env) -> A2 per EP, smoke per arm.
-`/workspace/proxy_work/tile_server_ab_1028.sh` -> `/shared_nfs/kk/results/proxy_12l/tile_ab_tp8_h13-17_1028/` (`driver.log`).
-Caveat: the `AITER_TDM_TILE_*` env overrides EVERY grouped MoE call (decode too, and the EP1 CSV v3 rows), so B's ITL is not a
-prefill-only effect; TTFT is the metric for this A/B.
-Correction (user): arm A here is the OLD h13-17 config (triton attention, 10/23-26 env), NOT the current best. It lacks the f19-14
-10/27 config (`TP2_4L_f19-14_1027.md` "CLEAN COMPARISON": `allon.env` + `--attention-backend aiter` + `SGLANG_AITER_KV_CACHE_LAYOUT=vectorized_5d`
-+ `--page-size 64` + FlyDSL pa_decode / extend + `SGLANG_AITER_HONOR_EXPLICIT_MEM_FRACTION=1` + attention / `bf16_prefill_torch.csv`; 8k1k c16 TTFT -28.7% on TP2).
-`allon.env` and the CSVs live only on f19-14 (`/shared_nfs/kk/proxy_work_f19-14_1027/`), not on this node. Redo the A/B with A = that config on TP8.
-**Next:** after the A/B, the remaining f19-14 items (repro kernel A/B, ISA check, no-CSV default / shape rule, GSM8K).
-**Files:** `proxy-moe/scripts/gfx1250_moe_tile_sweep.sh`; aiter `grouped_moe_gfx1250.py` (no-CSV fallback).
-**Results:** `/shared_nfs/kk/results/proxy_4l/<tag>_h13-17_1028/` (plus `proxy_12l/` for TP8 server runs).
+**Open items (2026-10-28):**
+- Tile (paused): (1) shape rule = tiles only for inter 4096 + prefill token counts (threshold T from an op-test token sweep first),
+  never EP1 / decode; (2) ISA resource check (VGPR / scratch / LDS) of the two tiles; (3) EP8 server A/B on all-on, several starts
+  (fault risk), + teacher-forced check; (4) HBM bytes / L2 hit per kernel; (5) kernel-level 16.46 -> 14.40 repro (f19-14 bench not on this node).
+- Fault: EP1 with BOTH stage tiles faults 3/3 (rocdevice: RCCL `ncclDevKernel_Generic_32`); s1-only / s2-only / serialized clean (1 run each). Race suspected.
+- Perf: EP1 MoE prefill CSV rows (T 1024-8192 `no grouped CSV config matched`); a16w16 M=32-64 gluon tuning (decode qkv/o + lm_head);
+  AR wait / rank skew (decode c=2 AR 36% of GPU time); all-on not yet measured at 1k/1k EP1, 70k, c=64 EP1.
+- Housekeeping: upstream CK fix; aiter local edits uncommitted; push claude-skills; unexplained: decode-vs-prefill logprob gap ~0.45,
+  EP8 c=16 ITL drift in the tile A/B; f19-14 `allon.env` / CSVs / bench when that node can upload.
+**Files:** `/workspace/proxy_work/{allon_tp8.env, allon_tp8_1028.sh, ar_server_ab_1028.sh, tf_tp8_1028.sh, bf16_prefill_torch_tp8.csv, bench/attn_proj_tp8_bench.py}`.
 
 ## Environment (h13-17, 2026-10-28)
 
@@ -137,3 +140,65 @@ Mean TTFT ms (median), median ITL ms, output tok/s. r1 = first all-on run above.
   old 0.44 / 1.36 (EP8), 0.48 / 1.37 (EP1); all-on 0.52 / 1.37, 0.45 / 1.28; +SILU 0.46 / 1.17, 0.49 / 1.38. Same level for every config,
   so the FlyDSL pa_decode path is no worse than triton decode (the ~0.45 gap itself is common to all; likely fp8 KV read in decode vs bf16 in prefill, unverified).
 - Verdict: no sign of a numeric error from the all-on config on TP8. Limit: dummy weights only show "no larger deviation than normal noise", not task accuracy.
+
+### EP1 tile fault investigation (2026-10-28 ~02:50 UTC, h13-17; `/shared_nfs/kk/results/proxy_12l/ep1_tile_fault_h13-17_1028/`)
+
+- Op test (`test_flydsl_grouped_gemm.py`, GPU 0 alone, EP1 rank E512 top16 inter512, a8w4, no bias) never faults, all `pass=True`:
+  T=8192 default / s1-only / s2-only / both; server env (CSV v3 + tile env, CSV n_warp kept) at T=1..64; T=8193/8191/6000/4097;
+  skewed routing `AITER_MOE_NUM_EXPERT_ACTIVATED`=16/64/200 at T=8192. `PYTORCH_NO_HIP_MEMORY_CACHING=1` is unusable (hipgraph capture fails).
+- Perf on EP1 (op test, us): T=8192 default 10175, s1-only 10336, s2-only 10964 (+7.7%), both 10167 -> no gain on EP1.
+  Decode T=1..64 with the tile env on top of CSV v3: 1.4-2x SLOWER (e.g. T=16 675 -> 1039 us). The env tiles must never be global for EP1.
+- Buffer sizing is not the cause: `contiguous_m` uses `_align_m = max(tile_m, tile_m2)` after the env override (grouped_moe_gfx1250.py ~678).
+- **The faulting kernel in the EP1 B server log is RCCL, not MoE:** rocdevice line `kernel: ncclDevKernel_Generic_32` (8k-prefill AR,
+  256 MB > custom AR max 1 MB -> RCCL). Either an RCCL fault coinciding with the tile arm, or MoE corrupting memory RCCL then touches.
+  Repro running: `/tmp/ep1_tile_repro.sh` -> `/shared_nfs/kk/results/proxy_12l/ep1_tile_repro_h13-17_1028/` (EP1 + tiles on old config, then on all-on).
+- **Repro (02:43-02:50 UTC): deterministic.** EP1 + tile env faults at the first 8k prefill on BOTH the old config and all-on
+  (`ep1_tile_repro_h13-17_1028/`; old: rocdevice `ncclDevKernel_Generic_32` x2; all-on: fault, no kernel line). EP1 without tiles: 5/5 server
+  runs today clean. So tile-triggered, most likely an MoE OOB write on the server path that RCCL then trips over (not proven).
+  Bisect running: `/tmp/ep1_tile_bisect.sh` -> `ep1_tile_bisect_h13-17_1028/` (s1-only, s2-only, both + AMD_SERIALIZE_KERNEL=3; old config, c=2).
+- **Bisect (02:51-02:59 UTC, `ep1_tile_bisect_h13-17_1028/`, old config, c=2, one run each): NO fault in any arm.**
+  s1-only (s2 default) clean, c=2 TTFT 533 ms; s2-only clean, 568 ms; both + `AMD_SERIALIZE_KERNEL=3` clean (759 ms, serialized).
+  Both tiles without serialization: 3/3 faulted (tile run, repro old, repro all-on). Reading: needs BOTH stages at tile_m=128 AND
+  concurrent execution -> looks like a race (cross-stream or cross-kernel ordering), not a plain OOB; consistent with the fault
+  landing in the RCCL kernel. No explicit tile_m == tile_m2 branch in grouped_moe_gfx1250.py. Caveat: s1/s2-only are single runs.
+- Practical: the tiles give EP1 nothing (prefill flat, decode 1.4-2x slower, s1/s2-only TTFT no better than A 557 ms), so EP1 must not get them.
+
+### AR backends on TP8: aiter CAR vs RCCL DDA on / off (2026-10-28 ~03:00-03:35 UTC, h13-17; `/shared_nfs/kk/results/proxy_12l/ar_dda_h13-17_1028/`)
+
+- CORRECTION: the RCCL in this container is NOT the 9c52e34 / 16ded0c fix build (ncclGetVersion 23203 matched, files / build-id do not).
+  It is the image's own RCCL 2.32.3 (`_rocm_sdk_libraries/lib/librccl.so.1`, built from `/sgl-workspace/rocm-systems/projects/rccl`, 10-27 03:51).
+  The user confirmed this build contains the DDA hang fix. All runs above used it with `RCCL_DDA_ENABLE=0`.
+- bf16 [M,16384], TP8, CUDA graph. RCCL: `scripts/rccl_ar_bench.py` (NCCL_CUMEM_ENABLE=1), median over ranks (max). CAR: aiter
+  `test_custom_allreduce.py -t 8 -m graph -s M,16384` (env fix PYTHONPATH), min-max over ranks, err ~1% (bf16). Slowest rank compared; harnesses differ.
+
+| size | RCCL DDA off | RCCL DDA on | aiter CAR |
+|---|---|---|---|
+| 64 KB (M=2) | 34.4 | **11.8 (12.0)** | 9.7-12.6 |
+| 128 KB (M=4) | 35.2 | **13.0 (13.2)** | 11.8-14.6 |
+| 256 KB (M=8) | 38.5 | **16.9 (17.0)** | 19.4-21.3 |
+| 512 KB (M=16) | 42.3 | **29.1 (29.3)** | 29.6-33.0 |
+| 1 MB (M=32) | 49.8 | **45.6 (45.9)** | 46.0-48.5 |
+| 2 MB (M=64) | 68.7 | **37.0 (37.3)** | 89.5-92.3 |
+| 32 MB (M=1024) | 321 | **213** | - |
+| 64 MB (M=2048) | 450 | **354** | - |
+| 128 MB (M=4096) | 784 | **690** | - |
+| 256 MB (M=8192) | **1115** | 1146 | - |
+
+- DDA on beats DDA off at every size up to 128 MB (2.9x at 64 KB, 1.9x at 2 MB, 1.5x at 32 MB), ties at 256 MB (+3%).
+- DDA on vs CAR (slowest rank): equal at 64-128 KB (within ~5%), DDA 11-20% faster at 256 KB-1 MB, 2.5x faster at 2 MB.
+  DDA off repeat (dec_off2) within 2% of dec_off. bench teardown hangs (exit 124 after printing, known).
+- Next: server A/B on all-on EP8: A = current (CAR <= 1 MB + DDA off), B = CAR <= 1 MB + DDA on, C = no CAR (`--disable-custom-all-reduce`) + DDA on, A2.
+- **Server A/B (03:31-04:12 UTC, `ar_ab_tp8_h13-17_1028/`, all-on EP8, `/workspace/proxy_work/ar_server_ab_1028.sh`), all smoke passed, DDA-on starts clean (2/2).**
+  Mean TTFT ms / median ITL ms / output tok/s. A/A2 spread: <= 1.7% on tok/s and TTFT.
+
+| point | A | B (CAR + DDA) | C (DDA only) | A2 |
+|---|---|---|---|---|
+| 8k/1k c=2 | 329 / 6.31 / 298 | 328 / 6.12 / 309 | 328 / 6.15 / 307 | 328 / 6.23 / 302 |
+| 8k/1k c=16 | 1692 / 16.03 / 829 | 1692 / 16.08 / 828 | 1694 / 16.80 / 800 | 1691 / 16.14 / 827 |
+| 1k/1k c=2 | 92 / 6.06 / 330 | 90 / 6.20 / 318 | 88 / 5.89 / 340 | 92 / 6.12 / 324 |
+| 1k/1k c=64 | 1029 / 29.61 / 2053 | 1009 / 29.24 / 2090 | 1010 / 29.72 / 2053 | 1012 / 29.61 / 2059 |
+
+  vs mean(A, A2): B = -1..+3% everywhere (1k c=64 tok/s +1.6%, 8k c=2 +2.8%; 1k c=2 -2.5%), i.e. at noise level.
+  C mixed: 1k c=2 +4.1% tok/s / TTFT -4.9%, but 8k c=16 -3.3% tok/s, ITL +4.4%. The microbench wins (DDA 11-20% at 256 KB-1 MB,
+  12-34% at 32-128 MB) do not show up end to end: AR kernel speed is not what limits the step (earlier finding: AR time is mostly
+  wait from per-rank skew, MI455_RUN_h13-17.md "EP1 + CSV v3 profile"; not re-verified here). Single runs for B and C.

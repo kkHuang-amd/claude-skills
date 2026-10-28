@@ -123,6 +123,16 @@ HaiShaw branch as `064be752f8`). For other multi-process tools (aiter op tests),
 `rocprofv3 --attach` also failed on the server tree. Profile at c=2 needs `PROFILE_DELAY` of
 about 15 s, or the short bench ends before capture.
 
+## 8. GEMM / MoE kernel design: measured limits and traps
+
+Full write-up: `GEMM_KERNEL_DESIGN_TRAPS.md` (read before designing or prototyping a WMMA GEMM / MoE kernel). Short form:
+- fp4 WMMA 32x16x128: 8 cyc issue / ~27 cyc latency per SIMD; VGPR file ~1024/lane/SIMD (<= ~512 per wave keeps 2 waves/SIMD).
+- L2 aggregate ~88 B/clk/CU at full occupancy (< LDS 153-217, < per-CU port ~150); L2 does not merge identical requests;
+  `cluster_load_b128` multicast 1.75-2x, collapses under large drift without a cluster barrier.
+- Bounds tables must include WMMA + LDS + L2 + HBM (weights streaming was forgotten once and the "3.4x" design ran 1.5x slower).
+- `__syncthreads()` in a pipelined loop waits out all prefetch (use `__builtin_amdgcn_s_barrier()`); any spill drains loadcnt;
+  coalesce per instruction (512 B per b128 per wave), not per lane.
+
 ## Related
 
 - `gfx1250/mi400-optimization-skills`: process, gates, report template.

@@ -53,6 +53,53 @@ c v16f32, 0, 0, scaleA, 0, 0, scaleB, bool, bool)`, `__builtin_amdgcn_cluster_lo
     cluster with a cluster barrier every `num_buffers` k-steps, even when weight multicast is inactive (one M-tile per expert).
     Observed bimodal per-process timing (fast mode = same cycles, higher clock; slow mode = +30% cycles). Cause still open.
 
+11. **`__builtin_amdgcn_s_barrier()` is not a memory barrier for the compiler.** LLVM moved the WMMAs that consume an LDS stage
+    (and the `s_wait_dscnt` they imply) past the next step's barrier and async global->LDS writes -> other waves overwrote the stage
+    while reads were in flight (0.02-0.09% wrong outputs, varying per run; it hid in one config and showed in another). Before a
+    "stage free" barrier: `asm volatile("s_wait_dscnt 0x0" ::: "memory")`, and wrap `s_barrier` in `asm volatile("" ::: "memory")`.
+    There is no `__builtin_amdgcn_s_wait_dscnt` in this toolchain. Same race class as aiter's `s_wait_dscnt(0)` fix.
+12. **L2 prefetch (`__builtin_amdgcn_global_prefetch`) of streamed weights made things slower** (P1: +11-15% at 1 wave/SIMD,
+    +70% at 2 waves/SIMD), so do not assume prefetch hides HBM latency; measure.
+13. **HBM streaming, measured (M2b):** async global->LDS reaches ~8.8 TB/s with only 4 waves and 96 KB in flight per CU (loaded
+    HBM latency ~1000-1200 cyc); plain register loads reach <= 5.2 TB/s at 4 waves/CU and 7.1 at 16 for the same pattern.
+    Per-wave in-flight loads are capped at 63 (6-bit loadcnt / asynccnt). Note a slow GEMM prototype was NOT HBM-limited:
+    weights-only streaming (~1.1 Mcyc) and compute-only (~1.2 Mcyc) each fit, the sum did not overlap (3.6 Mcyc). Measure
+    each component alone before blaming bandwidth.
+
+14. **Branches inside a pipelined loop kill register prefetch.** Per-step guards (`if (k + PD < KS) load(...)`, real/dummy
+    issue, `if (k < KS)`) split the body into many basic blocks; the waitcnt pass merges pending-load state at each join and
+    waits conservatively (`s_wait_loadcnt 0x3..0x0` where `0x28` was possible) -> prefetch drained every step. Clamp indices
+    (`min(k + PD, KS - 1)`), make the unroll divide the trip count, and check the hot loop is 1-2 basic blocks (`grep -c '^.LBB'`)
+    with the expected `s_wait_loadcnt` values. Fixing it cut the weight-wait share from ~45% to 14% (ATT).
+15. **ATT `code.json` disassembly ignores `s_set_vgpr_msb`**: VGPR numbers > 255 appear modulo 256 (fake overlaps between
+    accumulators and load targets). Read register allocation from the compiler `.s` (it prints `/*v[626:641]*/`).
+
+16. **Two waves of one WG loading the same global data do not share it for free.** In a 2x2 wave grid the two M-waves each
+    loaded the same weight fragments; L2 traffic doubled and the kernel was L2-bound (656 B/WMMA -> 2.6 Mcyc predicted, 2.9 measured).
+    Count each wave's global loads as L2 traffic unless a cache hit is measured.
+17. **Multicast that wins in a pure streaming microbenchmark can lose inside a GEMM** (P1: 2.38 -> 2.55 Mcyc, 2x2: 2.93 -> 5.08);
+    cluster members drift with compute. A/B it in the real kernel.
+18. **HIP TDM works** (see `proxy-moe/MOE_KERNEL_DESIGN_h13-17_1028.md` "P1 v8-v10" for the verified descriptor layout; probe
+    `proxy-moe/scripts/tdmprobe.hip`). Row pitch goes in `tensor_dim0_stride`. Tokens via TDM beat per-lane async loads by 12-18%.
+19. **Loop cycles are not kernel time.** A prototype with 2.3 Mcyc of loop ran 2.5-3.0 ms (~0.8-0.9 GHz implied): prologue,
+    epilogue stores and the last WG round matter; time the whole kernel against the baseline in the same session.
+
+20. **Time kernels at steady state.** 1 warmup + 3 timed launches (~10 ms) gave run-to-run clocks of 0.88-1.34 GHz and ms that
+    did not follow cycle counts; 10 warmup + 50 timed launches (the op test uses 101 iterations) is stable to ~+-3%. Compare
+    candidates only under the same timing method, alternating with the baseline in one session.
+21. **Split barriers hide barrier time.** With 4 lockstepped waves at 1 wave/SIMD, `__builtin_amdgcn_s_barrier_signal(-1)` right
+    after the data-ready waits, half of the step's WMMAs, then `__builtin_amdgcn_s_barrier_wait(-1)` cut 13-19% of loop cycles
+    (barrier was 21% in ATT). Retire this wave's LDS reads (`s_wait_dscnt 0`) BEFORE the signal so stage reuse stays race-free.
+
+22. **FlyDSL JIT cache ignores env-read module globals.** A kernel variant selected by `os.environ` at import (e.g. a new
+    `AITER_TDM_*` switch) compiles once and every later run reuses that binary, even with the env flipped -> identical timings.
+    Set `FLYDSL_RUNTIME_ENABLE_CACHE=0` (or make the switch a real kernel argument) for A/B runs.
+23. **rocprofv3 on any torch/FlyDSL process needs `PYTHONPATH=proxy-moe/scripts/rocprof_env_fix`** (else `Option
+    'spirv-expand-step' registered more than once`); see MOE_PREFILL_f19-14_1028.md.
+
+24. **Global atomics are too slow to fuse a MoE top-k reduce** (T=8192, top-16, H=16384): `global_atomic_add_f32` 11.7 ms,
+    `global_atomic_pk_add_bf16` 3.6 ms vs per-route bf16 write + gather-reduce 2.3 ms. Benchmark atomics at full size first.
+
 ## 3. Design-estimate misses (what the roofline forgot)
 
 1. **HBM streaming of the weights.** Gate-up weights (4.29 GB per layer per rank) take 0.62 Mcyc at 1.15 GHz, about equal to the

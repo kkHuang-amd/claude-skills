@@ -8,6 +8,8 @@ grouped a8w4 MoE, T=8192, one EP2 rank of the TP2 4L model (E=256, topk 8, H 163
 
 ## CONTINUE HERE
 
+**SUPERSEDED 2026-10-29: the next round continues in `OPT_h13-17_1029.md` (read that CONTINUE HERE instead).**
+
 **Status (2026-10-28, h13-17):** Step 0 done (see "Step 0 result" below): no upstream kernel avoids weights-in-LDS; upstream LDS race fix ported. Upstream A/B done (no win over rule). Cluster notes written. **Track B started: design draft `proxy-moe/MOE_KERNEL_DESIGN_h13-17_1028.md` (awaiting review).** TP8 runs all f19-14 optimizations (8k/1k TTFT -34..39%),
 DDA on (CAR <= 1 MB), prefill MoE tile rule + alignment-gap tile skip (EP8 TTFT -12%, EP1 -5%, 0 faults, EP8 bit-identical).
 Gate-up (both EPs) diagnosed as **LDS-throughput-bound** (needs ~250 B/clk/CU vs 153-217 measured). Config space exhausted.

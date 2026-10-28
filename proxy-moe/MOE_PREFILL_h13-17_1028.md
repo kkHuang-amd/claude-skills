@@ -8,7 +8,7 @@ grouped a8w4 MoE, T=8192, one EP2 rank of the TP2 4L model (E=256, topk 8, H 163
 
 ## CONTINUE HERE
 
-**Status (2026-10-28 ~09:00 UTC, h13-17):** NEXT CHAT STARTS HERE. TP8 runs all f19-14 optimizations (8k/1k TTFT -34..39%),
+**Status (2026-10-28, h13-17):** Step 0 done (see "Step 0 result" below): no upstream kernel avoids weights-in-LDS; upstream LDS race fix ported. Upstream A/B done (no win over rule). Cluster notes written. **Track B started: design draft `proxy-moe/MOE_KERNEL_DESIGN_h13-17_1028.md` (awaiting review).** TP8 runs all f19-14 optimizations (8k/1k TTFT -34..39%),
 DDA on (CAR <= 1 MB), prefill MoE tile rule + alignment-gap tile skip (EP8 TTFT -12%, EP1 -5%, 0 faults, EP8 bit-identical).
 Gate-up (both EPs) diagnosed as **LDS-throughput-bound** (needs ~250 B/clk/CU vs 153-217 measured). Config space exhausted.
 **Next, in order (user, 2026-10-28):**
@@ -30,6 +30,86 @@ formats (fp4 act x fp4 weight, preshuffle), EP support. If one avoids the LDS bo
      swap-AB for small rows/expert; persistent / stream-K over (expert, n) work with overlapped prologue/epilogue; fused stage chain
      (route + quant + gate-up + act/quant + down + weighted reduce, no 4.3 GB per-route write in EP1); per-stage row alignment.
   5. Pick one, estimate per shape vs the current kernel, then prototype the hot loop alone (one expert, fixed M/N/K) before integration.
+**Step 0 result (2026-10-28, h13-17; snapshots FlyDSL main `64e409b`, aiter main `bbef5a6`, both 10-28, shallow clones in `/tmp/up/`):**
+no upstream gfx1250 grouped MoE GEMM keeps weights out of LDS. Candidates:
+- aiter main `mxfp4_preshuffle_gfx1250_tdm.py` (same kernel, +92 lines vs our orig): (a) `a_preshuffled` A layout (M/16,K/128,4,16,16B),
+  no LDS pad, lane reads at `kgrp*256+lane16*16`/`+512` like B; fp4 act only; producer `moe_apreshuffled_quant_scatter.py` (new);
+  enabled per tuned-CSV row `a_preshuffle=1`; (b) per-format IGLP params, "prefill" = 256x256x256 (a4w4 mg 13x11, ds_first 16);
+  (c) **race fix: `s_wait_dscnt(0)` before the REUSE fence when issue_fn recycles the LDS buffer** -- candidate for our EP1 fault.
+  Upstream prefill CSV (DS-like 7168/2048 E64 topk8, T>=2048): a_preshuffle=1, tiles 256^3 both stages, warp 2x2, nbuf 4.
+  New CSV knobs: split_k, persistent_workers(2), lds_soa_load_interleave, rolled_drain, tdm_b_th. Needs flydsl==0.4.0 (pip has 0.4.0/0.4.1).
+- FlyDSL main `kernels/moe/moe_a8w4_mxscale_gfx1250.py` (530 lines): same TDM design (B via LDS, `B_LDS_ROW`), WMMA 16x16x128, cluster_n mcast.
+- aiter gluon `_gluon_kernels/gfx1250/moe/moe_op_gemm_{a4w4,a8w4,a16w4}.py`: x, w, scales all TDM -> LDS.
+- aiter `mega_moe_gfx1250/` and `moe_g2l_lut.py`: identical to local branch (nothing new).
+- **Race fix (c) ported locally** (h13-17, uncommitted, `k_step` before the fence; patch now `/workspace/proxy_work/aiter_local_1028b.patch`).
+  Op test GPU0, T=8192, base -> fix (us): EP8 gemm1 2336 -> 2316, gemm2 1121 -> 1159; EP1 gemm1 2407 -> 2320, gemm2 2468 -> 2480; all pass.
+  = perf-neutral (noise ~5%). EP1 both-tile fault re-test with the fix still TODO (server, several starts).
+- **Blocked:** running the upstream clone (`/tmp/up/aiter_main` + `pip --target /tmp/up/fly040 flydsl==0.4.0`) was denied by the
+  auto-mode classifier (external code). Needs user OK before benchmarking upstream a_preshuffle 256^3 on our shapes.
+  Isolated env now exists (user OK): venv `/tmp/up/venv040` (--system-site-packages, flydsl 0.4.0; main env stays 0.3.4.1).
+  User OK'd running the clone. venv setup: `zz_optvenv.pth` = `site.addsitedir(/opt/venv/...site-packages)` (torch / editable triton;
+  flydsl 0.4.0 still wins), pytest added, `/tmp/up/aiter_main/3rdparty/composable_kernel` -> symlink to local CK (same commit `96afae1d`,
+  carries the brace fix). Needs `--no-check-aot-cache`. CSV rows must use cu_num=96 (this partition). A/B script `/tmp/up/scripts/up_ab.sh`,
+  CSVs `/tmp/up/csv/{ep8,ep1}_256_ap{0,1}.csv` (upstream a_preshuffle prefill row, shape fields swapped), logs `/tmp/up/logs/up_*.log`.
+  Upstream EP8, no CSV match (fallback tile_m=64 n_warp=4 nbuf=2): gemm1 2923 / gemm2 1481 us, pass (local w/ rule: 2316 / 1159).
+  **Upstream A/B, EP8 op test (GPU0, T=8192, 1 run each, noise ~5%), gemm1 / gemm2 / sum us, all pass:**
+  | variant | gemm1 | gemm2 | sum |
+  |---|---|---|---|
+  | local branch + rule + race fix (0.3.4.1) | 2316 | 1159 | 3475 |
+  | upstream, no CSV (tile_m 64, nbuf 2) | 2923 | 1481 | 4404 |
+  | upstream, our rule tiles via env | 2324 | 1132 | 3456 |
+  | upstream CSV 256^3 w2x2 nbuf4 cluster_n4 nsp1 soa1, a_preshuffle=0 | 2057 | 1226 | 3283 |
+  | same, a_preshuffle=1 | 2144 | 1104 | 3248 |
+  -> same tiles: upstream == local (kernel changes alone buy nothing). Upstream's 256^3 prefill row: gemm1 -11%, sum -6%, unlike our
+  earlier 256x256 w2x2 (+6..+22%) -- that row also sets cluster_n=4 (weight multicast), next_stage_prefetch=1, lds_soa_load_interleave=1.
+  a_preshuffle: gemm1 +4%, gemm2 -10% (within ~2x noise; repeat). EP1 hits the 2bafed472 int32 overflow upstream too (unfixed on main);
+  `_flat_base` fix applied to the /tmp clone only (orig `/tmp/up/grouped_gemm_mxfp4.py.orig`).
+  **Upstream EP1 (GPU0):** EP8-rule tiles via env (NOT the EP1 rule) 2308 / 2552; 256^3 ap0 2052 / 3006; ap1 2039 / 2994, all pass.
+  -> gemm1 -11% again, but 256^3 gemm2 +18% for inter 512 -> hybrid: stage1 256^3 row, stage2 keep the rule.
+  **Local kernel reproduces it (no upstream code needed; local supports all knobs except a_preshuffle):** GPU2, EP8, CSV 256^3 ap0:
+  gemm1 2181 / gemm2 1212 vs rule 2466 / 1211 (gemm1 -11.6%). Hybrid CSVs `/tmp/up/csv/{ep8,ep1}_hyb.csv`
+  (stage2 = rule tiles, m/n_warp2 1/4, cluster2 -1), script `/tmp/up/scripts/loc_hyb.sh`, logs `/tmp/up/logs/loc_*`.
+  **Noise warning:** same config on GPU2 run-to-run: 256ap0 gemm1 2181 -> 2401, hyb gemm1 2873 -> 2205 (+-15%!). Single runs are NOT
+  enough. Hybrid gemm2 consistently slow (EP8 1461/1489 vs rule 1211/1218 at identical stage2 tiles; EP1 4250 vs 2430) -> a row-level
+  knob (next_stage_prefetch=1 / lds_soa_load_interleave=1 / waves_per_tensor) hurts stage2 with rule tiles. Running interleaved
+  3x3 medians: `/tmp/up/scripts/loc_rep.sh <ep> <gpu> <reps>` -> `/tmp/up/logs/rep_{ep8,ep1}.txt` (EP8 GPU2, EP1 GPU4).
+  **3x3 interleaved result (local kernel, T=8192, us, median [gemm1 range]):**
+  | | EP8 gemm1 | EP8 gemm2 | EP8 sum | EP1 gemm1 | EP1 gemm2 | EP1 sum |
+  |---|---|---|---|---|---|---|
+  | rule | 2383 [2371-2458] | 1226 | 3609 | 2541 [2523-2790] | 2488 | 5029 |
+  | 256^3 ap0 row | 2850 [2509-2875] | 1165 | 4015 | 2813 [2292-2872] | 3258 | 6071 |
+  | hybrid | 2238 [2211-2842] | 1410 | 3648 | 2850 [2515-2947] | 4243 | 7093 |
+  -> **256^3 stage1 is bimodal (~2200 vs ~2850 per process), rule is stable.** The earlier "-11%" was the fast mode. Median: no win,
+  rule stays. Hybrid gemm2 always slow (row-level knob). Unexplained: what selects the mode (hypothesis: cluster_n=4 cluster placement /
+  power state; test cluster_n=1 256^3 and per-process repeat). Upstream adoption: nothing to take except the race fix (already ported).
+  **Bimodality probe (user: option 3, 2026-10-28).** EP8 256^3 row, 5 interleaved rounds per GPU, gemm1 us (all pass):
+  | cluster_n | GPU2 | GPU4 |
+  |---|---|---|
+  | 4 (row) | 2190 2157 2577 2873 2798 | 2809 2810 2477 2234 2815 |
+  | 1 | 2358 2341 2521 2429 2599 | 2596 2515 2593 2824 2563 |
+  | -1 (default) | 2477 2309 2480 2347 2412 | 2716 2656 2547 2683 2543 |
+  -> fast mode (~2160-2230) only with cluster_n=4; c1/-1 narrower, median no better than rule (GPU2 rule 2383). GPU4 slower than GPU2.
+  Logs show same kernel / no compile difference between fast and slow runs; timing = 5 warmup + 101 iters, graph off, fixed seed.
+  Next probe running: `/tmp/up/scripts/clk_probe.sh 2 5 3000` (c4 vs c1, --iters 3000, amd-smi clock/power/violation every ~0.3 s,
+  `/tmp/up/logs/clk_smi_g2.txt`, `clk_runs_g2.txt`) -> is the mode a clock effect or cluster mechanics (compare in cycles)?
+  **Clock probe result (GPU2, --iters 3000, gemm1 window = first busy block, amd-smi GFX% saturates at 50):**
+  | run | gemm1 us | clk MHz | power W | PVIOL % | gemm1 Mcyc |
+  |---|---|---|---|---|---|
+  | c4 fast (3 runs) | 2200-2225 | 1110-1112 | 1590-1620 | 33-34 | 2.44-2.47 |
+  | c4 mid (1) | 2429 | 1102 | 1445 | 50 | 2.68 |
+  | c4 slow (1) | 2831 | 1136 | 1311 | 60 | 3.22 |
+  | c1 (5 runs) | 2427-2480 | 986-995 | 1410-1421 | 66 | 2.42-2.46 |
+  gemm2 (c1 and c4 identical): ~1120 MHz, 1.31-1.34 Mcyc.
+  -> **slow mode is NOT a clock effect**: it runs at a slightly HIGHER clock with LOWER power but +30% cycles = stalls (cluster
+  mechanics). **c4 fast mode == c1 in cycles**; its whole time gain is clock (+12%: ~1110 vs ~990 MHz) -- multicast removes
+  redundant A reads, so less energy per cycle under the power cap. Confirms "fewer bytes -> higher clock" (PPT-limited).
+  Implication for Track A/B: energy per byte moved is a first-order lever, not just LDS cycles.
+  Open: what fixes the mode per process (buffer address / alignment? cluster -> CU placement?). Next probe: repeat the timing
+  several times inside ONE process (mode stable within a process -> per-process state such as addresses), plus rule's cycles.
+  **Cluster knowledge collected -> `proxy-moe/GFX1250_CLUSTER_NOTES_h13-17_1028.md`.** Key code fact: CSV cluster_m=-1 with
+  cluster_n=4 becomes cluster_m=4 for stage1 = 16-WG cluster with a cluster barrier every num_buffers k-steps, while B multicast is
+  ~never active at ~256 rows/expert. Next probe (env only): `AITER_FLYDSL_MXFP4_CLUSTER_M=1` / `2` and `AITER_FLYDSL_DISABLE_CLUSTER_SYNC=1`.
+  Caveat for that A/B: 256-row tiles pad heavily at EP8/EP1 ~256 rows/expert (T=8192); our earlier 256x256 w2x2 was +6..+22%.
 **Track A details -- implement "weights direct global -> VGPR" in `aiter/ops/flydsl/kernels/mxfp4_preshuffle_gfx1250_tdm.py`**
 (see "Main-loop LDS pipeline investigation" + "Register-blocking arithmetic" below). Facts for the change:
 - Naming: `a` = tokens (activations), `b` = weights. WMMA `v_wmma_scale_f32_32x16x128_f4`: first operand = 32 weight cols (16 VGPR),

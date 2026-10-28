@@ -11,7 +11,26 @@ grouped a8w4 MoE, T=8192, one EP2 rank of the TP2 4L model (E=256, topk 8, H 163
 **Status (2026-10-28 ~09:00 UTC, h13-17):** NEXT CHAT STARTS HERE. TP8 runs all f19-14 optimizations (8k/1k TTFT -34..39%),
 DDA on (CAR <= 1 MB), prefill MoE tile rule + alignment-gap tile skip (EP8 TTFT -12%, EP1 -5%, 0 faults, EP8 bit-identical).
 Gate-up (both EPs) diagnosed as **LDS-throughput-bound** (needs ~250 B/clk/CU vs 153-217 measured). Config space exhausted.
-**Next (exact action): implement "weights direct global -> VGPR" in `aiter/ops/flydsl/kernels/mxfp4_preshuffle_gfx1250_tdm.py`**
+**Next, in order (user, 2026-10-28):**
+**Step 0 -- check upstream first** (standing rule in MI455_RUN_h13-17.md): look for a newer / different gfx1250 grouped MoE GEMM in
+ROCm/FlyDSL (installed 0.3.4.1 is old: aiter's own `gemm_a16w16_gfx1250` already needs `flydsl.runtime.device.check_smem_capacity`) and
+ROCm/aiter main (FlyDSL or gluon MoE paths). Record per candidate: data flow (do weights / tokens go through LDS?), WMMA mapping, supported
+formats (fp4 act x fp4 weight, preshuffle), EP support. If one avoids the LDS bound, benchmark it on the op-test shapes before writing code.
+**Step 1 -- two tracks, decide after Step 0:**
+- Track A (incremental, current kernel): "weights direct global -> VGPR", details below.
+- Track B (from scratch, user request): design a new prefill/decode MoE kernel NOT bound to the current FlyDSL grouped_moe structure.
+  Write the design doc first (`proxy-moe/MOE_KERNEL_DESIGN_<host>_<date>.md`), no code until reviewed:
+  1. Workload: shapes per EP (EP1 E512/inter512, EP8 E64/inter4096, model 16384), T from 1 (decode) to 8192 (prefill), rows/expert
+     = T x 16 / 512, routing skew; what the server actually runs (fp4 act x fp4 weight, mxfp4 scales, swiglu, weighted gather-reduce).
+  2. Hardware limits in CYCLES (clocks are power-limited, ~1.0-1.4 GHz in op tests and serving): HBM ~8 TB/s per partition, LDS read
+     ~153-217 B/clk/CU, WMMA fp4 issue rate (measure), VGPR 512/wave and waves/SIMD trade-off, LDS capacity, TDM / cluster multicast,
+     energy per byte (PPT-limited: fewer bytes -> higher clock).
+  3. Roofline per shape: minimum HBM bytes, minimum on-chip (L2->LDS->VGPR) bytes per WMMA for a given accumulator budget, WMMA time.
+  4. Candidate architectures to compare on paper: weights never through LDS (each wave owns weight columns, global->VGPR prefetch);
+     swap-AB for small rows/expert; persistent / stream-K over (expert, n) work with overlapped prologue/epilogue; fused stage chain
+     (route + quant + gate-up + act/quant + down + weighted reduce, no 4.3 GB per-route write in EP1); per-stage row alignment.
+  5. Pick one, estimate per shape vs the current kernel, then prototype the hot loop alone (one expert, fixed M/N/K) before integration.
+**Track A details -- implement "weights direct global -> VGPR" in `aiter/ops/flydsl/kernels/mxfp4_preshuffle_gfx1250_tdm.py`**
 (see "Main-loop LDS pipeline investigation" + "Register-blocking arithmetic" below). Facts for the change:
 - Naming: `a` = tokens (activations), `b` = weights. WMMA `v_wmma_scale_f32_32x16x128_f4`: first operand = 32 weight cols (16 VGPR),
   second = 16 token rows (8 VGPR). Per wave (tile 128x256 w1x4): 2 weight frags x 8 token frags = 16 WMMA, acc 256 VGPR, kernel VGPR 192.

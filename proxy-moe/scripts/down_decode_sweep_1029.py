@@ -12,6 +12,7 @@ Pass 1 grid: tile_m2 {16,32,64} x tile_n2 {128,256,512} x tile_k2 {128,256,512} 
 min 2 only when 2 k-tiles exist), n_warp2 / persistent_workers2 from v3. tile_m2 < 64 is run twice: stage1 tile_m 64
 (expert rows still aligned to 64) and stage1 tile_m = tile_m2 (real alignment; gemm1 changes too -> compare g1+g2).
 --grid2 "TAG:m2,n2,k2,nb2" ... runs pass 2: n_warp2 {1,2,4} x pw2 {0,96,192,384} on the listed stage2 tiles.
+--stage1: stage1 tile_n {128,256,512} x tile_k {128,256,512} x nb {2,3,4} x n_warp {1,2,4} on the v4 rows (baseline v4).
 """
 
 import argparse
@@ -25,14 +26,15 @@ import sys
 import threading
 
 V3 = "/workspace/proxy_work/ep1_grouped_fmoe_gfx1250_v3.csv"
+V4 = "/workspace/proxy_work/ep1_grouped_fmoe_gfx1250_v4.csv"
 AITER = "/sgl-workspace/aiter"
 CMD = ("python3 op_tests/flydsl_tests/test_flydsl_grouped_gemm.py --no-check-aot-cache --scenario kernel "
        "--data-init uniform --scale-init auto --data-format a8w4 --experts 512 --topk 16 --model-dim 16384 "
        "--inter-dim 512 --act silu --no-bias --tokens {T}")
 
 
-def v3_rows():
-    with open(V3, newline="") as f:
+def v3_rows(path=V3):
+    with open(path, newline="") as f:
         r = list(csv.DictReader(f))
     return r[0].keys(), {int(x["token"]): x for x in r}
 
@@ -58,6 +60,17 @@ def pass2(T, base, grid2):
             c = dict(base, tile_m=max(64, m2) if m2 == 64 else m2, tile_m2=m2, tile_n2=n2, tile_k2=k2,
                      num_buffer_stage2=nb, n_warp2=nw, persistent_workers2=pw)
             out.append((f"t{T}_{tag}_w{nw}_pw{pw}", c))
+    return out
+
+
+def pass_s1(T, base):
+    """Stage1 (gate-up, K=16384) tiles at tile_m 16 on top of a v4 row; fused quant needs (tile_n / n_warp) % 64 == 0."""
+    out = []
+    for n, k, nb, nw in itertools.product((128, 256, 512), (128, 256, 512), (2, 3, 4), (1, 2, 4)):
+        if (n // nw) % 64:
+            continue
+        c = dict(base, tile_n=n, tile_k=k, num_buffers=nb, n_warp=nw)
+        out.append((f"t{T}_s1_n{n}_k{k}_b{nb}_w{nw}", c))
     return out
 
 
@@ -115,19 +128,20 @@ def main():
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--grid2", nargs="*", default=None)
     ap.add_argument("--report", action="store_true")
+    ap.add_argument("--stage1", action="store_true", help="sweep stage1 tiles on the v4 rows (baseline = v4)")
     a = ap.parse_args()
     if a.report:
         return report(a.out)
     os.makedirs(f"{a.out}/csv", exist_ok=True)
     os.makedirs(f"{a.out}/logs", exist_ok=True)
-    keys, rows = v3_rows()
+    keys, rows = v3_rows(V4 if a.stage1 else V3)
     done = set()
     if os.path.exists(f"{a.out}/results.jsonl"):
         done = {json.loads(l)["tag"] for l in open(f"{a.out}/results.jsonl")}
     jobs = []
     for T in a.tokens:
         base = rows[T]
-        cands = pass2(T, base, a.grid2) if a.grid2 else pass1(T, base)
+        cands = pass_s1(T, base) if a.stage1 else pass2(T, base, a.grid2) if a.grid2 else pass1(T, base)
         jobs += [(t, T, c) for t, c in cands if t not in done]
     if a.limit:
         jobs = jobs[: a.limit]

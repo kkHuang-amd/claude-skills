@@ -18,7 +18,11 @@ CFG=/sgl-workspace/aiter/aiter/ops/triton/configs/gfx1250/gluon/gemm/gemm_a16w16
 JS="GEMM-A16W16-N=2304-K=16384.json GEMM-A16W16-N=16384-K=2048.json GEMM-A16W16-N=25256-K=16384.json"
 BK=/tmp/a16_ab_backup; mkdir -p $BK
 restore() { for j in $JS; do [ -f $BK/$j ] && mv $BK/$j $CFG/$j; done; }
-trap restore EXIT
+BK2=/tmp/a16_ab_m64_working; mkdir -p $BK2
+REL=aiter/ops/triton/configs/gfx1250/gluon/gemm/gemm_a16w16
+m64_restore() { for j in $JS; do [ -f $BK2/$j ] && mv $BK2/$j $CFG/$j; done; }
+m64_base() { for j in $JS; do cp $CFG/$j $BK2/$j; git -C /sgl-workspace/aiter show HEAD:$REL/$j > $CFG/$j; done; }
+trap 'restore; m64_restore' EXIT
 V3=/workspace/proxy_work/ep1_grouped_fmoe_gfx1250_v3.csv; V4=/workspace/proxy_work/ep1_grouped_fmoe_gfx1250_v4.csv
 base_on() { for j in $JS; do mv $CFG/$j $BK/$j; done; }
 
@@ -27,6 +31,7 @@ run_arm() {  # $1=EP $2=arm-name $3=extra env
   [ "$EP" = 1 ] && CSV="AITER_CONFIG_GROUPED_FMOE=${CSVF:-/workspace/proxy_work/ep1_grouped_fmoe_gfx1250_v3.csv}"
   NAME=ep${EP}_$ARM
   echo "== $NAME $(date +%H:%M:%S)"
+  bash /workspace/claude-skills/proxy-moe/scripts/check_clk_lock.sh >/dev/null 2>&1 || { echo "CLOCK NOT LOCKED, abort"; exit 3; }
   env $CSV $EXTRA python3 -m sglang.launch_server --model-path "$MODEL" \
     --tp-size 8 --ep-size $EP --kv-cache-dtype fp8_e4m3 \
     --context-length $CTX --mem-fraction-static 0.80 \
@@ -58,10 +63,12 @@ echo "out=$OUT"
 for EP in $EPS; do
   for ARM in ${ARMS:-base1 a161 all1 base2 a162 all2}; do
     # base = v3 CSV + DEFAULT a16w16; a16 = v3 + tuned a16w16 jsons; all = EP1 CSV v4 (tile_m 16) + tuned jsons
-    case $ARM in base*) base_on; CSVF=$V3;; a16*) restore; CSVF=$V3;; all*) restore; CSVF=$V4;; esac
+    # m64base = committed a16w16 jsons (no M_LEQ_64) + v4; m64tuned = working-tree jsons (new M_LEQ_64 rows) + v4
+    case $ARM in base*) base_on; CSVF=$V3;; a16*) restore; CSVF=$V3;; all*) restore; CSVF=$V4;;
+      m64base*) m64_base; CSVF=$V4;; m64tuned*) m64_restore; CSVF=$V4;; esac
     echo "arm $ARM jsons present: $(ls $CFG | grep -cE '2304-K=16384|16384-K=2048|25256-K=16384')"
     run_arm $EP $ARM ""
-    restore
+    restore; m64_restore
   done
 done
 echo "ALL DONE $(date +%H:%M:%S)"

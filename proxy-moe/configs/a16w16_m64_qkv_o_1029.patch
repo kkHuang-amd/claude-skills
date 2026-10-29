@@ -1,0 +1,40 @@
+diff --git a/aiter/ops/triton/configs/gfx1250/gluon/gemm/gemm_a16w16/GEMM-A16W16-N=16384-K=2048.json b/aiter/ops/triton/configs/gfx1250/gluon/gemm/gemm_a16w16/GEMM-A16W16-N=16384-K=2048.json
+index cb53f3e24..d299496e4 100644
+--- a/aiter/ops/triton/configs/gfx1250/gluon/gemm/gemm_a16w16/GEMM-A16W16-N=16384-K=2048.json
++++ b/aiter/ops/triton/configs/gfx1250/gluon/gemm/gemm_a16w16/GEMM-A16W16-N=16384-K=2048.json
+@@ -18,6 +18,15 @@
+         "kernel_type": "compute_bound",
+         "waves_per_eu": 2
+     },
++    "M_LEQ_64": {
++        "BLOCK_M": 64,
++        "BLOCK_N": 128,
++        "BLOCK_K": 128,
++        "NUM_BUFFERS": 3,
++        "num_warps": 2,
++        "kernel_type": "compute_bound",
++        "waves_per_eu": 1
++    },
+     "any": {
+         "BLOCK_M": 128,
+         "BLOCK_N": 128,
+diff --git a/aiter/ops/triton/configs/gfx1250/gluon/gemm/gemm_a16w16/GEMM-A16W16-N=2304-K=16384.json b/aiter/ops/triton/configs/gfx1250/gluon/gemm/gemm_a16w16/GEMM-A16W16-N=2304-K=16384.json
+index 11d32d4f2..b907594f0 100644
+--- a/aiter/ops/triton/configs/gfx1250/gluon/gemm/gemm_a16w16/GEMM-A16W16-N=2304-K=16384.json
++++ b/aiter/ops/triton/configs/gfx1250/gluon/gemm/gemm_a16w16/GEMM-A16W16-N=2304-K=16384.json
+@@ -18,6 +18,15 @@
+         "kernel_type": "bandwidth_bound",
+         "waves_per_eu": 1
+     },
++    "M_LEQ_64": {
++        "BLOCK_M": 32,
++        "BLOCK_N": 64,
++        "BLOCK_K": 512,
++        "NUM_BUFFERS": 3,
++        "num_warps": 4,
++        "kernel_type": "bandwidth_bound",
++        "waves_per_eu": 1
++    },
+     "any": {
+         "BLOCK_M": 128,
+         "BLOCK_N": 128,

@@ -17,7 +17,7 @@ CONCS_70K=${CONCS_70K:-"2 4 8 16 32"}
 RECIPES=${RECIPES:-"tp8ep1 tp8ep8"}
 MAXTRY=${MAXTRY:-3}
 CLIENT_TIMEOUT=${CLIENT_TIMEOUT:-3600}
-EP1_CSV=/workspace/proxy_work/ep1_grouped_fmoe_gfx1250_v3.csv
+EP1_CSV=${EP1_CSV:-/workspace/proxy_work/ep1_grouped_fmoe_gfx1250_v3.csv}
 EP8_CSV_OLD=/workspace/proxy_work/ep8_grouped_fmoe_gfx1250_v1.csv
 mkdir -p "$OUT"
 
@@ -69,6 +69,7 @@ for RECIPE in $RECIPES; do
     if [ "$ISL" -ge 32768 ]; then CL=$CONCS_70K; MULT=4; else CL=$CONCS; MULT=8; fi
     for CONC in $CL; do
       TAG="isl${ISL}-osl${OSL}-c${CONC}"
+      bash /workspace/claude-skills/proxy-moe/scripts/check_clk_lock.sh > /dev/null 2>&1 || { echo "CLOCK NOT LOCKED before $RECIPE $TAG, abort"; exit 3; }
       RD="$OUT/$RECIPE/$TAG"; mkdir -p "$RD"
       NP=$((CONC * MULT)); WU=$((CONC * 2))
       echo "=== $(date +%H:%M:%S) $RECIPE $TAG (np=$NP warmup=$WU) ==="

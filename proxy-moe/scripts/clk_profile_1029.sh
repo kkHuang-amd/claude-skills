@@ -41,7 +41,8 @@ for C in $CONCS; do
     --num-prompts $((C*4)) --max-concurrency $C --warmup-requests $C \
     --request-rate inf > "$OUT/bench_c$C.log" 2>&1 &
   BPID=$!
-  sleep ${PROFILE_DELAY:-45}
+  # c<=2 (8 prompts) finishes in ~20 s: a 45 s delay profiled the next concurrency instead (10-29 c2 trace = c16)
+  sleep ${PROFILE_DELAY:-$([ $C -le 2 ] && echo 8 || echo 45)}
   # Needs sglang PR #44292 on ROCm 10.1 / torch 2.12: without it the schedulers inherit
   # ROCPROFILER_REGISTER_LIBRARY and the trace has no GPU kernels.
   curl -s -m 600 -X POST http://127.0.0.1:$PORT/start_profile -H 'Content-Type: application/json' \

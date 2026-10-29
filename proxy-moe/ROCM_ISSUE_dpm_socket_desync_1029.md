@@ -71,6 +71,31 @@ Observations:
 - Running only one partition per socket (siblings idle) still gives a 93% wait share, so partitioning is not the cause. It only
   doubles the number of ranks that wait.
 
+### Timeline: each socket oscillates with a 9 ms period, out of phase with the others
+
+![effective GFXCLK per partition under DPM](img/rocm_issue_dpm_timeline_1029.png)
+
+Each point is one iteration's GEMM converted to an effective clock: `800 MHz x (this rank's GEMM time with all sockets locked at
+800 MHz) / (GEMM time this iteration)`. The GEMM is compute-bound, so time is proportional to 1/clock. When locked, per-rank GEMM
+time varies only ~1% (p10-p90), so it works as a calibration. The sysfs `freq1_input` cannot show this: sampled every 1 ms it moves
+only +-10 MHz, while the GEMM time swings 2x.
+
+- Every socket follows a sawtooth with the same period, a 9.0 ms median peak to peak. The clock jumps up, then falls over the next
+  few iterations.
+- The phases differ between sockets, so at almost every iteration some socket is at its trough, and the all-reduce waits for it.
+- The two partitions of a socket overlap (solid and dashed lines).
+- Effective clock mean / p10 / p90 per socket (MHz):
+
+| socket | GPUs | mean | p10 | p90 |
+|---|---|---|---|---|
+| 0 | 0/1 | 1154 | 774 | 1835 |
+| 1 | 2/3 | 1075 | 630 | 1598 |
+| 2 | 4/5 | 939 | 711 | 1222 |
+| 3 | 6/7 | 1151 | 614 | 1636 |
+
+To reproduce: run `mb_skew.py --dump out.json` to get per-iteration timestamps, then
+[`scripts/plot_clk_timeline.py`](scripts/plot_clk_timeline.py) `out.json 800 <per-rank locked p50 us> out.png`.
+
 ## Results: LLM decode (sglang, TP8, EP1, 1k in / 1k out, under torch profiler)
 
 | concurrency | DPM (arm 1) tok/s / median ITL | LOCKED 1000 MHz | DPM (arm 3) | locked vs DPM mean |
@@ -113,3 +138,5 @@ on the target device"). GL2CLK stays at 1246.66 MHz under load. Wrapper: [`scrip
    seen in snapshots the cause, or is there a cost to DPM transitions?
 4. PPT engages at ~1.2-1.5 kW per socket during decode. Is that the intended limit on this SKU?
 5. Under a heavy GEMM the sockets are anti-correlated (median -0.37). Is power arbitrated between sockets at board or node level?
+6. Is the 9 ms sawtooth the SMU power-control loop period? Can the loops of different sockets be phase-aligned,
+   or coordinated across the node?

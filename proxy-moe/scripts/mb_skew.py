@@ -1,11 +1,11 @@
 # Cross-rank skew microbench: per iter = fixed compute kernel(s) + one all-reduce. GPU events per rank.
 # torchrun --nproc-per-node N mb_skew.py --load gemm|stream|light [--iters 2000]
 # Socket of a rank = physical GPU id // 2 (MI455 here: 2 partitions per socket); pass --gpus to describe CUDA_VISIBLE_DEVICES.
-import argparse, os, statistics as st, torch, torch.distributed as dist
+import argparse, json, os, statistics as st, time, torch, torch.distributed as dist
 ap = argparse.ArgumentParser()
 ap.add_argument("--load", default="gemm"); ap.add_argument("--iters", type=int, default=2000)
 ap.add_argument("--warmup", type=int, default=300); ap.add_argument("--ar-bytes", type=int, default=2 << 20)
-ap.add_argument("--gpus", default="0,1,2,3,4,5,6,7"); ap.add_argument("--size", type=int, default=4096)
+ap.add_argument("--gpus", default="0,1,2,3,4,5,6,7"); ap.add_argument("--dump", default=""); ap.add_argument("--size", type=int, default=4096)
 a = ap.parse_args()
 dist.init_process_group("nccl"); r, W = dist.get_rank(), dist.get_world_size()
 torch.cuda.set_device(int(os.environ["LOCAL_RANK"])); dev = torch.device("cuda")
@@ -20,7 +20,10 @@ else:                     # light: tiny kernel, should stay far below PPT
     work = lambda: [torch.mm(A, A) for _ in range(4)]
 buf = torch.zeros(a.ar_bytes // 2, device=dev, dtype=torch.bfloat16)
 ev = [[torch.cuda.Event(enable_timing=True) for _ in range(3)] for _ in range(a.iters)]
+ref, wall0 = torch.cuda.Event(enable_timing=True), 0.0
 for i in range(a.warmup + a.iters):
+    if i == a.warmup:   # timeline anchor: GPU event + host wall clock, after the warmup drains
+        torch.cuda.synchronize(); ref.record(); torch.cuda.synchronize(); wall0 = time.time()
     if i >= a.warmup: ev[i - a.warmup][0].record()
     work()
     if i >= a.warmup: ev[i - a.warmup][1].record()
@@ -31,6 +34,12 @@ comp = torch.tensor([e[0].elapsed_time(e[1]) * 1e3 for e in ev], device=dev)   #
 ar = torch.tensor([e[1].elapsed_time(e[2]) * 1e3 for e in ev], device=dev)
 C = [torch.empty_like(comp) for _ in range(W)]; A_ = [torch.empty_like(ar) for _ in range(W)]
 dist.all_gather(C, comp); dist.all_gather(A_, ar)
+if a.dump:  # per-iteration timeline for plotting: start (wall-clock s), compute us, AR us, per rank
+    t0 = torch.tensor([wall0 + ref.elapsed_time(e[0]) / 1e3 for e in ev], device=dev, dtype=torch.float64)
+    T = [torch.empty_like(t0) for _ in range(W)]; dist.all_gather(T, t0)
+    if r == 0:
+        json.dump({"gpus": [int(g) for g in a.gpus.split(",")][:W], "load": a.load, "start": [t.tolist() for t in T],
+                   "compute_us": [c.tolist() for c in C], "ar_us": [x.tolist() for x in A_]}, open(a.dump, "w"))
 if r == 0:
     C = [c.tolist() for c in C]; A_ = [x.tolist() for x in A_]
     phys = [int(g) for g in a.gpus.split(",")][:W]; sock = [p // 2 for p in phys]

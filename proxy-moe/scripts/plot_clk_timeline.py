@@ -6,6 +6,7 @@ import json, sys, statistics as st
 import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
 mbj, lock, base, out = sys.argv[1], float(sys.argv[2]), [float(x) for x in sys.argv[3].split(",")], sys.argv[4]
 win = float(sys.argv[5]) if len(sys.argv) > 5 else 1.0; zoom = float(sys.argv[6]) if len(sys.argv) > 6 else 100.0
+label = sys.argv[7] if len(sys.argv) > 7 else "under DPM"; YLIM = (550, 2050)
 m = json.load(open(mbj)); gpus = m["gpus"]
 SURF, INK, INK2, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#e4e3df"
 HUE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]          # socket 0..3, reference categorical order
@@ -19,9 +20,9 @@ for ax, (lo, hi), lw, ms in ((axes[0], (0, win * 1e3), 1.1, 0), (axes[1], (win *
         pts = [((t - a) * 1e3, lock * base[g] / d) for t, d in zip(m["start"][k], m["compute_us"][k]) if lo <= (t - a) * 1e3 <= hi]
         ax.plot([p[0] for p in pts], [p[1] for p in pts], color=HUE[g // 2], lw=lw, ls="-" if g % 2 == 0 else (0, (3, 2)),
                 marker=("o" if g % 2 == 0 else "s") if ms else None, ms=ms, label=f"GPU {g}")
-    ax.set_xlim(lo, hi); ax.set_ylabel("effective GFXCLK (MHz)", color=INK2)
+    ax.set_xlim(lo, hi); ax.set_ylim(*YLIM); ax.set_ylabel("effective GFXCLK (MHz)", color=INK2)
 axes[0].axvspan(win * 500 - zoom / 2, win * 500 + zoom / 2, color="#d9d8d3", alpha=0.5, lw=0)
-axes[0].set_title(f"Effective GFXCLK per partition under DPM, 8 ranks, identical GEMM + 2 MiB all-reduce per iteration ({win:.0f} s)",
+axes[0].set_title(f"Effective GFXCLK per partition {label}, 8 ranks, identical GEMM + 2 MiB all-reduce per iteration ({win:.0f} s)",
                   color=INK, fontsize=11, loc="left")
 axes[1].set_title(f"Zoom: shaded {zoom:.0f} ms (one marker = one iteration; solid = partition 0, dashed = partition 1 of a socket)",
                   color=INK, fontsize=10, loc="left")

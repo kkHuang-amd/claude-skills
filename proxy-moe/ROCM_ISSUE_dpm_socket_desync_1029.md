@@ -93,6 +93,18 @@ only +-10 MHz, while the GEMM time swings 2x.
 | 2 | 4/5 | 939 | 711 | 1222 |
 | 3 | 6/7 | 1151 | 614 | 1636 |
 
+Control: the same run with all four sockets locked at GFXCLK 1000 MHz (same calibration, same y-range). The sawtooth is gone,
+all eight partitions stay at ~980-1030 MHz, skew max-mean drops from 611 us (40%) to 23 us (1.6%), and the AR wait share drops
+from 93% to 28%. Locked at 1000 MHz, the 800 MHz calibration reads ~1000 MHz, which confirms the time ~ 1/clock conversion.
+(GPU 1 reads ~30 MHz high throughout; its calibration time is the largest of the eight.)
+
+![effective GFXCLK per partition, locked 1000 MHz](img/rocm_issue_lock1000_timeline_1029.png)
+
+Sampling: one point per iteration (GEMM + all-reduce), so the points are not evenly spaced. Points are a median 2.22 ms apart under
+DPM and 1.56 ms apart locked. Each run records 6000 iterations after 300 warm-up iterations: 13.3 s under DPM, 9.4 s locked. The
+plots show the middle 1 s and a 100 ms zoom. Each point is the average speed over one GEMM (~1.3-1.5 ms), so faster changes are
+not visible.
+
 To reproduce: run `mb_skew.py --dump out.json` to get per-iteration timestamps, then
 [`scripts/plot_clk_timeline.py`](scripts/plot_clk_timeline.py) `out.json 800 <per-rank locked p50 us> out.png`.
 

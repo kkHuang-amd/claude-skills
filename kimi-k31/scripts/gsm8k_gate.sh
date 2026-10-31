@@ -1,7 +1,7 @@
 #!/bin/bash
 # Accuracy gate: gsm8k200 (sgl-eval, thinking, T=1.0, top_p 0.95, seed 42, 64 threads) against a
 # server on :30000 launched WITHOUT SGLANG_SIMULATE_ACC_* (real draft), plus mean accept len.
-# Usage: [TEMP=0] gsm8k_gate.sh <tag> <server_log>   -> $K31_OUT/results/acc/<tag>/{metrics.json,accept_len.txt}
+# Usage: [TEMP=0] [THREADS=64] gsm8k_gate.sh <tag> <server_log>   (THREADS=1: every step bs 1, e.g. a mono c1 gate)   -> $K31_OUT/results/acc/<tag>/{metrics.json,accept_len.txt}
 # TEMP=0 (greedy) is the low-noise A/B mode: at T=1.0 a single long-tail generation (seen: 3k-12k
 # tokens) dominates wall time and the time-weighted accept len.
 # Baseline (T2, 2026-10-30): score 0.985, accept len mean 4.06 (req-weighted 4.90).
@@ -11,14 +11,15 @@ cd /tmp
 TAG=$1; SLOG=$2; R=$K31_OUT/results/acc/$TAG; mkdir -p "$R"
 until rg -q 'ready to roll' "$SLOG"; do rg -q 'Traceback|Initialization failed' "$SLOG" && { echo SERVER-FAILED; exit 1; }; sleep 15; done
 S=$(date -u '+%H:%M:%S')
-python3 - "$R/metrics.json" "${TEMP:-1.0}" > "$R/eval.log" 2>&1 <<'EOF'
+python3 - "$R/metrics.json" "${TEMP:-1.0}" "${THREADS:-64}" > "$R/eval.log" 2>&1 <<'EOF'
 import json, sys, time
 from types import SimpleNamespace
 from sglang.test.sgl_eval_utils import run_sgl_eval
 t = time.time()
 temp = float(sys.argv[2])
+threads = int(sys.argv[3])
 m = run_sgl_eval(SimpleNamespace(base_url="http://127.0.0.1:30000", model="/shared_nfs/Kimi-K3.1", eval_name="gsm8k",
-    num_examples=200, num_threads=64, max_tokens=32768, temperature=temp, top_p=0.95 if temp > 0 else 1.0,
+    num_examples=200, num_threads=threads, max_tokens=32768, temperature=temp, top_p=0.95 if temp > 0 else 1.0,
     seed=42, sgl_eval_thinking=True))
 m["temperature"] = temp
 m["wall_s"] = round(time.time() - t, 1)

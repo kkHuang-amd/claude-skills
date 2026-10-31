@@ -4,10 +4,26 @@ Owner node: mi355-4. Created 2026-10-31. DESIGN ONLY: no kernel code until the u
 
 ## CONTINUE HERE
 
-**Status:** P0 done (mi355-4, 2026-10-31 18:3x; results in section 6, section 2 estimates revised).
-No server running, GPUs free. No mono kernel code written.
-**Next:** user go / no-go for P1 (= S1, section 5) on the revised numbers; first P1 step is the planner +
-`kimi_k31` spec skeleton in sgl-amd-mono, then the <= 8-row launches.
+**Status:** P1 started (user go, 2026-10-31 18:21). P1a = K3's launches served on K3.1 (spec `kimi_k31`)
+in the snapshot config (REPLAYSSM=0), A/B running; K1 ReplaySSM-ring build written, kernel test pending a free GPU.
+**Code:** sgl-amd-mono branch `k31/mono-s1` (local, not pushed), on PR #13 head 88aee67:
+d7fb03e kimi_k31 spec (model_type kimi_k31, DCP8 = Feature.CONTEXT_PARALLEL, dsa decode backend, drift
+digests on dev_amd), 5fb46b4 dsa backend fix, baa73de K1 ring build (`KdaPreBuild.ring`, chosen from
+`get_exec().mamba.enable_linear_replayssm_spec`; reads the committed state, writes rawk/rawv/g/beta rows,
+no per-token state) + `test/kernels/test_kimi_k31_k1_ring.py`.
+**P1a facts:** spec accepted after one fix (decode attention backend is `dsa`); builds width 8 in 106 s,
+7.4 MiB; routes target_verify bs 1 x 8 tokens (1 of 23 decode graphs); K1 declines only the first covered
+layer ("residual stream owes a contribution", by design); the DSpark draft runs the normal forward.
+**P1a runtime (mi355-4):** `/tmp/p1a_chain.sh` pid 752543, log `/tmp/p1a_chain.log`, ends `P1A-CHAIN-DONE`:
+ab_bench AB_CONC="1 4" on/off (`results/ab/p1a_mono_{on,off}_rs0_20261031`), c1 trace
+`traces/p1a_c1_mono_on_20261031`, greedy gsm8k SIM=0 on/off (`results/acc/p1a_gsm_{on,off}_rs0_20261031`).
+**Done since:** P1a A/B (section 8); K1 ring kernel test passes first try (core bit-equal to the snapshot
+build, committed state untouched, ring k / v exact, g / beta <= 5e-7) and the snapshot test still passes (12/12);
+K2 stage timeline (section 8, `test/kernels/kimi_k3/time_k2.py`, commit on k31/mono-s1).
+**Running (mi355-4):** `/tmp/p1r_chain.sh` pid 783787, log `/tmp/p1r_chain.log`, ends `P1R-CHAIN-DONE`: ring config
+(REPLAYSSM=1) mono on/off ab_bench c1/c4 (`results/ab/p1r_mono_{on,off}_20261031`) + greedy gsm8k at THREADS=1
+(`results/acc/p1r_gsm1_{on,off}_20261031`).
+**Next:** P1b on K2 at c1 (route phase, tail; section 8), then P2a (section 7).
 
 **Decisions (user, 2026-10-31):**
 1. S1 then S2, but S1 must not lock in PR #13's structure: reuse what is good, redesign what limits S2
@@ -344,3 +360,85 @@ decode threshold of 256-384 rows on the standard path (c48 -3%) is independent o
 - c4, S2: ~72 us per KDA layer (5.0 ms) + DSA ~3.6 ms -> -5 to -8.6 ms of 26.1.
 - c16, S2: A ~5.0-5.5 (cheaper hand-offs), B ~1.8, C revised to ~1.5-2.0 (AR 0.5-1.0 + DCP ~1.0), D 0
   -> -8 to -9 ms of 47.9.
+
+## 7. S2 layer launch: dataflow (design, mi355-4 2026-10-31)
+
+One launch per layer L at 16..384 rows (R requests x 8 tokens), between aiter's expert stage 2 of L-1 and
+stage 1 of L. The residual stream is column-sharded: rank r owns hidden columns [896 r, 896 (r+1)).
+Stages (each a set of tiles; hand-offs through the mailbox; P = partial over ranks):
+
+```text
+T1 MoE tail (L-1)  in: expert out latent P [rows,3584], shared down P [rows,7168]
+                   latent: two-shot AR (RS + AG)            -> full latent on every rank
+                   shared: RS to owners                      -> shared slice [rows,896]
+                   latent norm + latent up, owner's 896 output columns only (1/8 of W_up)
+                   y slice = up + shared + residual          (column-sharded, no replicated work)
+T2 attn seam (L)   AttnRes on the owner's columns; per-(row, source) RMS / score partials and the
+                   input-norm RMS exchanged as scalars; bank kept column-sharded (1/8 the reads)
+                   x slice -> AG x                           (in_proj needs K = 7168)
+T3 attention (L)   KDA: in_proj tiles consume x by K-chunks as the slices land; f_b, conv, recurrence,
+                   gated norm per (request, head) task (K1 math, R requests: conv staged per step for
+                   R slots, ring or snapshot state); DSA: SGLang's attention between two launches (P2b/c)
+T4 o_proj          tiles, epilogue pushes column slices to owners (RS)
+T5 MLP seam        owner columns, scalars exchanged, post-attention norm -> x' slice -> AG x'
+T6 MoE front       router 112 experts / rank + latent down 448 rows / rank + shared gate_up 1536 rows,
+                   one weight pass over x'; AG router logits (0.06 MB) and latent (0.9 MB);
+                   top-16, sort, mxfp8 quant -> aiter stage-1 inputs; SiTU + shared down -> shared P
+```
+
+Bytes out per rank per layer at 128 rows: latent RS + AG 1.6 MB, shared RS 0.8, x AG 1.6, o_proj RS 1.6,
+x' AG 1.6, router + latent AG 0.8: ~8 MB vs ~7.7 MB for today's two all-reduces. Comm volume is unchanged;
+what changes is (a) no replicated work (router, latent down / up, seams, norms), (b) every collective is
+split into slices that a GEMM produces or consumes tile by tile, so it overlaps, (c) ~22 kernels -> 1 launch
++ 2 expert launches. Formats by size (section 6.2): tagged words <= 0.9 MB, waitcnt-flag above.
+
+Reuse from PR #13: seam / KDA math (stages/seam.py, attention/kda.py), mailbox + guard + peer runtime, the
+role rule (pollers carry no weight loads). New: MFMA row-tile GEMM stage (M = 16..384, N-tiles over 256
+CTAs grouped by XCD), slice collectives, the planner (stage graph -> tasks -> CTAs per width bucket).
+P1b keeps the c1 bucket on PR #13's launches (GEMV, experts inside) and adds the ring; the wide buckets
+come from this design (P2a = KDA layers + MoE tail/front, P2b/c = DSA front/back).
+
+Why columns, not rows: DSV4.1's mono runs token parallel (`deepseek_v41/gfx950/token_par.py`: rank r owns
+rows r S/TP .., all-reduces become reduce-scatters to the row owner, seams need no exchange). For K3.1 the
+latent up (7168 x 3584 bf16, 51 MB) would then be read whole by every rank for its rows -- the replicated
+cost we remove (~20 us x 92 at c16; PR #8's row-sharded tail pays it and loses at c4). Columns read 1/8 of
+W_up at the price of a scalar exchange per full-row reduction (~1-2 us, section 6.2). Re-decide if the
+scalar rounds measure > 4 us a layer.
+
+GEMM tiles at 16..384 rows: x does not fit LDS (128 x 7168 bf16 = 1.8 MB), so the PR #13 GEMV form
+(x rows in LDS, weights streamed into MFMA B operands) stops at ~16-48 rows. P2a builds a tile stage from
+aiter's FlyDSL a16w16 gfx950 GEMM pieces (`aiter/ops/flydsl/kernels/gemm_a16w16_gfx950.py`:
+`make_gemm_ab_load_context`, `async_load_to_lds`, `write_cshuffle_vec_to_global`), K-chunked x through LDS,
+epilogue into the slice mailbox.
+
+## 8. P1a results (mi355-4, 2026-10-31; K3 launches on K3.1, REPLAYSSM=0, SIM acc 3.84)
+
+```text
+ab_bench (results/ab/p1a_mono_{on,off}_rs0_20261031)   mono off   mono on
+decode c1 TPOT                                          5.06       4.65   (-8.1%)
+decode c1 P90 ITL                                       6.36       5.84   (-8.2%)
+decode c4 TPOT (not routed: 32 rows)                    7.98       7.92   (noise)
+prefill 8k TTFT                                         524.1      522.8
+c1 trace mono on (traces/p1a_c1_mono_on_20261031): VERIFY 17.67 ms; K2 ~100 us x ~85 launches, K1 ~37 us x 68
+```
+Below the -25% estimate. Why: at c1 a layer reads ~300 MB of weights a rank (experts ~250 MB at 128
+routed pairs, dense ~70 MB after de-replication), so the step is HBM-bound and launch / small-kernel
+overhead is the smaller part. K2 streams at ~3.2 TB/s (100 us for ~320 MB) vs ~120 us for the standard
+path's kernels it replaces; K1's in_proj GEMV (90 MB) runs ~2.4 TB/s where the standard hgemm gets 5.1.
+Revised c1 levers: K2 weight streaming to ~5 TB/s (~35 us a layer, ~3 ms a step), K1 in_proj at hgemm speed
+(~15-20 us x 68 = 1.0-1.4 ms). Next measurement: the launches' stage timeline (`timeline=True` builds,
+`gfx950/stamps.py`) to place the K2 / K1 time per stage.
+
+K2 stage timeline, 8 rows, graph-replayed behind plain launches (`time_k2.py`; 103.5 us a launch):
+```text
+x published (o_proj + AR + seam)  21.5 us | route table (router AG, top-16, queue) 39.9 (one CTA at 38.4,
+the rest at 21.7) | expert gate/up done 65 (~25 us, ~6.8 TB/s) | expert down done 86 (~20 us, ~4.4 TB/s) |
+latent norm, latent up, MoE AR reduce 102.6
+```
+The experts stream near the floor; the route phase (18 us) and the tail (16 us) are latency. Halving both
+is ~20 us a layer, ~1.8 ms a c1 step: P1b's first items.
+
+gsm8k caveat: the P1a gate (`results/acc/p1a_gsm_{on,off}_rs0_20261031`, 0.99 on / 0.98 off) ran 64 threads,
+so most verify steps were wider than 8 rows and took the standard path. It does not gate the mono path.
+`gsm8k_gate.sh` now takes THREADS; mono gates run THREADS=1 (every step bs 1, as PR #13's
+--max-running-requests 1).

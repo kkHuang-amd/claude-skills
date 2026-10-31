@@ -1,0 +1,282 @@
+# Kimi-K3.1 decode / verify mono kernel — design (OPT_TRACKER row 13)
+
+Owner node: mi355-4. Created 2026-10-31. DESIGN ONLY: no kernel code until the user approves.
+
+## CONTINUE HERE
+
+**Status:** design v1 + user decisions (2026-10-31 17:21, below). P0 measurements in progress on K3.1.
+**Next:** P0 (section 5): K3.1 c1 / c4 traces, P2P microbench, PR #8 tail threshold at decode widths.
+No kernel code yet; S1 starts after P0 updates the section 2 numbers.
+
+**Decisions (user, 2026-10-31):**
+1. S1 then S2, but S1 must not lock in PR #13's structure: reuse what is good, redesign what limits S2
+   (section 2b). S1 is built on the S2 architecture, with <= 8-row stage variants.
+2. New package `sgl_amd_mono/kimi_k31/`.
+3. Design docs committed and pushed (skills repo).
+4. No K3 c1 reproduction; P0 starts directly on K3.1.
+**Code home:** `/sgl-workspace/sgl-amd-mono` (github sgl-project/sgl-amd-mono, detached at 90c2355 = main).
+Reference: PR [#13](https://github.com/sgl-project/sgl-amd-mono/pull/13) `billishyahao/kimi_k3`
+(Kimi-K3 layer monokernel, open, 7.3k lines, last push 2026-10-29). SGLang side:
+`/sgl-workspace/sglang-k31-amd` `origin/dev_amd` 3d2aa95c9d (has `kernel_plugins/amd`,
+`--enable-amd-monokernel`, and `forward_pre_o_proj` on both the KDA and the MLA attention).
+**Repro of the numbers below:**
+```bash
+python3 scripts/trace_layer_kinds.py /shared_nfs/kimi-k31/traces/c16_isl8k_osl1k_noradix_20261030/*TP-0.trace.json.gz VERIFY 20
+```
+**Pass criteria for any phase:** endpoint TPOT moves (ab_bench c4/c16/c48, plus c1 for S1), gsm8k200 greedy
+within noise of 0.985 with the real draft, accept length not collapsing, fault injection stops every rank.
+
+## 0. What K3.1 is, and what PR #13 already covers
+
+K3.1 has the same dims as K3 (checked both `config.json`): 93 layers (1-based), hidden 7168, 69 KDA layers
+and 24 full-attention layers (4, 8, ..., 92, 93), layer 1 dense FFN, 92 latent-MoE layers
+(896 experts, top-16, latent 3584, expert inter 3072, 2 shared experts), attention-residual bank
+(`attn_res_block_size` 12). The only architectural difference: K3.1's full-attention layers are DSA
+(MLA q_lora 1536 / kv_lora 512 / rope 64, 96 heads, plus an indexer: 32 heads x 128, top-2048 every layer).
+`KimiK31ForConditionalGeneration` subclasses the K3 model in sglang-k31-amd.
+
+PR #13 (K3, TP8, DCP1, aiter attention backend, DSpark block 7, 1..8 rows a step):
+- K1 per KDA layer: AttnRes seam -> input_layernorm -> in_proj -> f_b -> conv -> recurrence -> gated norm.
+- K2 per MoE layer (all 92): o_proj + in-kernel AR -> MLP AttnRes seam -> router top-16 -> latent down +
+  shared gate_up -> MXFP4 experts -> shared down + latent up -> in-kernel MoE AR. Router and latent
+  down/up are computed 1/8 per rank and all-gathered (the standard path replicates them).
+- Full-attention layers keep SGLang's attention up to `forward_pre_o_proj`.
+- Measured on K3 c1: 41.63 -> 55.26 decode steps/s (step 24.0 -> 18.1 ms, -5.9 ms); AgentX c1 TPOT -21%.
+
+What PR #13 does NOT give K3.1, and the reason this design exists:
+1. Width. All stages are GEMV-style for S <= 8 rows (c1). Our A/B points are c4/c16/c48 = 32/128/384 verify
+   rows. Its one-shot AR (every rank pushes its full partial to every peer) costs 7x the data per rank:
+   fine at 8 rows (0.8 MB out), ~13 MB out at 128 rows.
+2. DSA layers: indexer, KV write, sparse MLA, DCP8 combine stay outside (24 layers, 17.1 ms/step at c16).
+3. Config gate: `model_type kimi_k3`, `attention_backends {aiter}`; K3.1 A/B config runs `attention_backend=triton`,
+   DCP8, fp32 ReplaySSM ring (`--enable-linear-replayssm-spec`, PR #7). PR #13's best run used bf16 SSM
+   state in one arm; K1 reads its own conv buffer (SGLang's spec conv window is one entry short).
+4. Tested against SGLang 8e7601ae4a, not our dev_amd.
+
+## 1. Op list per layer from the c16 trace (VERIFY, bs 16 x 8 = 128 rows, TP8 + DCP8)
+
+Trace `c16_isl8k_osl1k_noradix_20261030` TP0, 20 VERIFY steps averaged; kernel-sum 47.93 ms/step
+(GPU fully busy, single stream). Segments end at each MoE stage 2, so a segment = the previous layer's
+MoE AR tail + this layer's attention + this layer's MoE. GEMM roles come from the M=128 shape log
+(`logs/server_i3_gemm_shapes_20261031.log`, N x K per rank) and kernel order; "?" = inferred.
+
+| segment kind | segs/step | kernels/seg | us/seg | ms/step |
+|---|---:|---:|---:|---:|
+| KDA layer | 67 | 22.2 | 446.0 | 29.88 |
+| DSA layer | 24 | 43.5 | 712.2 | 17.09 |
+| head (layer 1 dense + layer 2 KDA, embedding) | 1 | 37 | 672.7 | 0.67 |
+| tail (final AR/agg/norm, lm_head, logits AG, softcap) | 1 | 10 | 286.3 | 0.29 |
+
+KDA layer, in order (us, avg):
+
+```text
+MoE tail of L-1 : AR 2stage [latent|shared] ~20 | add_rmsnorm_quant 4.3 (latent norm) | latent up 7168x3584 20.2
+                  | add3 4.4 | _agg (attn-side AttnRes) ~8.5
+attention       : in_proj 6288x7168 29.8 | f_b 1536x128 4.3 | conv1d_update 5.9 | KDA recurrence 26.3
+                  (Triton; 16.1 with PR #7) | gated norm 4.0 | o_proj 7168x1536 10.3 | AR ~20 | _agg (MLP-side) ~8.5
+MoE front       : fused [shared gate|up 1536 | latent down 3584 | router 896] x7168 30.2 | situ_and_mul 4.1
+                  | shared down 7168x768 6.6 | topk_reg 5.1 | moe_sorting x2 10.5 | fused_mx_quant_moe_sort 12.5
+experts         : stage1 135.8 | stage2 73.9
+by class        : experts 209.7 | dense GEMM 101.4 | AR 39.9 | KDA recurrence 26.3 | small ops 67.9
+```
+
+DSA layer, in order (MoE tail and MoE front/experts as in the KDA layer):
+
+```text
+attention front : q_a|kv_a 2112x7168 13.3 | fused_qk_rmsnorm 4.3 | q_b 18432x1536 19.6 (hipBLASLt; all 96 heads
+                  on every rank under DCP8) | index q 4096x1536 8.2 | index k 128x7168 5.6 | layer_norm 4.0
+                  | act_quant 5.3 | indexer_k_quant_and_cache 4.0 | index weights 32x7168 5.4 | head_gate_q_scale 4.2
+                  | (layer 4 only: 12 x elementwise ~3.8 = per-forward memo, ~0.26 ms/step)
+indexer + DCP   : paged_mqa_logits 7.6 | dcp_local_candidates 4.3 | allgather_vec 45.5 | dcp_global_slots 21.6
+KV + q path     : W_UK bmm? 14.0 | quantize_k_cache 4.3 | set_mla_kv_buffer 4.2 | localize_compact 4.5 | mxfp8_quant 5.5
+attention       : opus_mla_decode_mxfp8 51.1
+DCP combine     : dcp_pack_a2a_send 7.9 | NCCL a2a 57.8 | dcp_lse_combine 5.2
+attention back  : W_UV bmm? 11.9 | output-gate GEMM 1536x7168? 12.1 | mla_output_gate 3.9 | o_proj 7168x1536 10.5 | AR ~20
+by class        : experts 209.4 | dense GEMM 158.6 | comm 155.3 (AR 38.9, DCP 116.4) | sparse MLA 51.1
+                  | indexer/topk 33.5 | small ops 104.3
+```
+
+Where the 47.9 ms go, and which part a mono kernel can touch at c16:
+
+```text
+experts (stage1+2)   19.3 ms  HBM roofline (~8 TB/s; ~807 of 896 experts touched at 2048 pairs) -> not a target
+dense GEMM           10.9     ~3-4.3 TB/s, floor 4.8 ms; row 3: in-kernel tiles tie tgemm at best
+                              -> gain only by NOT doing replicated work (router, latent down/up)
+comm                  6.3     AR 187 x ~20 us (~185 GB/s busbw) + DCP 116 us x 24; already link-bound
+                              -> gain by overlap and by sending fewer bytes, not by "faster comm"
+small ops + prologue  ~7.2    67.9 x 69 + 104.3 x 24 (+ head/tail); each ~4-13 us, real work ~1 us
+                              -> the main mono target
+KDA / sparse MLA / indexer ~4.2  compute kernels; keep (PR #7 HIP KDA), fold only their glue
+```
+
+Caveat: only c16 is traced. Small-op cost is roughly width-independent, so at c4 (step ~30 ms) the same
+absolute saving is a larger fraction; MoE at c4 touches fewer experts. P0 captures c1 and c4.
+
+## 2. Scope options and expected ms/step (c16 VERIFY 47.9 ms unless stated)
+
+Common savings mechanisms (per layer, c16):
+- A. Small-op fusion: each fused hand-off still costs a grid-wide data dependency (~2-4 us through the
+  mailbox) but not a launch + ramp + tail. KDA 67.9 -> ~20 us, DSA 104.3 -> ~35 us.
+  = 3.3 + 1.7 = ~5.0 ms (range 3.5-5.0).
+- B. De-replication (PR #13 does it): router + latent down computed 1/8 per rank (6016-row GEMM -> 2096 rows,
+  30 -> ~11 us, + 0.9 MB latent / 0.5 MB logits all-gather ~5-7 us), latent up for 1/8 of the output
+  columns (20 -> ~4 us) with a column-sharded residual. Net ~20 us x 92 = ~1.8 ms (1.5-2.5).
+  Overlaps PR #8's row-sharded tail (standard path, prefill threshold 4096): measure that first (P0.4).
+- C. Comm: two-shot AR (RS + AG) pushed tile by tile from the producing GEMM epilogue, seam/norm on the
+  owner's 1/8 columns, ~8-12 us of each ~20 us AR hidden -> 1.5-2.2 ms. DCP: apply W_UV (512 -> 128 per head)
+  to the partial outputs BEFORE the a2a (linear, so LSE rescale commutes) -> a2a bytes / 4 (11 -> 2.75 MB),
+  pack/combine fused: ~45 us x 24 = ~1.1 ms. Candidate all-gather 45.5 us: size unknown, 0-0.6 ms.
+  C = 2.6-3.9 ms.
+- D. GEMM tiles inside the launch: 0 assumed (row 3), +0..1 ms if the next stage's weights stream
+  while a stage waits (PR #13's "issue weights before the first wait").
+- E. Experts: 0 at c16.
+
+| option | launches/step | covers | c1 | c16 est. | effort / risk |
+|---|---:|---|---|---|---|
+| S0 = today | 2581 | - | - | 47.9 | - |
+| S1 port PR #13 to K3.1, <= 8 rows | ~2581 - 161 x ~20 at c1 | K1 (69 KDA) + K2 (92 MoE layers); DSA attention + DCP on SGLang | ~-5 ms/step (K3 measured -5.9) | 0 (falls back) | low: gate, DCP8, triton backend, fp32 ring |
+| **S2 per-layer, wide rows, experts kept as aiter launches** | ~69 x 3 + 24 x 5 = ~330 | everything except experts stage1/2, sparse MLA, (KDA recurrence may stay a call) | covered via S1 | **-9 to -12 ms (~36-39 ms, -19..-25%)** = A + B + C + D | high: new MFMA-tile stages, two-shot AR, DCP in kernel |
+| S2+ experts inside the layer launch | ~69 + 24 x 3 | S2 + stage1/2 as stages | - | S2 + 0.5-0.9 ms (overlap expert weight issue with prologue, -2 boundaries) | very high: grouped MXFP4 GEMM at roofline inside a multi-role kernel |
+| S3 one persistent kernel per step | 1-3 | all 93 layers + tail | - | S2+ + ~0.7-1.0 ms (remaining boundaries x 2-3 us) | highest: one register/LDS budget for every stage, compile time, debuggability |
+
+S2 launch shape (one "layer launch" = from the MoE output of layer L-1 to the expert inputs of layer L):
+
+```text
+KDA layer L : [K_L: MoE-tail(L-1) RS/AG + latent up + residual + AttnRes seam + input norm
+               + in_proj + f_b + conv + recurrence + gated norm + o_proj + AR + MLP seam
+               + router/latent-down/shared gate_up (1/8, AG) + SiTU + shared down + top-16 + sort + mxfp8 quant]
+              -> aiter stage1 -> aiter stage2
+DSA layer L : [K_L,front: MoE-tail(L-1) ... + q_a/kv_a + norms + indexer q/k/w + logits + local top-k
+               + in-kernel candidate AG + global slots + KV write + q_b + W_UK]
+              -> opus sparse MLA
+              -> [K_L,back: W_UV on partials + in-kernel a2a + LSE combine + gate + o_proj + AR + MLP seam + MoE front]
+              -> aiter stage1 -> aiter stage2
+```
+
+Recommendation: S1 first (small, gives c1 and validates the PR #13 base on K3.1), then S2 in sub-phases
+(section 5). S2+/S3 only if S2 lands and the remaining boundaries measure > 1 ms/step.
+
+## 2b. PR #13: what kimi_k31 reuses and what it redesigns
+
+Rule: S1 and S2 share one architecture. S1 differs from S2 only in which stage variants a width bucket
+picks (GEMV <= 8 rows, MFMA tiles >= 16 rows) and in whether the experts run inside the launch.
+
+Reuse (as is, or by import from `common` / `kimi_k3` once #13 merges):
+- `common/` runtime: tagged mailbox, guarded waits + fail-stop, uncached peer memory, epoch, stamps.
+- Host-bumped step epoch captured in the graph (`tag.py`): no buffer zeroing between steps.
+- Role rule: CTAs that poll carry no weight loads in flight; weight CTAs issue the next stage's weights
+  before their first wait (MoE weights stream while the AttnRes chain settles).
+- De-replication of router / latent down / latent up (1/8 per rank + all-gather).
+- In-place weights (bf16 checkpoint layout, MXFP4 experts in `Mxfp4MoEMethod`'s layout): no KV budget cost.
+- Correctness lessons: K1 owns its conv window (SGLang's spec window is one entry short); compile by running
+  on real weights (FlyDSL compile-only folds zero args into an unselectable pattern); kernel checks against
+  SGLang ops, bitwise graph replay, fault injection, `SGLANG_READS` contract.
+- The <= 8-row GEMV stages (seam, KDA K1, MoE GEMV) as S1's narrow variants, after a review on K3.1 data.
+
+Redesign (things that would cap S2 or the later path):
+| PR #13 | limit | kimi_k31 |
+|---|---|---|
+| CTA roles as fixed index ranges (0..55 seam, 56..159 o_proj, 160..243 router/latent, ...), `NA = 56`, `ROWS = 16` | one layout for one width; not XCD-aware; every new stage re-cuts the ranges by hand | a build-time planner: stage graph -> tasks -> CTAs per width bucket, grouped by XCD (b % 8), roles derived, not written |
+| launch cut at the o_proj input (K1 = KDA front, K2 = o_proj .. MoE output) | the MoE tail and the next layer's front are split by a launch; the full-attention layers can't join | cut at the expert inputs: one launch = MoE tail(L-1) + attention(L) + MoE front(L); experts inside only for the GEMV buckets |
+| one-shot AR (full partial to every rank) | 7x bytes per rank; ~13 MB out at 128 rows | width-switched: one-shot <= 8 rows, two-shot RS + AG above, epilogue-pushed tiles |
+| residual / AttnRes seam replicated on every rank | 8x the bank reads at wide rows | column-sharded residual and bank (each rank 896 columns), scalars exchanged for the full-row reductions |
+| builds per width 1..8 (`MAX_ROWS`) | 48 builds at bs 1..48 x 8 rows | width buckets with masked rows (8, 16, 32, 64, 128, 256, 384) |
+| full-attention layers on SGLang up to `forward_pre_o_proj` | 24 DSA layers x 712 us outside | DSA front / back launches (P2b / P2c) on the same planner |
+| `model_type kimi_k3`, aiter attention backend, DCP1, bf16 SSM state run | does not start on the K3.1 A/B config | `kimi_k31` spec: triton backend, DCP8, fp32 ReplaySSM ring (PR #7) |
+| `MAX_BLOCKS` AttnRes bank bound | fixed at build | derived from config, checked in the spec |
+
+Open on #13: its body says two of the 1..8 widths "abort today" (the section it points to is not in the
+body); find which before reusing the GEMV stages.
+
+## 3. Synchronization across 8 XCDs and TP8 comm inside the kernel
+
+Hardware facts (MI355X, from row 3 measurements and the sgl-amd-mono runtime): 8 XCDs x 32 CUs; L2 per XCD,
+not coherent across XCDs; workgroup b lands on XCD b % 8 (verified via HW_REG_XCC_ID); a last-CTA fixup
+with `__threadfence` cost ~50 us; device atomics are slow (3M fp32 atomics ~8-10 us) and same-XCC scope does
+not help; owner stores must be sc0|sc1 (write-through) or another XCD's L2 writeback overwrites them.
+
+3.1 Intra-GPU (reuse `sgl_amd_mono/common`):
+- Resident grid, one workgroup per CU (256), role by CTA index (`common/plan.py`), never a grid barrier.
+- Dataflow hand-offs through the tagged mailbox (`common/sync.py`): payload words carry the step epoch tag
+  and live in uncached scratch (`hipExtMallocWithFlags(..., uncached)`); a consumer polls the data itself,
+  so there is no flag + fence pair. Epoch bumped once per forward by the host and captured in the graph
+  (PR #13 `tag.py`), so no buffer is zeroed between steps.
+- XCD-aware placement (new vs PR #13): split each stage's tiles into 8 XCD groups; a hand-off whose
+  producers and consumer share an XCD (e.g. GEMM N-tiles -> the per-column seam of the same columns) uses
+  cached L2 stores + L1-bypass loads; only all-to-all hand-offs (full-row RMS / score partials, K-split
+  reductions, router logits) go through uncached memory, and those carry scalars or small rows.
+- No split-K across CTAs in the dense GEMMs at these widths (row 3: the split-K finish, not the weight
+  stream, bounds the design); pick N-tile counts that fill 256 CUs, and reduce K inside a CTA.
+- Polling CTAs carry no weight loads in flight (a poll retires behind earlier loads; PR #13 role split);
+  weight-streaming CTAs issue the next stage's weights before their first wait.
+- Every wait has a deadline (`common/guard.py`, half the watchdog, <= 60 s); a failed wait stops every rank.
+
+3.2 TP8 comm (peer memory, `common/peer.py`, system-scope stores over xGMI, local polling):
+- AR replaced by two-shot: the GEMM epilogue writes column slice j of its bf16 partial straight into rank j's
+  mailbox (RS); rank j sums the 8 partials in rank order (bit-match the custom AR's order, fp32 accumulate),
+  applies residual / AttnRes / norm on its 896 columns, then pushes the result slice to every rank (AG).
+  Full-row reductions (RMS, AttnRes score dots) exchange per-row partial scalars only.
+  Bytes per rank at 128 rows: RS 1.6 MB out + AG 1.6 MB out vs one-shot 12.6 MB.
+- Width switch: <= 8 rows keep PR #13's one-shot (latency-bound); >= 16 rows use two-shot.
+- MoE tail: AR of the latent (0.9 MB) + RS of the shared partial, latent up on the owner's columns, AG of
+  the next layer's input row (needed in full by in_proj / q_a, K = 7168).
+- DCP8: (1) indexer candidates: each rank writes its local top candidates to every rank's mailbox, then the
+  global-slot merge runs locally; (2) partial attention outputs: W_UV applied locally for all 96 heads
+  (+11 MB weight read ~2-3 us), then [rows, head group, 128] + LSE sent to the head owner, combined there.
+- Precision floor: bf16 payloads, no quantized collectives (policy 2026-10-30); fp8 AG only as #9/#10
+  experiments.
+- xGMI traffic competes with HBM-bound stages at the receiving end; overlap gains must be measured (P0.3),
+  not assumed.
+
+## 4. Integration
+
+- CUDA graphs: launches are captured inside SGLang's decode/verify graphs. Routing is by graph key (width)
+  only, so every rank decides alike and replay repeats the capture decision (sgl-amd-mono "graph-safe
+  routing"). Builds per width bucket (8, 16, 32, 64, 128, 256, 384 rows) with masked rows, not per bs
+  (bs 1..48 x 8 = 48 widths would be 48 compiles x layer kinds). Widths outside the built set fall back.
+- Spec verify (DSPARK): R requests x 8 tokens. KDA: recurrence over the 8 tokens with the fp32 ReplaySSM
+  ring layout of PR #7 (`SGLANG_ROCM_KDA_VERIFY_HIP_FP32_RING`), conv window read as PR #13's K1 does;
+  post-verify fold (replayssm, 0.33 ms) stays on SGLang. DSA: per-token causal top-k over its own position,
+  KV for all 8 tokens written before attention. DSpark draft hidden captures
+  (`dspark_layers_to_capture`) written by the layer launch, as PR #13 does. Draft step (1.45 ms) stays on
+  the standard path (later: DSV4.1 put its draft on mono).
+- DCP8: KV is sequence-sharded across the 8 ranks; the launch reads the same paged fp8_ds_mla cache and
+  DCP slot tables SGLang writes (`dcp_local_candidates`, `_localize_compact` semantics), so prefill and
+  HiCache stay untouched.
+- Plugin / package: new package `sgl_amd_mono/kimi_k31/` (spec `model_type kimi_k31`), importing PR #13's
+  `kimi_k3` stages (seam, KDA, MoE GEMV) once #13 merges; K3.1-only stages (wide-row tiles, two-shot AR,
+  DSA front/back, DCP) live in `kimi_k31/gfx950/`. Coordinate with the #13 owner (billishyahao) before
+  changing shared `kimi_k3` / `common` code. `SGLANG_READS` + `test/unit/test_contract.py` against dev_amd.
+- Flags: `--enable-amd-monokernel` (server), plus the existing K3.1 flags. Interplay with PR #7 (KDA ring
+  layout must match), #8 (row-sharded tail; prefill only, untouched), #9/#10 (prefill sparse MLA; untouched).
+- Check mode: per-layer compare against SGLang ops (`SGLANG_AMD_MONO_CHECK` pattern of glm53/minimax).
+
+## 5. Risks and phased plan
+
+Risks:
+1. Wide-row stages are new work: PR #13's stages are GEMVs for <= 8 rows; 32-384 rows need MFMA tiles.
+2. Dense GEMM tiles inside a multi-role launch may stream slower than FlyDSL tgemm (row 3: our kernels
+   tied at best). Occupancy: HBM floor needs ~8 waves/CU; roles share one VGPR/LDS budget.
+3. Comm overlap may not show: AR and DCP a2a are already link-bound (~185-190 GB/s); xGMI vs HBM contention.
+4. Numerics: reduction order, bf16 rounding points, fp32 ReplaySSM ring; gate = gsm8k200 + KL vs mono off.
+5. Hangs: every wait guarded; fault-injection test on 8 ranks per phase.
+6. Compile time / number of builds (width buckets x 3 layer kinds); PR #13 compiles by running on real weights.
+7. Upstream churn: PR #13 still open; sgl-amd-mono main moves; our SGLang is a fork (dev_amd).
+8. c16 is MoE-bound (19.3 ms of 47.9 untouchable here); the endpoint gain shrinks with concurrency.
+
+Plan (each phase: own branch in sgl-amd-mono off main + PR #13, own A/B tag under
+`/shared_nfs/kimi-k31/results/`, default off):
+
+- P0 measure (no mono code; no K3 reproduction, user 2026-10-31): (1) K3.1 c1 and c4 traces (only c16
+  exists); (2) P2P microbench in the sgl-amd-mono runtime: mailbox hand-off latency same-XCD vs
+  cross-XCD, two-shot AR at 0.9 / 1.8 / 2.75 MB, a2a at 2.75 / 11 MB; (3) PR #8 tail threshold lowered to
+  decode widths (bounds mechanism B on the standard path). Output: updated section 2 numbers.
+- P1 = S1: `kimi_k31` package on the section 2b architecture (planner, cut at the expert inputs), <= 8-row
+  bucket with GEMV stages and experts inside, TP8 + DCP8, triton attention backend, fp32 ring; DSA attention
+  still SGLang. Gate: c1 TPOT >= -15%, gsm8k, fault test.
+- P2a: KDA layer + MoE front/tail at 16-384 rows (MFMA tiles, two-shot AR, de-replication), DSA layers
+  still use SGLang attention up to `forward_pre_o_proj` and the layer launch from o_proj on.
+  Expected ~5-6 ms/step at c16 (A for KDA + B + AR part of C).
+- P2b: DSA front (norms, indexer, KV write, q path, candidate AG + global slots) in the launch.
+- P2c: DSA back (W_UV before a2a, in-kernel a2a + LSE combine, gate). P2b + P2c expected ~3-4 ms/step.
+- P3 (optional, re-decide with data): experts inside (S2+), draft on mono, per-step persistent (S3).

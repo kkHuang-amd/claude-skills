@@ -4,9 +4,10 @@ Owner node: mi355-4. Created 2026-10-31. DESIGN ONLY: no kernel code until the u
 
 ## CONTINUE HERE
 
-**Status:** design v1 + user decisions (2026-10-31 17:21, below). P0 measurements in progress on K3.1.
-**Next:** P0 (section 5): K3.1 c1 / c4 traces, P2P microbench, PR #8 tail threshold at decode widths.
-No kernel code yet; S1 starts after P0 updates the section 2 numbers.
+**Status:** P0 done (mi355-4, 2026-10-31 18:3x; results in section 6, section 2 estimates revised).
+No server running, GPUs free. No mono kernel code written.
+**Next:** user go / no-go for P1 (= S1, section 5) on the revised numbers; first P1 step is the planner +
+`kimi_k31` spec skeleton in sgl-amd-mono, then the <= 8-row launches.
 
 **Decisions (user, 2026-10-31):**
 1. S1 then S2, but S1 must not lock in PR #13's structure: reuse what is good, redesign what limits S2
@@ -131,11 +132,11 @@ Common savings mechanisms (per layer, c16):
   while a stage waits (PR #13's "issue weights before the first wait").
 - E. Experts: 0 at c16.
 
-| option | launches/step | covers | c1 | c16 est. | effort / risk |
+| option | launches/step | covers | c1 est. (VERIFY) | c16 est. | effort / risk |
 |---|---:|---|---|---|---|
-| S0 = today | 2581 | - | - | 47.9 | - |
-| S1 port PR #13 to K3.1, <= 8 rows | ~2581 - 161 x ~20 at c1 | K1 (69 KDA) + K2 (92 MoE layers); DSA attention + DCP on SGLang | ~-5 ms/step (K3 measured -5.9) | 0 (falls back) | low: gate, DCP8, triton backend, fp32 ring |
-| **S2 per-layer, wide rows, experts kept as aiter launches** | ~69 x 3 + 24 x 5 = ~330 | everything except experts stage1/2, sparse MLA, (KDA recurrence may stay a call) | covered via S1 | **-9 to -12 ms (~36-39 ms, -19..-25%)** = A + B + C + D | high: new MFMA-tile stages, two-shot AR, DCP in kernel |
+| S0 = today | 2581 | - | VERIFY 18.9 | 47.9 (c4: 26.1) | - |
+| S1 <= 8 rows on the 2b architecture | c1: ~2150 -> ~900 | KDA layers whole + o_proj .. MoE of the DSA layers; DSA attention + DCP on SGLang | **~-5 ms of 18.9 (-27%)** | 0 (falls back) | medium: planner, gate, DCP8, triton backend, fp32 ring |
+| **S2 per-layer, wide rows, experts kept as aiter launches** | ~69 x 3 + 24 x 5 = ~330 | everything except experts stage1/2, sparse MLA | ~-7 ms (-37%) | **-8 to -9 ms (-17..-19%)**; c4 -5 to -8.6 ms (-20..-33%) | high: MFMA-tile stages, waitcnt-flag comm, DCP in kernel |
 | S2+ experts inside the layer launch | ~69 + 24 x 3 | S2 + stage1/2 as stages | - | S2 + 0.5-0.9 ms (overlap expert weight issue with prologue, -2 boundaries) | very high: grouped MXFP4 GEMM at roofline inside a multi-role kernel |
 | S3 one persistent kernel per step | 1-3 | all 93 layers + tail | - | S2+ + ~0.7-1.0 ms (remaining boundaries x 2-3 us) | highest: one register/LDS budget for every stage, compile time, debuggability |
 
@@ -217,7 +218,9 @@ not help; owner stores must be sc0|sc1 (write-through) or another XCD's L2 write
   applies residual / AttnRes / norm on its 896 columns, then pushes the result slice to every rank (AG).
   Full-row reductions (RMS, AttnRes score dots) exchange per-row partial scalars only.
   Bytes per rank at 128 rows: RS 1.6 MB out + AG 1.6 MB out vs one-shot 12.6 MB.
-- Width switch: <= 8 rows keep PR #13's one-shot (latency-bound); >= 16 rows use two-shot.
+- Payload format by size (P0.2, section 6): tagged 64-bit words (bf16 pair + tag) up to ~0.9 MB (<= 32 rows
+  x 7168), raw 128-bit stores + `s_waitcnt vmcnt(0)` + one flag per (block, source) above; never
+  `__threadfence_system` (~50 us floor). One-shot vs two-shot by width as before.
 - MoE tail: AR of the latent (0.9 MB) + RS of the shared partial, latent up on the owner's columns, AG of
   the next layer's input row (needed in full by in_proj / q_a, K = 7168).
 - DCP8: (1) indexer candidates: each rank writes its local top candidates to every rank's mailbox, then the
@@ -280,3 +283,64 @@ Plan (each phase: own branch in sgl-amd-mono off main + PR #13, own A/B tag unde
 - P2b: DSA front (norms, indexer, KV write, q path, candidate AG + global slots) in the launch.
 - P2c: DSA back (W_UV before a2a, in-kernel a2a + LSE combine, gate). P2b + P2c expected ~3-4 ms/step.
 - P3 (optional, re-decide with data): experts inside (S2+), draft on mono, per-step persistent (S3).
+
+## 6. P0 results (mi355-4, 2026-10-31)
+
+6.1 Traces (current tree: sglang-k31-amd k31/sparse-mla-prefill-hip 91ca03666b, flags off;
+`traces/p0_c{1,4}_isl8k_20261031/{breakdown,layer_kinds}.txt`). VERIFY span = kernel busy (no idle):
+
+```text
+       VERIFY  DRAFT  KDA seg (kernels, us)  DSA seg (kernels, us)  experts/KDA seg  AR/KDA seg  small/KDA seg
+c1      18.9   0.99   17.2, 161              40.5, 328              41               20         ~47
+c4      26.1   1.06   19.0, 230              41.4, 414              91               22         ~59
+c16     47.9   1.45   22.2, 446              43.5, 712              210              40         ~68   (10-30 trace)
+```
+At c1 / c4 the current tree already runs the HIP KDA verify (7.5 / 8.4 us), `k3_ag_attn_res_kernel` and
+`_latent_tail_partial_kernel` (small-width paths), so the per-layer op list differs from the c16 table in
+section 1. Small ops + AR are ~42% of a KDA layer at c1 and ~35% at c4: the mono kernel's main target.
+
+6.2 P2P microbench (`scripts/p2p_microbench.py`, torchrun 8 ranks, no server; log /tmp/p2p_mb2.log):
+
+```text
+hand-off one-way (1 thread, ping-pong): same XCD 0.39 us, cross XCD 0.42-0.55 us (uncached + system atomics;
+                                        hipMalloc + agent atomics 0.47-0.63 us); GPU <-> GPU 0.65-0.69 us
+collectives, us per launch incl. back-to-back launch gap, bf16, 256 CTAs x 256 threads, all validated with
+per-launch-varying inputs:
+                        tagged64   flag+threadfence_system   flag+waitcnt   RCCL
+AR    8 x 7168  0.11 MB     8.3          52.1                    14.6        15.8
+AR   32 x 7168  0.44 MB    10.4          53.8                    16.0        28.5
+AR  128 x 3584  0.88 MB    19.0          54.2                    17.4        30.3
+AR  128 x 7168  1.75 MB    35.3          55.5                    23.1        40.9   (custom AR in trace ~15-22)
+AR  128 x 10752 2.62 MB    60.1          61.4                    31.5        42.9
+AR  384 x 7168  5.25 MB   133.1          90.4                    65.3        59.0
+A2A 128 x 12288 3.00 MB    56.6          40.8                    26.4        34.7
+A2A 128 x 49152 12.0 MB   227.0         115.8                    98.5        54.0
+```
+Findings: (1) a hand-off is < 1 us, so a fused stage boundary costs ~1-2 us with skew, cheaper than the
+2-4 us section 2 assumed. (2) Tagged words win to ~0.9 MB, then lose half the link to tags. (3) The
+system fence is a ~50 us floor; the `s_waitcnt vmcnt(0)` publish (stores to uncached peer memory acked
+before the flag) reaches custom-AR speed at 1.75 MB. It passed the varying-data validation, but its
+ordering is not a documented guarantee: stress-test (random delays, 10^5 launches) before P2 relies on it.
+(4) In-kernel collectives are not faster than custom AR / RCCL at >= 1.75 MB: wide-row comm gains come
+from overlap and fewer bytes, not from the transport. (5) The 11 MB DCP a2a must shrink first
+(W_UV before the a2a -> 2.75 MB, 26 us in kernel vs NCCL 57.8 today).
+
+6.3 PR #8 row-sharded tail at decode widths (ab_bench, same tree, `results/ab/p0_{control,rowshard8}_20261031`):
+
+```text
+                 control   MIN_TOKENS=8
+decode c4 TPOT    7.71      8.26  (+7.1%)
+decode c16 TPOT  15.80     15.68  (-0.8%, noise)
+decode c48 TPOT  31.34     30.35  (-3.2%)
+prefill 8k TTFT  528.4     503.5  (-4.7%; prefill takes the same path)
+```
+Row-sharding the tail with extra standard-path launches loses at 32 rows and pays only at 384: mechanism B
+is worth doing only inside the launch (no extra launches), width-switched. Side item for OPT_TRACKER: a
+decode threshold of 256-384 rows on the standard path (c48 -3%) is independent of the mono work.
+
+6.4 Revised estimates (section 2 table updated):
+- c1, S1: KDA layer small ops ~47 -> ~8 us, AR 20 -> ~8, de-replication ~8 -> ~58 us x 69 = 4.0 ms; DSA layers'
+  o_proj .. MoE part ~50 us x 24 = 1.2 ms -> ~-5 ms of 18.9 (-27%); DRAFT unchanged.
+- c4, S2: ~72 us per KDA layer (5.0 ms) + DSA ~3.6 ms -> -5 to -8.6 ms of 26.1.
+- c16, S2: A ~5.0-5.5 (cheaper hand-offs), B ~1.8, C revised to ~1.5-2.0 (AR 0.5-1.0 + DCP ~1.0), D 0
+  -> -8 to -9 ms of 47.9.

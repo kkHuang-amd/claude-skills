@@ -27,8 +27,9 @@ check_moe pass, 50 replays bit for bit; K2 103.5 -> 100.6 us a launch; **c1 TPOT
 4.96)**, gsm8k THREADS=1 0.98 (accept len 4.585: lower than 4.73 / 4.79, one 3749-token answer; check per-item).
 Step 2 (shared down into the route wait) REJECTED: all 448 tasks there 109.5 us, the 56 up-stage ones 103.2.
 No server running (mi355-4).
-**Next:** check the gsm8k accept-len drop per item (mono step 1 vs off); then P2a (section 7): the wide-row
-layer launch, starting with the MFMA tile GEMM stage + slice collectives on the planner.
+**Next:** (1) accuracy gate with more power: full gsm8k1319 THREADS=1 mono on vs off (or KL on fixed
+prompts); (2) P2a (section 7): the wide-row layer launch, starting with the MFMA tile GEMM stage + slice
+collectives on the planner. sgl-amd-mono branch k31/mono-s1 is local only (push needs the user's OK).
 
 **Decisions (user, 2026-10-31):**
 1. S1 then S2, but S1 must not lock in PR #13's structure: reuse what is good, redesign what limits S2
@@ -487,4 +488,11 @@ gsm8k per-item (THREADS=1, greedy, real draft; ids matched): mono off vs P1a-rin
 generations (correct 196 / 197); off vs step-1 mono 62/200 (196 / 196); P1a-ring mono vs step-1 mono 62/200.
 Step 1 is designed to be bit-identical (same picks, order, renorm and quant), so mono-vs-mono 62/200 points
 to run-to-run nondeterminism on the mono path (the standard path's greedy band is 188-190/200).
-Determinism run: one server, two gsm8k passes (`/tmp/det_chain.sh`, results/acc/det_mono_on_20261031_{a,b}).
+Determinism (mi355-4, 2026-10-31; one server, two greedy THREADS=1 passes each; results/acc/det_mono_{on,off}_20261031_{a,b}):
+mono on 66/200 identical (0.97 / 0.98, accept len 4.48 / 4.81); mono off 108/200 identical (0.985 / 0.99,
+4.69 / 4.92), and 99-100/200 across two off servers. The standard path is itself nondeterministic at bs 1
+(the 188-190/200 band is a 64-thread number; suspect split-K atomics in small-M GEMMs, row 3), so the
+mono-vs-mono 62/200 is not evidence that step 1 changed numerics; the K2 kernel replays bit for bit on fixed
+inputs. Mono runs a little less reproducible (66 vs 108) and scores 0.97-0.985 over 4 runs vs 0.98-0.99 over 3:
+within 200-question noise; a 1319-question gsm8k (or KL vs mono off on fixed prompts) is the next gate
+before calling the c1 accuracy equal.

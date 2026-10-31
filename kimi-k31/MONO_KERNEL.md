@@ -20,10 +20,15 @@ ab_bench AB_CONC="1 4" on/off (`results/ab/p1a_mono_{on,off}_rs0_20261031`), c1 
 **Done since:** P1a A/B (section 8); K1 ring kernel test passes first try (core bit-equal to the snapshot
 build, committed state untouched, ring k / v exact, g / beta <= 5e-7) and the snapshot test still passes (12/12);
 K2 stage timeline (section 8, `test/kernels/kimi_k3/time_k2.py`, commit on k31/mono-s1).
-**Running (mi355-4):** `/tmp/p1r_chain.sh` pid 783787, log `/tmp/p1r_chain.log`, ends `P1R-CHAIN-DONE`: ring config
-(REPLAYSSM=1) mono on/off ab_bench c1/c4 (`results/ab/p1r_mono_{on,off}_20261031`) + greedy gsm8k at THREADS=1
-(`results/acc/p1r_gsm1_{on,off}_20261031`).
-**Next:** P1b on K2 at c1 (route phase, tail; section 8), then P2a (section 7).
+**P1a-ring (real config, REPLAYSSM=1; section 9):** K1 engages on the ring; c1 TPOT 4.96 -> 4.60 (-7.3%),
+greedy gsm8k at THREADS=1 (every step on mono) 0.985 on / 0.98 off, accept len 4.73 / 4.79.
+**P1b step 1 (section 9):** K2 route by wave-max rounds + latent quantized once (commit 6e50a20); check_k2 /
+check_moe pass, 50 replays bit for bit; K2 103.5 -> 100.6 us a launch; **c1 TPOT 4.49 ms (-9.5% vs mono off
+4.96)**, gsm8k THREADS=1 0.98 (accept len 4.585: lower than 4.73 / 4.79, one 3749-token answer; check per-item).
+Step 2 (shared down into the route wait) REJECTED: all 448 tasks there 109.5 us, the 56 up-stage ones 103.2.
+No server running (mi355-4).
+**Next:** check the gsm8k accept-len drop per item (mono step 1 vs off); then P2a (section 7): the wide-row
+layer launch, starting with the MFMA tile GEMM stage + slice collectives on the planner.
 
 **Decisions (user, 2026-10-31):**
 1. S1 then S2, but S1 must not lock in PR #13's structure: reuse what is good, redesign what limits S2
@@ -442,3 +447,44 @@ gsm8k caveat: the P1a gate (`results/acc/p1a_gsm_{on,off}_rs0_20261031`, 0.99 on
 so most verify steps were wider than 8 rows and took the standard path. It does not gate the mono path.
 `gsm8k_gate.sh` now takes THREADS; mono gates run THREADS=1 (every step bs 1, as PR #13's
 --max-running-requests 1).
+
+## 9. P1a on the ring, P1b step 1 (mi355-4, 2026-10-31)
+
+```text
+ring config (REPLAYSSM=1), SIM acc 3.84      mono off   mono on (K3 launches + K1 ring)
+decode c1 TPOT                                 4.96       4.60  (-7.3%)
+decode c1 P90 ITL                              6.24       5.81
+decode c4 TPOT (not routed)                    7.80       7.79
+greedy gsm8k200, THREADS=1, real draft         0.98       0.985   accept len 4.79 / 4.73
+(results/ab/p1r_mono_{on,off}_20261031, results/acc/p1r_gsm1_{on,off}_20261031)
+```
+
+K2 route chain per rank (8 rows, `time_k2.py`, us after the launch start on that GPU; GPU clocks are not
+aligned across ranks, so only per-rank deltas are read): x published +0 | router part pushed +5.1 |
+logits in +8.2 | top-16 +16.0 (radix select, one wave: 7.8 us) | route +16.8 | latent part pushed +6.4 |
+latent quantized +15.7 (every CTA read ~115 KB of tagged bf16 pairs and quantized all 8 x 3584) | table +18.8.
+Step 1 (commit 6e50a20, `stages/moe.py`): top-16 by 16 rounds of a wave max over each lane's 14 sorted
+candidates (GLM-5.3-Flash's router form; 53-comparator network) -> 3.9 us, same picks and order; the latent
+quantized once by CTAs 160..255 (free first) into a LATQP mailbox that every CTA polls (36 KB each).
+Table at +13.3 (was +18.8); K2 103.5 -> 100.6 us a launch.
+
+Tail (step 2 target): experts down done ~81.6 us, but the shared down (448 tasks) mostly runs after it on
+every CTA (mark 4 median 89.6), then lnorm / latent up / reduce to ~98. The shared path (SGU -> SiTU ->
+shared down) does not depend on the route; it fits the ~13 us where CTAs 56..255 wait for the route table.
+Move stage_h (SiTU) to the SGU CTAs and run the shared down there before the experts.
+
+Step 2 measured and rejected (mi355-4, 2026-10-31; not committed): (a) all 448 shared-down tasks on CTAs
+56..159 right after their SGU task: 109.5 us a launch (route table last 52.8, those CTAs' experts start
+late: each task polls H, pushes FINAL to 8 ranks and publishes, ~4-5 us); (b) only the 56 up-stage tasks
+there, the other 392 left after the down: 103.2 us (route table median 39.0 vs 35.4; suspect the early
+FINAL pushes competing with the router logits all-gather on xGMI). The tail stays as PR #13 has it.
+
+E2E after step 1 (ring config, SIM acc 3.84; `results/ab/p1b1_mono_on_20261031`): c1 TPOT 4.49 ms,
+P90 ITL 5.67 (mono off 4.96 / 6.24, step-0 mono 4.60 / 5.81). gsm8k200 greedy THREADS=1 0.98
+(`results/acc/p1b1_gsm1_on_20261031`).
+
+gsm8k per-item (THREADS=1, greedy, real draft; ids matched): mono off vs P1a-ring mono 78/200 identical
+generations (correct 196 / 197); off vs step-1 mono 62/200 (196 / 196); P1a-ring mono vs step-1 mono 62/200.
+Step 1 is designed to be bit-identical (same picks, order, renorm and quant), so mono-vs-mono 62/200 points
+to run-to-run nondeterminism on the mono path (the standard path's greedy band is 188-190/200).
+Determinism run: one server, two gsm8k passes (`/tmp/det_chain.sh`, results/acc/det_mono_on_20261031_{a,b}).

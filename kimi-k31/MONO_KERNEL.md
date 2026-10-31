@@ -6,7 +6,7 @@ Owner node: mi355-4. Created 2026-10-31. DESIGN ONLY: no kernel code until the u
 
 **Status:** P1 started (user go, 2026-10-31 18:21). P1a = K3's launches served on K3.1 (spec `kimi_k31`)
 in the snapshot config (REPLAYSSM=0), A/B running; K1 ReplaySSM-ring build written, kernel test pending a free GPU.
-**Code:** sgl-amd-mono branch `k31/mono-s1` (local, not pushed), on PR #13 head 88aee67:
+**Code:** sgl-amd-mono branch `k31/mono-s1` (fork kkHuang-amd/sgl-amd-mono), on PR #13 head 88aee67:
 d7fb03e kimi_k31 spec (model_type kimi_k31, DCP8 = Feature.CONTEXT_PARALLEL, dsa decode backend, drift
 digests on dev_amd), 5fb46b4 dsa backend fix, baa73de K1 ring build (`KdaPreBuild.ring`, chosen from
 `get_exec().mamba.enable_linear_replayssm_spec`; reads the committed state, writes rawk/rawv/g/beta rows,
@@ -29,7 +29,8 @@ Step 2 (shared down into the route wait) REJECTED: all 448 tasks there 109.5 us,
 No server running (mi355-4).
 **Next:** (1) accuracy gate with more power: full gsm8k1319 THREADS=1 mono on vs off (or KL on fixed
 prompts); (2) P2a (section 7): the wide-row layer launch, starting with the MFMA tile GEMM stage + slice
-collectives on the planner. sgl-amd-mono branch k31/mono-s1 is local only (push needs the user's OK).
+collectives on the planner. sgl-amd-mono branch k31/mono-s1 pushed to the fork kkHuang-amd/sgl-amd-mono (remote `fork`, 6e50a20,
+2026-11-01); no PR opened. Base = PR #13 head 88aee67, so a PR to the fork's main would carry #13's commits.
 
 **Decisions (user, 2026-10-31):**
 1. S1 then S2, but S1 must not lock in PR #13's structure: reuse what is good, redesign what limits S2

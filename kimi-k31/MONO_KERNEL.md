@@ -1,36 +1,46 @@
 # Kimi-K3.1 decode / verify mono kernel — design (OPT_TRACKER row 13)
 
-Owner node: mi355-4. Created 2026-10-31. DESIGN ONLY: no kernel code until the user approves.
+Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE
+## CONTINUE HERE (handoff 2026-11-01)
 
-**Status:** P1 started (user go, 2026-10-31 18:21). P1a = K3's launches served on K3.1 (spec `kimi_k31`)
-in the snapshot config (REPLAYSSM=0), A/B running; K1 ReplaySSM-ring build written, kernel test pending a free GPU.
-**Code:** sgl-amd-mono branch `k31/mono-s1` (fork kkHuang-amd/sgl-amd-mono), on PR #13 head 88aee67:
-d7fb03e kimi_k31 spec (model_type kimi_k31, DCP8 = Feature.CONTEXT_PARALLEL, dsa decode backend, drift
-digests on dev_amd), 5fb46b4 dsa backend fix, baa73de K1 ring build (`KdaPreBuild.ring`, chosen from
-`get_exec().mamba.enable_linear_replayssm_spec`; reads the committed state, writes rawk/rawv/g/beta rows,
-no per-token state) + `test/kernels/test_kimi_k31_k1_ring.py`.
-**P1a facts:** spec accepted after one fix (decode attention backend is `dsa`); builds width 8 in 106 s,
-7.4 MiB; routes target_verify bs 1 x 8 tokens (1 of 23 decode graphs); K1 declines only the first covered
-layer ("residual stream owes a contribution", by design); the DSpark draft runs the normal forward.
-**P1a runtime (mi355-4):** `/tmp/p1a_chain.sh` pid 752543, log `/tmp/p1a_chain.log`, ends `P1A-CHAIN-DONE`:
-ab_bench AB_CONC="1 4" on/off (`results/ab/p1a_mono_{on,off}_rs0_20261031`), c1 trace
-`traces/p1a_c1_mono_on_20261031`, greedy gsm8k SIM=0 on/off (`results/acc/p1a_gsm_{on,off}_rs0_20261031`).
-**Done since:** P1a A/B (section 8); K1 ring kernel test passes first try (core bit-equal to the snapshot
-build, committed state untouched, ring k / v exact, g / beta <= 5e-7) and the snapshot test still passes (12/12);
-K2 stage timeline (section 8, `test/kernels/kimi_k3/time_k2.py`, commit on k31/mono-s1).
-**P1a-ring (real config, REPLAYSSM=1; section 9):** K1 engages on the ring; c1 TPOT 4.96 -> 4.60 (-7.3%),
-greedy gsm8k at THREADS=1 (every step on mono) 0.985 on / 0.98 off, accept len 4.73 / 4.79.
-**P1b step 1 (section 9):** K2 route by wave-max rounds + latent quantized once (commit 6e50a20); check_k2 /
-check_moe pass, 50 replays bit for bit; K2 103.5 -> 100.6 us a launch; **c1 TPOT 4.49 ms (-9.5% vs mono off
-4.96)**, gsm8k THREADS=1 0.98 (accept len 4.585: lower than 4.73 / 4.79, one 3749-token answer; check per-item).
-Step 2 (shared down into the route wait) REJECTED: all 448 tasks there 109.5 us, the 56 up-stage ones 103.2.
-No server running (mi355-4).
-**Next:** (1) accuracy gate with more power: full gsm8k1319 THREADS=1 mono on vs off (or KL on fixed
-prompts); (2) P2a (section 7): the wide-row layer launch, starting with the MFMA tile GEMM stage + slice
-collectives on the planner. sgl-amd-mono branch k31/mono-s1 pushed to the fork kkHuang-amd/sgl-amd-mono (remote `fork`, 6e50a20,
-2026-11-01); no PR opened. Base = PR #13 head 88aee67, so a PR to the fork's main would carry #13's commits.
+**Status:** S1 (c1, <= 8 rows) runs on K3.1 in the real A/B config (DCP8 + DSPARK, ReplaySSM ring):
+c1 TPOT 4.96 -> 4.49 ms (-9.5%), P90 ITL 6.24 -> 5.67. No server running on mi355-4; GPUs free
+(2 external ~1.2 GB processes on one GPU are not ours).
+**Code:** `/sgl-workspace/sgl-amd-mono` branch `k31/mono-s1` @ 6e50a20, pushed to the fork
+kkHuang-amd/sgl-amd-mono (remote `fork`; `origin` = sgl-project). Base = PR #13 head 88aee67 (open,
+billishyahao). Commits: d7fb03e `kimi_k31` spec (DCP8, dsa backend, drift digests on dev_amd) | 5fb46b4 |
+baa73de K1 on the ReplaySSM ring (`KdaPreBuild.ring`) + `test/kernels/test_kimi_k31_k1_ring.py` | 8888d88
+`test/kernels/kimi_k3/time_k2.py` (K2 time + stage timeline at TP8) | 6e50a20 K2 route by wave-max rounds +
+latent quantized once. The ring and route commits change `kimi_k3` code: coordinate with #13 before upstream.
+SGLang: `/sgl-workspace/sglang-k31-amd` (editable install), dev_amd-based.
+
+**Next, in order:**
+1. Accuracy gate with power: full gsm8k1319, THREADS=1, greedy, real draft (SIM=0), mono on vs off
+   (`gsm8k_gate.sh` takes THREADS; num_examples is 200 in the script -> add a knob), or KL vs mono off on
+   fixed prompts. 200-question runs: mono 0.97-0.985 (4 runs) vs off 0.98-0.99 (3 runs).
+2. P2a (section 7): the wide-row layer launch (16..384 rows) for KDA layers + MoE tail/front, experts on aiter
+   stage 1/2. Build order: MFMA tile GEMM stage from aiter FlyDSL a16w16 pieces (x does not fit LDS) ->
+   column-slice collectives (tagged <= 0.9 MB, waitcnt-flag above, section 6.2) -> the planner (stage graph
+   -> tasks -> CTAs by XCD) -> the launch. Then P2b/P2c (DSA front / back with DCP in kernel).
+3. c1 leftovers (section 8/9): K1 in_proj ~2.4 TB/s vs hgemm 5.1 (~1-1.4 ms a step); router replicated per
+   rank (drop the logits all-gather, ~5 us a layer); top-16 still 3.9 us.
+4. Side: the standard path is nondeterministic at bs 1 (108/200 identical greedy generations between two
+   passes on one server; mono 66/200); find the source (suspect small-M split-K atomics) before trusting
+   per-item comparisons.
+
+**Repro:**
+```bash
+source /workspace/claude-skills/kimi-k31/env.sh
+S=/workspace/claude-skills/kimi-k31/scripts
+bash $S/launch_server.sh <tag> --enable-amd-monokernel          # mono on; omit the flag for off
+AB_CONC="1" bash $S/ab_bench.sh <tag>                            # c1 TPOT -> results/ab/<tag>/summary.txt
+SIM=0 bash $S/launch_server.sh <tag> --enable-amd-monokernel; THREADS=1 TEMP=0 bash $S/gsm8k_gate.sh <tag> <log>
+cd /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k3 && torchrun --nproc-per-node 8 check_k2.py   # + check_moe.py, time_k2.py
+python /sgl-workspace/sgl-amd-mono/test/kernels/test_kimi_k31_k1_ring.py                      # 1 GPU
+```
+**Pass criteria:** endpoint TPOT moves (c1 for S1; c4/c16/c48 for S2), gsm8k on vs off within noise at
+THREADS=1, check_k2 / check_moe within NUMERICS bounds and graph replays bit for bit.
 
 **Decisions (user, 2026-10-31):**
 1. S1 then S2, but S1 must not lock in PR #13's structure: reuse what is good, redesign what limits S2

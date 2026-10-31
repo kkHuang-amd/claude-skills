@@ -18,11 +18,9 @@ Four PRs open on kevin-mii/sglang-k31-amd against `dev_amd` (all behind default-
 #9 and #10 touch the same long-prefill path: with #10 on, #9 only matters where #10 declines.
 Not yet measured: #7 + #8 + #10 on together (different code; expect additive).
 
-**Next: user go / no-go for P1 (S1) of the decode mono kernel (`MONO_KERNEL.md`, row 13).** P0 done
-2026-10-31 (section 6): c1 VERIFY 18.9 / c4 26.1 ms; hand-off < 1 us; in-kernel comm format by size
-(tagged <= 0.9 MB, waitcnt-flag above, never threadfence_system); revised est. S1 c1 -27% VERIFY, S2 c16 -17..-19%.
-Same-tree control (results/ab/p0_control_20261031): TPOT c4 7.71 / c16 15.80 / c48 31.34, prefill 8k 528.4.
-No server running (mi355-4).
+**Next: decode mono kernel, new session (user, 2026-11-01): read `MONO_KERNEL.md` CONTINUE HERE.**
+S1 (c1) done in the real config: TPOT 4.96 -> 4.49 ms; code on fork kkHuang-amd/sgl-amd-mono `k31/mono-s1`.
+Next there: gsm8k1319 accuracy gate, then P2a (wide-row layer launch).
 
 **Previous section (`SPARSE_MLA_PREFILL.md`):** R1 HIP kernel passes E2E behind
 `SGLANG_ROCM_SPARSE_MLA_PREFILL_HIP=1`: kernel 2.5 ms vs Triton 5.0 (seq 16384), prefill TTFT

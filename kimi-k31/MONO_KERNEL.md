@@ -2,7 +2,7 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-02 01:00, for the next session)
+## CONTINUE HERE (handoff 2026-11-02 02:00, for the next session)
 
 **Status:** S1 (c1, <= 8 rows) runs on K3.1 in the real A/B config (DCP8 + DSPARK, ReplaySSM ring):
 c1 TPOT 4.96 -> 4.49 ms (-9.5%), P90 ITL 6.24 -> 5.67. No server running on mi355-4; GPUs free
@@ -95,10 +95,16 @@ m = 16 54.4 (K1 split 53.1). Commit 2785f6c.
 nvb + bank write pass. Estimate vs the c16 trace: the standard KDA layer minus its routed experts ~236 us ->
 ~-100 us a layer, ~-6.9 ms of the 47.9 ms VERIFY step (to be confirmed at the endpoint). Commit 4ca4b77.
 
+**P2a step 12 done (2026-11-02 02:00):** T6 tail in the layer launch (`stages/moe_front.py`, section 10.18):
+f32 front merge -> router logits + latent to every rank, shared gate / up local -> route (latent into the
+experts' input, top-16 noaux_tc) + SiTU + shared down. Layer 105 / 114 / 167 / 335 us at m = 16 / 32 / 128 /
+384. The launch now ends at exactly what `self.experts(expert_input, topk_output)` takes. Commit 5a221cc.
+Spec: everything here is the DSPARK verify step (R requests x 8 tokens, ReplaySSM ring, per-request num_acc);
+the draft step and the post-verify fold stay on SGLang; DSpark hidden captures are NOT yet written by the wide
+layer launch (PR #13's launches do it) -- needed before integration.
+
 **Next, in order:**
-1. T6 tail inside the launch: router logits -> top-16 (+ AG of the 0.06 MB logits), latent AG + mxfp8 quant into
-   aiter's stage-1 layout, shared SiTU + shared down -> the shared partial the next layer's T1 reads; then the
-   aiter expert launches sit between layer launches.
+1. DSpark hidden captures (`dspark_layers_to_capture`) from the wide layer launch, as PR #13 does.
 2. SGLang integration for c4..c48: the residual stream and bank stay column-sharded across KDA layers (convert at
    the DSA layers until P2b/c), weights folded at load (W_up x w_n, cw = score_norm x score_proj); endpoint A/B.
 3. KDA stage timeline (21 us at m = 128).
@@ -1002,3 +1008,24 @@ The launch costs the sum of its halves (pre + KDA 54 / 86, chain 28 / 49 at m = 
 which ~210 experts -> ~236 us vs 136 here, ~-100 us a layer x 69 = ~-6.9 ms a step, before the T6 tail (router
 top-16, latent quant, shared down) is added and before endpoint confirmation.
 Results: `/shared_nfs/kimi-k31/results/kda_layer_20261102/`.
+
+### 10.18 MoE front tail in the layer launch (`stages/moe_front.py`, mi355-4, 2026-11-02)
+
+SGLang's boundary kept: the routed experts take (latent bf16 [m, 3584], topk ids / weights [m, 16]); sorting,
+mxfp8 quant and the two stages stay aiter's, between layer launches. K3.1 routing (config): sigmoid, `noaux_tc`,
+1 group, top 16, renormalize, scaling 1.0, `e_score_correction_bias`. A rank's front rows: 112 router | 448
+latent down | 768 shared gate | 768 shared up (SGLang replicates latent down; here 1/8 a rank + AG). The front
+merges in f32 (`lin`; router logits are fp32 in SGLang), then per finished (tile, row band): router columns ->
+every rank's [m, 896] f32, latent -> every rank's [m, 3584] bf16 (flag (src, band, tile)), shared -> local scratch
+(mark). Row tasks: route (copy the gathered latent into lat_out; top-16 in one wave: 14 experts a lane, 16
+rounds of a wave argmax, ties to the lower expert; weights renormalized), SiTU (beta 4, linear beta 25, bf16 in /
+out), then shared down tiles (7168 x 768, ks 1) -> the shared partial bf16 [m, 7168].
+
+```text
+layer us (with the tail / without)   m 16 105.3 / 82.4   m 32 114.1 / 89.7   m 128 167.1 / 135.8   m 384 335.2 / 272.1
+rel L2: latent 5.6-6.8e-3, shared partial 8.5-10.2e-3, topk weights 5-7e-4 (rows with the same set)
+top-16 sets differing from the f32 reference: 10-12% of rows; on the launch's OWN gathered logits: 0 rows, w 1e-7
+```
+The end-to-end top-16 flips are the upstream rounding (logits ~N(0, 1), the 16th / 17th keys of 896 ~1e-3 apart,
+logits off by ~7e-3): the routing code is exact; whether the flip rate matters is the endpoint gsm8k gate's call.
+Results: `/shared_nfs/kimi-k31/results/kda_layer_20261102/tail_*.log`.

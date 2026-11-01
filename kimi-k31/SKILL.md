@@ -14,6 +14,7 @@ Entry point: `CONTINUE_HERE.md`. Read it first; open other files only for the ta
 | File | What |
 |------|------|
 | `CONTINUE_HERE.md` | status, next action, repro, owner node |
+| `NUMERICS_RULES.md` | AgentX numerics rules (BF16 linear / shared expert / comm, FP32 KDA state, ...): every optimization must follow them |
 | `PLAN.md` | task items (bring-up -> accuracy -> perf), acceptance gates |
 | `AITER_PRS.md` | aiter open-PR triage for K3.1 (fetched as `pr/<N>` refs in aiter-k31) |
 | `env.sh` | `source` before every run — fixes PYTHONPATH shadowing, sets gfx950 arch |
@@ -25,6 +26,7 @@ Upstream docs inside the sglang repo (read narrowly, they are large):
 
 Related: `../kimi-k3/` (K3 predecessor; DEV_RULES and trace-capture method still apply).
 
+Numerics rules (`NUMERICS_RULES.md`) are hard limits on every optimization.
 Optimization principles (apply to every op; detail in `OPT_TRACKER.md`): per-layer -> per-step,
 no unnecessary host sync, fuse small kernels, overlap/merge independent ops, compare to roofline.
 

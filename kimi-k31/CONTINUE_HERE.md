@@ -2,6 +2,14 @@
 
 Owner node: mi355-4. Last updated 2026-11-02 05:00.
 
+**RULES: every optimization must follow `NUMERICS_RULES.md`** (linear ops / shared expert / MoE combine / AG-RS-AR
+in BF16, KDA state FP32, KV FP8 ok, MoE a4w4 + MX dispatch ok, no static EPLB).
+
+**2026-11-02 (mi355-4):** sglang-k31-amd moved to the rewritten `origin/dev_amd` b588cf7952 (DFlash2 drafts on ROCm
+DCP, A4W4 MoE); new draft `/shared_nfs/RadixArk/K31-DFlash2-MLA5-Preview1027-Step29301-SWA1024` (5 SWA-1024 MLA
+layers, block 8, taps [7, 23, 51, 67, 83, 91], `--speculative-algorithm DFLASH`). Mono: kimi_k31 spec now accepts
+DFLASH (it was refused: `speculative_algorithm` {None, DSPARK}); DFLASH taps reuse the DSpark bank-path captures.
+
 **Status:** T0-T3 done; optimization loop in `OPT_TRACKER.md`. GPUs free, no server running.
 Four PRs open on kevin-mii/sglang-k31-amd against `dev_amd` (all behind default-off flags):
 

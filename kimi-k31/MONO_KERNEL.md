@@ -2,157 +2,37 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-02 04:30, for the next session)
+## CONTINUE HERE (handoff 2026-11-02 05:00 -- NEW SESSION: integration debugging / validation)
 
-**Status:** S1 (c1, <= 8 rows) runs on K3.1 in the real A/B config (DCP8 + DSPARK, ReplaySSM ring):
-c1 TPOT 4.96 -> 4.49 ms (-9.5%), P90 ITL 6.24 -> 5.67. No server running on mi355-4; GPUs free
-(2 external ~1.2 GB processes on one GPU are not ours).
-**Code:** `/sgl-workspace/sgl-amd-mono` branch `k31/mono-s1` @ 7a76c4e, pushed to the fork
-kkHuang-amd/sgl-amd-mono (remote `fork`; `origin` = sgl-project). Base = PR #13 head 88aee67 (open,
-billishyahao). Commits: d7fb03e `kimi_k31` spec (DCP8, dsa backend, drift digests on dev_amd) | 5fb46b4 |
-baa73de K1 on the ReplaySSM ring (`KdaPreBuild.ring`) + `test/kernels/test_kimi_k31_k1_ring.py` | 8888d88
-`test/kernels/kimi_k3/time_k2.py` (K2 time + stage timeline at TP8) | 6e50a20 K2 route by wave-max rounds +
-latent quantized once. The ring and route commits change `kimi_k3` code: coordinate with #13 before upstream.
-9cba298 (2026-11-01, pushed): `sgl_amd_mono/kimi_k31/gfx950/stages/tile.py` (tile GEMM v0) +
-`test/kernels/kimi_k31/tile_bench.py`; 06263ca: `stages/tile_mma.py` (LDS tile GEMM v1) + `mma_bench.py`; 7a76c4e: split-K merge modes (linbf).
-SGLang: `/sgl-workspace/sglang-k31-amd` (editable install), dev_amd-based.
+**Status:** the wide-row KDA layer launch (`sgl_amd_mono/kimi_k31/gfx950/layer.py`, T1 .. T6 + DSpark capture)
+now SERVES verify steps end to end in an eager server: `SGLANG_AMD_MONO_K31_WIDE=1` routes R x 8 steps (R 2 ..
+48) to `kimi_k31/wide.py`; 4 concurrent requests answered correctly (rows 24 / 32). Real-model per-hand-off check
+passed before integration (10.20). Not yet measured: accuracy (gsm8k), speed (A/B), CUDA graphs. No server
+running on mi355-4, GPUs free.
+**Code:** `/sgl-workspace/sgl-amd-mono` `k31/mono-s1` @ 581b173 (fork kkHuang-amd/sgl-amd-mono, pushed).
+Integration pieces: `kimi_k31/spec.py` (`_K31Built`: rows <= 8 -> Kimi-K3's S1 launches, else `wide.Wide`;
+wide widths only with the env), `kimi_k31/wide.py` (step loop, KDA state hand-off, warmup), `wide_check.py`
+(eager real-model check, `SGLANG_AMD_MONO_K31_WIDE_CHECK=<layer>`). Design + numbers: sections 10.11 .. 10.21.
 
-**Done 2026-11-01 (mi355-4):** S1 accuracy gate PASSES -- gsm8k1319 greedy THREADS=1 real draft: mono on
-1287/1319 (0.9757) vs off 1288 (0.9765), discordant 2 / 3 (McNemar p = 1.0), 1246/1319 identical
-generations, accept len 4.71 / 4.70 (section 10.1). P2a step 1 started: register-operand tile GEMM v0 is
-correct but 1.6x (m=16) to 4x (m=128) slower than tgemm; the structure is the cause (section 10.2).
-Section 10.3's "+25% at 8 waves" was a sweep artifact (HTI default); corrected in 10.4.
-
-**P2a step 1 done:** tile GEMM stage for m = 16..384, own FlyDSL (`stages/tile_mma.py`; no aiter gemm), split-K
-merged by lane-contiguous packed-bf16 atomics after an LDS shuffle ("linbf"); ties or beats tgemm on in_proj /
-MoE front / latent up at every bucket, o_proj +20-25% at m=128 / 384 (bucket table: section 10.6).
-
-**P2a step 2 done (2026-11-01 13:00):** column-slice collectives `stages/coll.py` (RS / AG / two-shot AR, tagged
-and waitcnt-flag formats), bit-exact at TP8, 0 mismatches in 8 x 10^5 stress launches; tagged ties or beats flag at
-every size, so tagged is the default (section 10.7). Commit 6162564 on `k31/mono-s1`, pushed.
-
-**Decisions (user, 2026-11-01):** (a) the consumer zeroes the atomic output it reads (one reader an element;
-buffers zeroed once at allocation); (b) linbf by default, an env knob (named when wired) switches the tile GEMMs to
-"part" for debugging / accuracy gates; tile-GEMM stages are exempt from "graph replays bit for bit".
-
-**P2a step 3a done (2026-11-01 14:30):** fused tile GEMM -> RS in one launch (`stages/gemm_coll.py`, o_proj
-7168 x 1536): 13.6 / 16.2 / 23.1 / 43.2 us at m = 16 / 32 / 128 / 384 vs hipBLASLt + RCCL 17.4 / 18.8 / 32.1 /
-46.6 (-7..-28%); "part" deterministic at +0..1 us. Remote stores need many CUs and, from 128 rows, half the
-bytes ("flag" push) -- section 10.8. Commit 5ca0c64, pushed.
-
-**P2a step 3b done (2026-11-01 15:30):** fused AG -> tile GEMM in one launch (`gemm_coll.ag_gemm`, in_proj
-6288 x 7168): 23.8 / 25.8 / 39.6 / 84.7 us at m = 16 / 32 / 128 / 384 vs RCCL all_gather + F.linear 35.1 / 37.2 /
-58.5 / 98.8 (-14..-32%); x read straight from the uncached gather region costs ~+10 us at 384 rows (section
-10.9). Commit 18fcfcc, pushed.
-
-**Layers a launch (answer to the user, 2026-11-01):** S1 = PR #13's per-layer launches (K1 per KDA layer x 69, K2
-per MoE layer x 92 = 161 mono launches a step; DSA attention, layer-1 dense FFN, draft outside). S2 design = one
-launch per layer (MoE tail L-1 + attention L + MoE front L) + aiter's 2 expert launches at wide rows. DSV4.1's
-mono is also per layer (K1 + K2 on every layer, `dsv41/MONO_KERNEL_EVAL.md`), not one kernel for all layers:
-its "30 whole" / "40 whole" count the layers run whole (K1 + K2) vs FFN-only, not layers merged into one launch
-(the 40-whole profile has 88 mono kernels a step, indexer / compressor between them).
-A multi-layer launch on K3.1 is capped by the 3 KDA : 1 DSA pattern (DSA attention outside -> <= 3 layers a
-launch) until P2b/P2c, and at wide rows by the routed experts in aiter.
-
-**P2a step 4 done (2026-11-01 17:30):** buffer parity by launch, not by epoch (section 10.10): the epoch-parity
-hazard reproduced (flag AG: 6265 silent mismatches; tagged: guard stop), launch parity 0 mismatches in 10 x 48k
-stress launches (steps of 4 and 3); the fused GEMM -> RS counter wait and AG -> GEMM flags pass 14 x 48k stress
-launches. Commit 7b852b3, pushed.
-
-**P2a step 5 done (2026-11-01 19:00):** planner v0 (`kimi_k31/plan.py`: regions, stage list, checks) and the first
-multi-stage launch `gfx950/chain.py` = T4 -> T5 -> T6 (o_proj -> RS + residual -> RMSNorm with the sum of squares
-exchanged -> AG -> MoE front 2096 x 7168): 26-28 / 30-31 / 46-48 / 90-92 us at m = 16 / 32 / 128 / 384 vs the
-standard path (F.linear + RCCL AR + add + F.rms_norm + F.linear) 43 / 58 / 76 / 110 (-17..-46%); section 10.11.
-Commit 9b02f20, pushed.
-
-**P2a step 6 done (2026-11-01 20:00):** chain timeline (`chain_bench.py --timeline`, section 10.12): the stages
-run back to back, each near its standalone cost (m = 128: o_proj 9 + push 6 + RS 3 + seam 9 + front 12 us); W
-prefetch and x from cached memory do not shorten the front, so the next wins are tile-GEMM speed and, at
-384 rows, row-block pipelining -- not placement. Front placed on the top CTAs (-1.6 us at 384). Commit f810a90.
-
-**P2a step 7 done (2026-11-01 21:00):** the AttnRes seam on column-sharded state (`stages/attnres.py`, section
-10.13): SGLang's aggregation (scores, softmax, mix, out norm) over nvb bank snapshots + the prefix, one scalar
-round (dots + Gram entries) with every rank; the chain's MLP seam now is it (+ optional bank write). nvb 0 / 1 /
-4w / 8 all pass; the seam costs +0.3 us (nvb 1) to +9 us (nvb 8, m = 128) over nvb 0. Commit ef2f3a4. T2 is the
-same stage with the attention-side weights.
-
-**P2a step 8 done (2026-11-01 22:00):** pre-attention chain `gfx950/pre_attn.py` = T1 -> T2 -> in_proj in one
-launch (section 10.14): 38 / 65 / 135 us at m = 16 / 128 / 384 (nvb 0) vs torch standard 75 / 122 / 192; nvb 4 +
-bank write and "part" pass. Commit b79177b. With `chain.py` (T4 -> T6) both halves of a KDA layer around the
-attention exist as launches.
-
-**P2a step 9 done (2026-11-01 23:00):** KDA in the pre-attention launch (`pre_attn(..., kda=L, ring=True)`,
-section 10.15): in_proj tiles hand their rows to `kimi_k3`'s KDA tasks as tagged f32 pairs; correct (KDA alone
-vs the rows it read 3.9-4.2e-3, end to end 1.0e-2), but slow: +15 us at m = 16, +59 us at m = 128 (standard KDA
-~24 us a layer at c16). Commit 012e257.
-
-**P2a step 10 done (2026-11-02 00:00):** wide KDA task (`stages/kda_wide.py`, one a (request, head), ring only,
-section 10.16): m = 128 pre_attn + KDA 123.5 -> 86.1 us (KDA +21 us over the 64.8 without it, standard KDA ~24);
-m = 16 54.4 (K1 split 53.1). Commit 2785f6c.
-
-**P2a step 11 done (2026-11-02 01:00):** ONE wide-row KDA layer launch T1 .. T6 (`gfx950/layer.py`, section
-10.17): 82 / 90 / 136 / 272 us at m = 16 / 32 / 128 / 384, every hand-off checked (mid, h, core_out, front),
-nvb + bank write pass. Estimate vs the c16 trace: the standard KDA layer minus its routed experts ~236 us ->
-~-100 us a layer, ~-6.9 ms of the 47.9 ms VERIFY step (to be confirmed at the endpoint). Commit 4ca4b77.
-
-**P2a step 12 done (2026-11-02 02:00):** T6 tail in the layer launch (`stages/moe_front.py`, section 10.18):
-f32 front merge -> router logits + latent to every rank, shared gate / up local -> route (latent into the
-experts' input, top-16 noaux_tc) + SiTU + shared down. Layer 105 / 114 / 167 / 335 us at m = 16 / 32 / 128 /
-384. The launch now ends at exactly what `self.experts(expert_input, topk_output)` takes. Commit 5a221cc.
-Spec: everything here is the DSPARK verify step (R requests x 8 tokens, ReplaySSM ring, per-request num_acc);
-the draft step and the post-verify fold stay on SGLang.
-
-**P2a step 13 done (2026-11-02 03:00):** DSpark capture from the wide layer launch (`kda_layer(..., capture=True)`,
-section 10.19): the attention seam's pre-norm mixture of layer i + 1 = SGLang's capture after layer i, gathered and
-copied into a column block of the packed aux buffer; rel L2 3.8-5.3e-3; +0.8 / +5.4 us at m = 16 / 128 on the 5
-capture layers only. Commit f026fc7.
-
-**P2a step 14 done (2026-11-02 04:00): REAL-MODEL check passes** (`kimi_k31/wide_check.py`, section 10.20): with
-`SGLANG_AMD_MONO_K31_WIDE_CHECK=8 launch_server.sh <tag> --enable-amd-monokernel --disable-cuda-graph`, layer 8's
-launch (t1=False) runs next to SGLang on the served weights / activations / KDA ring state at R 4 and R 16 (rows
-32 / 128): x 2.8e-3, core_out 5.8-6.5e-3, x' 3.4-4.1e-3, h 3.0-3.2e-3, latent 4.7-4.8e-3, logits 2.4-2.7e-3;
-routing rule identical to SGLang's on its logits (0%) and ours on our logits (0%), top-16 sets differ in 0-12%
-of rows (logit rounding). Not yet checked on real data: T1 (MoE tail of layer 7) and the shared expert output
-(neither the shared MLP module nor its down_proj runs on the merged-front path). Commit c1daac5.
-
-**P2a step 15 done (2026-11-02 04:30):** the real-model check covers the WHOLE launch: layer 7's fused-front
-`_forward_fused` (prefix_sum), `_forward_routed` (latent partial) and `_forward_shared` (shared partial) feed
-T1 (t1 on, layer 7's up_proj + latent norm); layer 8's `_forward_shared` is the shared reference. Rows 32 / 128:
-mid (T1) 2.3-2.5e-3, shared 5.3-6.0e-3, the rest 3.7-6.6e-3 (from our own mid), routing rule 0% / 0% (10.20).
-Commit c488c55.
-
-**Next, in order:**
-1. SGLang integration for c4..c48: the residual stream and bank stay column-sharded across KDA layers (convert at
-   the DSA layers until P2b/c), weights folded at load (W_up x w_n, cw = score_norm x score_proj); endpoint A/B.
-3. KDA stage timeline (21 us at m = 128).
-2. Tile GEMM speed (all GEMMs run at ~2.6-3 TB/s of the ~5 TB/s an aiter hgemm reaches, section 10.4/10.6) and
-   row-block pipelining of the chain at 256 / 384 rows.
-2. P2a (section 7): the planner (stage graph -> tasks -> CTAs by XCD) -> the launch. Then P2b/P2c (DSA front / back).
-3. c1 leftovers (section 8/9): K1 in_proj ~2.4 TB/s vs hgemm 5.1 (~1-1.4 ms a step); router replicated per
-   rank (drop the logits all-gather, ~5 us a layer); top-16 still 3.9 us.
-4. Side: the standard path is nondeterministic at bs 1 (108/200 identical greedy generations between two
-   passes on one server; mono 66/200); find the source (suspect small-M split-K atomics) before trusting
-   per-item comparisons.
-
-**Repro:**
+**Repro (eager, ~2 min load + warmup):**
 ```bash
-source /workspace/claude-skills/kimi-k31/env.sh
 S=/workspace/claude-skills/kimi-k31/scripts
-bash $S/launch_server.sh <tag> --enable-amd-monokernel          # mono on; omit the flag for off
-AB_CONC="1" bash $S/ab_bench.sh <tag>                            # c1 TPOT -> results/ab/<tag>/summary.txt
-SIM=0 bash $S/launch_server.sh <tag> --enable-amd-monokernel; NUM=1319 THREADS=1 TEMP=0 bash $S/gsm8k_gate.sh <tag> <log>
-cd /tmp && python /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k31/tile_bench.py --time --m 16,128 --nb 1,2 --ks 1,4
-cd /tmp && python /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k31/mma_bench.py --time --m 128 --cfg 128:128:2:4:4:2 --mode part,linbf
-cd /tmp && torchrun --nproc-per-node 8 /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k31/coll_bench.py --time   # collectives
-cd /tmp && torchrun --nproc-per-node 8 /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k31/gemm_coll_bench.py   # GEMM -> RS fused
-cd /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k31 && torchrun --nproc-per-node 8 ag_gemm_bench.py   # AG -> GEMM fused
-python $S/tile_isa.py 128:6288:7168:1 /tmp/tile_isa      # vgpr / scratch / lds + disassembly, no launch
-python $S/hgemm_8wave_sweep.py 128                        # aiter hgemm at 8 waves vs tgemm
-cd /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k3 && torchrun --nproc-per-node 8 check_k2.py   # + check_moe.py, time_k2.py
-python /sgl-workspace/sgl-amd-mono/test/kernels/test_kimi_k31_k1_ring.py                      # 1 GPU
+SGLANG_AMD_MONO_K31_WIDE=1 SGLANG_AMD_MONO_K31_WIDE_BUCKETS=16,32 bash $S/launch_server.sh wideN \
+  --enable-amd-monokernel --disable-cuda-graph
+python3 /tmp/wide_req.py 4      # 4 concurrent greedy requests (script in 10.21); log: rg 'k31 wide\]' <log>
+rm -f /tmp/gpucore*             # AFTER ANY GPU FAULT: each crash leaves ~17 GB a rank in /tmp (filled / once)
 ```
-**Pass criteria:** endpoint TPOT moves (c1 for S1; c4/c16/c48 for S2), gsm8k on vs off within noise at
-THREADS=1, check_k2 / check_moe within NUMERICS bounds and graph replays bit for bit.
+**Next, in order:**
+1. Accuracy, eager: gsm8k (`NUM=200 THREADS=1 TEMP=0 bash $S/gsm8k_gate.sh <tag> <log>` with SIM=0, real draft)
+   with `SGLANG_AMD_MONO_K31_WIDE_BUCKETS=16,32,64,128` and concurrency that keeps R >= 2; compare to the same
+   server without the env. Expect the top-16 flip rate (10.20) to be the main numeric difference.
+2. Remove the temporary debug logs in `spec.py` (`routed:` / `wide backbone ...`) once (1) passes.
+3. CUDA graphs: the step loop has host work per layer (`kda_table` tensors built per step, `.tolist()`-free but
+   `torch.tensor` allocations; `epoch[0] += 1`; bank / prefix gathers) -- make them graph-safe (prebuilt
+   tables per bucket and layer, device-side slot rows), then let the framework capture the wide widths.
+4. Endpoint A/B c4 / c16 / c48 + gsm8k gate (pass criteria below).
+5. Startup cost: warmup compiles 23 variants a bucket (~150 s a bucket cold, ~1 s from the JIT cache); six
+   buckets cold ~15 min. Options: nvb as a runtime value (one variant for nvb 0..7), fewer buckets.
 
 **Decisions (user, 2026-10-31):**
 1. S1 then S2, but S1 must not lock in PR #13's structure: reuse what is good, redesign what limits S2
@@ -1088,3 +968,32 @@ latent partial, `_forward_shared` shared partial; the decode path calls neither 
 `routed_expert_down_proj`): mid (T1) 2.3-2.5e-3, x 3.7e-3, core 6.1-6.6e-3, x' 4.0-4.5e-3, h 3.7-3.8e-3, latent
 5.0-5.2e-3, shared 5.3-6.0e-3, logits 2.5-3.1e-3, top-16 sets differing 6-13%, routing rule 0% / 0%. Logs:
 `/shared_nfs/kimi-k31/results/wide_check_real_20261102/`.
+
+### 10.21 Serving wide verify steps on the layer launch (eager v0, mi355-4, 2026-11-02)
+
+`kimi_k31/wide.py` (`SGLANG_AMD_MONO_K31_WIDE=1`): the spec adds widths 8 R (R 2 .. 48); `_K31Built._backbone`
+sends rows > 8 to `Wide.backbone`. A step: standard layers (layer 0 = dense MLP, the DSA layers) run SGLang's own
+forward; each run of covered layers (KDA + latent MoE: 68 layers, runs of <= 3 between DSA layers) goes:
+`fold()` the stream -> mid / bank column slices; per layer: `kda_layer` (t1 from the 2nd layer of a run,
+`restart` on block-write layers 12, 24, .., 84 = always a run's first layer, capture when i - 1 is a DSpark
+target), KDA state as K1 but per request (conv window staged a pool slot, `st_idx` = slot, padded requests -1,
+ring rows written into SGLang's ring, `intermediate_conv_window` filled after the launch = K1's finish for R
+requests), a written bank row all-gathered into SGLang's bank (`res.write`), SGLang's `_forward_routed` on the
+launch's latent + router logits (`logits_out`); leave: all-gather the prefix slice, SGLang's
+`_column_split_tail`, `set_written`. Rows pad to buckets 16 / 32 / 64 / 128 / 256 / 384; tags: one epoch bump a
+step, slot = the launch's index among the 68, parity = launch index.
+
+Bugs found on the way (all fixed in 581b173): (a) `self.backbone = model.backbone` shadowed `Wide.backbone`, so
+the "wide" path silently ran SGLang's model forward -- outputs looked right while nothing of ours ran; check
+that the first-step log appears. (b) lazy first-use compile skewed the ranks past the 30 s guard deadline ->
+guard stop (fault at 0x0): now every non-capture variant is warmed at build, deadline 900 s
+(`SGLANG_AMD_MONO_K31_WIDE_DEADLINE_S`). (c) variants sharing one peer buffer each placed their halves and the
+guard's flags differently, so one launch's data landed on another variant's flag words -> peers saw a
+"failure" and stopped (fault at 0x0): `kda_layer(..., half_bytes=)` now forces one layout a bucket. (d) GPU
+core dumps (8 x 17 GB a crash) filled the root disk; delete `/tmp/gpucore*` after a fault. (e) FlyDSL: a
+dynamic `if` body cannot create or use a buffer resource (`as_dsl_value ... llvm.ptr<8>`): do such stores
+outside it. Run: warmup 46 launches (buckets 16, 32) 295 s cold; 4 concurrent requests answered 42 / 44 / 46 /
+48 with steps of batch 3 and 4 on the wide path. Request script `/tmp/wide_req.py`: N threads posting
+`/generate` with `{"text": "Q: What is {12+i} + {30+i}? ...\nA:", "sampling_params": {"max_new_tokens": 40,
+"temperature": 0}}`. Logs: `/shared_nfs/kimi-k31/logs/server_wide9.log` (success), `server_wide6/8.log` (bugs
+b / c).

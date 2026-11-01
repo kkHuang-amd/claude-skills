@@ -1,6 +1,6 @@
 # Kimi-K3.1 — CONTINUE HERE
 
-Owner node: mi355-4. Last updated 2026-11-02 04:30.
+Owner node: mi355-4. Last updated 2026-11-02 05:00.
 
 **Status:** T0-T3 done; optimization loop in `OPT_TRACKER.md`. GPUs free, no server running.
 Four PRs open on kevin-mii/sglang-k31-amd against `dev_amd` (all behind default-off flags):
@@ -18,6 +18,9 @@ Four PRs open on kevin-mii/sglang-k31-amd against `dev_amd` (all behind default-
 #9 and #10 touch the same long-prefill path: with #10 on, #9 only matters where #10 declines.
 Not yet measured: #7 + #8 + #10 on together (different code; expect additive).
 
+**Next: decode mono kernel, NEW SESSION (2026-11-02): read `MONO_KERNEL.md` CONTINUE HERE first.** The wide-row
+layer launch serves R x 8 verify steps eagerly (`SGLANG_AMD_MONO_K31_WIDE=1`, commit 581b173); next is the gsm8k
+check, then CUDA graphs, then the A/B. After any GPU fault: `rm -f /tmp/gpucore*` (17 GB a rank).
 **Next: decode mono kernel, new session (user, 2026-11-01): read `MONO_KERNEL.md` CONTINUE HERE.**
 S1 (c1) done in the real config: TPOT 4.96 -> 4.49 ms; code on fork kkHuang-amd/sgl-amd-mono `k31/mono-s1`.
 2026-11-01: gsm8k1319 gate PASSES (mono on 0.9757 vs off 0.9765, discordant 2/3). P2a step 1 (tile GEMM

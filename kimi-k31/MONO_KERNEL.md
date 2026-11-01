@@ -2,7 +2,7 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-01 20:00, for the next session)
+## CONTINUE HERE (handoff 2026-11-01 21:00, for the next session)
 
 **Status:** S1 (c1, <= 8 rows) runs on K3.1 in the real A/B config (DCP8 + DSPARK, ReplaySSM ring):
 c1 TPOT 4.96 -> 4.49 ms (-9.5%), P90 ITL 6.24 -> 5.67. No server running on mi355-4; GPUs free
@@ -70,9 +70,16 @@ run back to back, each near its standalone cost (m = 128: o_proj 9 + push 6 + RS
 prefetch and x from cached memory do not shorten the front, so the next wins are tile-GEMM speed and, at
 384 rows, row-block pipelining -- not placement. Front placed on the top CTAs (-1.6 us at 384). Commit f810a90.
 
+**P2a step 7 done (2026-11-01 21:00):** the AttnRes seam on column-sharded state (`stages/attnres.py`, section
+10.13): SGLang's aggregation (scores, softmax, mix, out norm) over nvb bank snapshots + the prefix, one scalar
+round (dots + Gram entries) with every rank; the chain's MLP seam now is it (+ optional bank write). nvb 0 / 1 /
+4w / 8 all pass; the seam costs +0.3 us (nvb 1) to +9 us (nvb 8, m = 128) over nvb 0. Commit ef2f3a4. T2 is the
+same stage with the attention-side weights.
+
 **Next, in order:**
-1. Extend the chain backwards: T1 (MoE tail: latent AR -> latent norm -> latent up on owner columns + shared RS)
-   and T2 (AttnRes seam on owner columns), then T3 (KDA at wide rows) -> one KDA-layer launch.
+1. Extend the chain backwards: T1 (MoE tail: latent AR -> latent norm -> latent up on owner columns + shared RS
+   + prefix add), then T2 (= `attnres_row` with the attention weights -> AG x), then T3 (KDA at wide rows) -> one
+   KDA-layer launch.
 2. Tile GEMM speed (all GEMMs run at ~2.6-3 TB/s of the ~5 TB/s an aiter hgemm reaches, section 10.4/10.6) and
    row-block pipelining of the chain at 256 / 384 rows.
 2. P2a (section 7): the planner (stage graph -> tasks -> CTAs by XCD) -> the launch. Then P2b/P2c (DSA front / back).
@@ -859,3 +866,30 @@ front 11.6 us at 128 rows, unchanged -> neither W nor the uncached x' read bound
 (mma_bench 2096 x 7168) is 16.5 us at 128 rows (tgemm 18.4), 11.5 in the chain: it is the tile GEMM's
 ~2.6 TB/s. Defaults: front_top on, prefetch off.
 Results: `/shared_nfs/kimi-k31/results/chain_timeline_20261101/`.
+
+### 10.13 AttnRes seam on column-sharded state (`stages/attnres.py`, mi355-4, 2026-11-01)
+
+SGLang (`layers/attn_residual.py`, `aggregate_stream_torch` + out_norm, `AttnResidual.forward`): prefix = previous
+prefix + the sublayer's output; sources = bank rows 0 .. nvb - 1 + the prefix; score_r = rsqrt(mean(x_r^2) + eps)
+(x_r . cw), cw = score_norm.weight x score_proj.weight; softmax; mixed = sum p_r x_r (bf16); out = RMSNorm(mixed);
+at a block boundary the prefix becomes bank row nvb. So the attention-side (T2) and the MLP-side (T5) seams are
+the same op; the chain's earlier "residual add + RMSNorm" was its nvb = 0 case.
+
+Column-sharded: a rank holds its 896 columns of every source (bank [m, nbk, 896] per rank). Every full-row sum is
+8 partials; all travel in ONE tagged round a row: R dots + R (R + 1) / 2 Gram entries (R = nvb + 1, 54 scalars at
+nvb 8), since sum(mixed^2) = sum_rs p_r p_s G_rs (skips the bf16 rounding of mixed before squaring; below output
+rounding). A row a task, 8 waves split the columns, wave_sum + LDS per scalar.
+`chain_bench.py --nvb N [--write]` vs the eager reference (scores rounded to bf16 as the bf16 Linear does; the
+kernel keeps f32 -> front rel L2 grows with nvb: 5.7e-3 at 0, 7.5e-3 at 8, threshold 1e-2):
+
+```text
+chain us (linbf)   nvb 0    nvb 1    nvb 4 + write    nvb 8
+m 16               28.6     28.8     31.5             36.9
+m 128              48.6     49.7     52.3             57.6
+m 384              95.0     95.6     99.3             110.2
+```
+Bank write checked bit-exact against the new prefix. The "standard" column of chain_bench is torch eager
+AttnRes (48 -> 106 us at m 16 as nvb grows): not SGLang's fused HIP aggregation (~8 us a call at c16, section 1)
+-- use the endpoint A/B for the real comparison. Open: the +9 us at nvb 8 is the per-scalar wave_sum chain (54
+butterflies) + 9 source loads a lane; a lane-transposed reduction or 2 rows a task would cut it.
+Results: `/shared_nfs/kimi-k31/results/chain_attnres_20261101/`.

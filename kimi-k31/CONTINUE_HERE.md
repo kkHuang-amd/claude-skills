@@ -1,6 +1,6 @@
 # Kimi-K3.1 — CONTINUE HERE
 
-Owner node: mi355-4. Last updated 2026-11-01 20:00.
+Owner node: mi355-4. Last updated 2026-11-01 21:00.
 
 **Status:** T0-T3 done; optimization loop in `OPT_TRACKER.md`. GPUs free, no server running.
 Four PRs open on kevin-mii/sglang-k31-amd against `dev_amd` (all behind default-off flags):
@@ -34,6 +34,8 @@ scheme, then the planner.
 -17..-46% vs the standard path (section 10.11); next: chain timeline, then T1 / T2 / T3.
 2026-11-01 20:00: chain timeline: stages serial, each near standalone cost; front bound by tile-GEMM speed
 (section 10.12); next: T1 / T2 backwards, tile GEMM speed.
+2026-11-01 21:00: AttnRes seam on column-sharded state, one scalar round, in the chain (section 10.13);
+next: T1 (MoE tail), T2, T3.
 
 **Previous section (`SPARSE_MLA_PREFILL.md`):** R1 HIP kernel passes E2E behind
 `SGLANG_ROCM_SPARSE_MLA_PREFILL_HIP=1`: kernel 2.5 ms vs Triton 5.0 (seq 16384), prefill TTFT

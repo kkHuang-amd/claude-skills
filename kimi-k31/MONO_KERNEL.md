@@ -2,7 +2,7 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-01 21:00, for the next session)
+## CONTINUE HERE (handoff 2026-11-01 22:00, for the next session)
 
 **Status:** S1 (c1, <= 8 rows) runs on K3.1 in the real A/B config (DCP8 + DSPARK, ReplaySSM ring):
 c1 TPOT 4.96 -> 4.49 ms (-9.5%), P90 ITL 6.24 -> 5.67. No server running on mi355-4; GPUs free
@@ -76,10 +76,15 @@ round (dots + Gram entries) with every rank; the chain's MLP seam now is it (+ o
 4w / 8 all pass; the seam costs +0.3 us (nvb 1) to +9 us (nvb 8, m = 128) over nvb 0. Commit ef2f3a4. T2 is the
 same stage with the attention-side weights.
 
+**P2a step 8 done (2026-11-01 22:00):** pre-attention chain `gfx950/pre_attn.py` = T1 -> T2 -> in_proj in one
+launch (section 10.14): 38 / 65 / 135 us at m = 16 / 128 / 384 (nvb 0) vs torch standard 75 / 122 / 192; nvb 4 +
+bank write and "part" pass. Commit b79177b. With `chain.py` (T4 -> T6) both halves of a KDA layer around the
+attention exist as launches.
+
 **Next, in order:**
-1. Extend the chain backwards: T1 (MoE tail: latent AR -> latent norm -> latent up on owner columns + shared RS
-   + prefix add), then T2 (= `attnres_row` with the attention weights -> AG x), then T3 (KDA at wide rows) -> one
-   KDA-layer launch.
+1. T3: KDA at wide rows (f_b, conv, recurrence with the ReplaySSM ring, gated norm per (request, head) task; K1's
+   math, `kimi_k3/gfx950/attention/kda.py` + PR #7's HIP verify), consuming in_proj's output inside the launch ->
+   one KDA-layer launch = pre_attn + KDA + post_attn (T1 .. T6).
 2. Tile GEMM speed (all GEMMs run at ~2.6-3 TB/s of the ~5 TB/s an aiter hgemm reaches, section 10.4/10.6) and
    row-block pipelining of the chain at 256 / 384 rows.
 2. P2a (section 7): the planner (stage graph -> tasks -> CTAs by XCD) -> the launch. Then P2b/P2c (DSA front / back).
@@ -893,3 +898,27 @@ AttnRes (48 -> 106 us at m 16 as nvb grows): not SGLang's fused HIP aggregation 
 -- use the endpoint A/B for the real comparison. Open: the +9 us at nvb 8 is the per-scalar wave_sum chain (54
 butterflies) + 9 source loads a lane; a lane-transposed reduction or 2 rows a task would cut it.
 Results: `/shared_nfs/kimi-k31/results/chain_attnres_20261101/`.
+
+### 10.14 Pre-attention chain: MoE tail + AttnRes + in_proj (`gfx950/pre_attn.py`, mi355-4, 2026-11-01)
+
+SGLang's tail (`kimi_k3.KimiK3MoE._column_split_tail`, K3.1: `latent_moe_use_norm` true, eps 1e-5, routed scaling
+1.0): latent = RMSNorm_n(AR(latent partials)); y = AR(shared partials + latent @ W_up[cols]^T on each rank's
+cols); prefix' = prefix + y. Column-sharded stages: push ((row, owner) tasks: 448 latent + 896 shared columns
+to the owner, a flag a (src, row)) -> lred (row: rank-order sums; latent slice + its sum of squares to every
+rank, shared sum f32 in local scratch) -> up (896 x 3584 tiles over the gathered latent; norm weight folded into
+W_up's columns at load (`fold_up`), the row rsqrt(mean square) applied in the epilogue; K slices merge linbf,
+arrive, each finishes its rows: y = bf16(up + shared), prefix' = bf16(y + prefix), zero the tile) -> seam
+(`attnres_row` with the attention-side weights, x to every rank) -> in_proj (6288 x 7168, chain's front form).
+`test/kernels/kimi_k31/pre_attn_bench.py` (reference in SGLang's op order, f32):
+
+```text
+us a launch (steps of 4)   up cfg           in_proj cfg       nvb 0   nvb 4 + write (linbf / part)   torch standard
+m 16                       t16x128 ks8      t16x128 ks4       38.2    41.7 / 40.6                    74.8 / 128.0
+m 128                      t128x32 ks8      t128x128 ks4      64.8    68.2 / 64.3                    122.4 / 210.6
+m 384                      t128x32 ks4      t192x128 ks2      134.5   141.6 / 138.8                  192.1 / 376.7
+```
+rel L2: prefix' 3.5-3.9e-3, in_proj 4.4-6.4e-3; bank write bit-exact. Alternatives tried (in_proj ks8, up t128x64
+/ ks8 at 384) are equal or slower. The standard column is torch ops (eager AttnRes), not SGLang's fused kernels.
+Bench note: PeerBuffer close must be fenced by barriers on every rank before the next case allocates
+(hipIpcGetMemHandle "invalid argument" when a freed address comes back while still imported by a peer).
+Results: `/shared_nfs/kimi-k31/results/pre_attn_20261101/`.

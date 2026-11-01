@@ -14,7 +14,7 @@ baa73de K1 on the ReplaySSM ring (`KdaPreBuild.ring`) + `test/kernels/test_kimi_
 `test/kernels/kimi_k3/time_k2.py` (K2 time + stage timeline at TP8) | 6e50a20 K2 route by wave-max rounds +
 latent quantized once. The ring and route commits change `kimi_k3` code: coordinate with #13 before upstream.
 9cba298 (2026-11-01, pushed): `sgl_amd_mono/kimi_k31/gfx950/stages/tile.py` (tile GEMM v0) +
-`test/kernels/kimi_k31/tile_bench.py`.
+`test/kernels/kimi_k31/tile_bench.py`; 06263ca: `stages/tile_mma.py` (LDS tile GEMM v1) + `mma_bench.py`.
 SGLang: `/sgl-workspace/sglang-k31-amd` (editable install), dev_amd-based.
 
 **Done 2026-11-01 (mi355-4):** S1 accuracy gate PASSES -- gsm8k1319 greedy THREADS=1 real draft: mono on
@@ -24,13 +24,11 @@ correct but 1.6x (m=16) to 4x (m=128) slower than tgemm; the structure is the ca
 Section 10.3's "+25% at 8 waves" was a sweep artifact (HTI default); corrected in 10.4.
 
 **Next, in order:**
-1. **GEMM placement decided by measurement (section 10.4): option (a)**, 512-thread launch. With
-   `use_half_tile_interleaved=False` (aiter's wrapper defaults it on, which rejected nearly every 8-wave config
-   in the first sweep) aiter hgemm at 8 waves ties or beats tgemm: in_proj 27.9 vs 30.1, MoE front 26.6 vs
-   27.6, latent up 18.4 vs 20.6, o_proj 10.9 vs 10.1 us; 16 waves is no better (28.3 / 27.1 / 18.4 / 12.0),
-   and PR #13's K2 spills at 1024 threads. Next: the tile stage = aiter's non-HTI kernel body as an
-   in-launch stage (t128x128x64x4, w2x2x2 or w2x4x1), split-K 4 with f32 partials; measure the consumer-side
-   sum (in_proj partials 4 x 128 x 6288 f32 = 12.9 MB) against aiter's atomic split-K.
+1. **Own FlyDSL tile GEMM v1 works (section 10.5)**, no aiter gemm: `stages/tile_mma.py`, 128x128 tile,
+   w2x4, BK 64 through padded double-buffered LDS, split-K 4 with f32 partials: in_proj 30.1 (tgemm 29.4),
+   latent up 19.0 (21.3), owner slice 896x3584 6.3 (7.1, t128x32 w8x1 ks8), o_proj 11.4 (10.1) us at m=128.
+   Next: how the partials are summed in the launch (partial bytes, e.g. in_proj 12.9 MB, vs bf16 packed
+   atomics as aiter does), then m = 16 / 48 / 256 / 384 buckets, then wire it into the wide-row planner.
 2. P2a (section 7) after that: column-slice collectives (tagged <= 0.9 MB, waitcnt-flag above, section 6.2)
    -> the planner (stage graph -> tasks -> CTAs by XCD) -> the launch. Then P2b/P2c (DSA front / back).
 3. c1 leftovers (section 8/9): K1 in_proj ~2.4 TB/s vs hgemm 5.1 (~1-1.4 ms a step); router replicated per
@@ -607,3 +605,24 @@ stage needs a K split -- with consumer-summed f32 partials that is extra traffic
 common.plan): KDA front 205 -> 103 VGPR, no spill (twice the waves, half the chunks a wave); K2 layer_post
 219 -> 128 VGPR with 324-400 B scratch at s = 1 / 4 / 8 (a fixed-size stage, not the row count).
 -> (b) buys nothing on the GEMMs and costs spills; (a) is the plan.
+
+### 10.5 Own FlyDSL tile GEMM v1 (`kimi_k31/gfx950/stages/tile_mma.py`, mi355-4, 2026-11-01)
+
+No aiter gemm code: a task is a [bm x bn] output tile over one K slice; 8 waves in a wm x wn grid (no
+cross-wave reduction); BK = 64 steps, x and W pieces (16 B a thread) loaded `depth` steps ahead into
+registers, written into one of two LDS buffers with rows padded to 72 bf16 (16 rows of a ds_read_b128 hit
+16 distinct 4-bank groups), MFMA operands read from LDS; ks > 1 leaves f32 partials. Same `emit` hook as v0.
+`test/kernels/kimi_k31/mma_bench.py`: rel L2 ~1e-7 (f32 partials) / 1.7e-3 (bf16), m = 20 / 128.
+
+```text
+m=128, us        t128x128 w2x4: ks1   ks2   ks4  | best other              | tgemm | aiter 8w best (10.4)
+6288x7168                      74.7  41.9  30.1  | t128x64 w4x2 ks4 33.0   | 29.4  | 27.9
+6016x7168                      75.4  41.6  29.2  |                         | 27.5  | 26.6
+7168x3584                      40.4  24.3  19.0  | t128x64 w4x2 ks4 21.3   | 21.3  | 18.4
+ 896x3584                      39.0  22.0  13.7  | t128x32 w8x1 ks8  6.3   |  7.1  |  8.0
+7168x1536                      20.8  13.9  11.4  |                         | 10.1  | 10.9
+```
+Prefetch depth 2 / 4 / 6 changes nothing (in_proj 30.1 / 30.2 / 30.3): not load-latency bound; ks8 is worse
+for the big shapes (32.8). The stage excludes the partial sum: a separate torch sum adds 3.8 (in_proj) to
+10 us (o_proj, mostly its launch); fused into the consumer only the bytes remain (in_proj 4 x 128 x 6288 f32
+= 12.9 MB written + read). aiter's 27.9 uses packed bf16 atomics instead -- the next comparison.

@@ -2,7 +2,7 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-01 22:00, for the next session)
+## CONTINUE HERE (handoff 2026-11-01 23:00, for the next session)
 
 **Status:** S1 (c1, <= 8 rows) runs on K3.1 in the real A/B config (DCP8 + DSPARK, ReplaySSM ring):
 c1 TPOT 4.96 -> 4.49 ms (-9.5%), P90 ITL 6.24 -> 5.67. No server running on mi355-4; GPUs free
@@ -81,10 +81,16 @@ launch (section 10.14): 38 / 65 / 135 us at m = 16 / 128 / 384 (nvb 0) vs torch 
 bank write and "part" pass. Commit b79177b. With `chain.py` (T4 -> T6) both halves of a KDA layer around the
 attention exist as launches.
 
+**P2a step 9 done (2026-11-01 23:00):** KDA in the pre-attention launch (`pre_attn(..., kda=L, ring=True)`,
+section 10.15): in_proj tiles hand their rows to `kimi_k3`'s KDA tasks as tagged f32 pairs; correct (KDA alone
+vs the rows it read 3.9-4.2e-3, end to end 1.0e-2), but slow: +15 us at m = 16, +59 us at m = 128 (standard KDA
+~24 us a layer at c16). Commit 012e257.
+
 **Next, in order:**
-1. T3: KDA at wide rows (f_b, conv, recurrence with the ReplaySSM ring, gated norm per (request, head) task; K1's
-   math, `kimi_k3/gfx950/attention/kda.py` + PR #7's HIP verify), consuming in_proj's output inside the launch ->
-   one KDA-layer launch = pre_attn + KDA + post_attn (T1 .. T6).
+1. Wide KDA task: one task a (request, head) instead of K1's (request, head, v-chunk): the gate MFMA, q / k
+   l2norm and conv run once a head instead of 8 times, the recurrence holds the 128 x 128 state in 512 threads
+   (32 f32 a thread), the gated norm reduces in the CTA (no ONRM exchange); 192 tasks at m = 128 = one round.
+2. Then one KDA-layer launch = pre_attn (+ KDA) + post_attn (T1 .. T6).
 2. Tile GEMM speed (all GEMMs run at ~2.6-3 TB/s of the ~5 TB/s an aiter hgemm reaches, section 10.4/10.6) and
    row-block pipelining of the chain at 256 / 384 rows.
 2. P2a (section 7): the planner (stage graph -> tasks -> CTAs by XCD) -> the launch. Then P2b/P2c (DSA front / back).
@@ -922,3 +928,24 @@ rel L2: prefix' 3.5-3.9e-3, in_proj 4.4-6.4e-3; bank write bit-exact. Alternativ
 Bench note: PeerBuffer close must be fenced by barriers on every rank before the next case allocates
 (hipIpcGetMemHandle "invalid argument" when a freed address comes back while still imported by a peer).
 Results: `/shared_nfs/kimi-k31/results/pre_attn_20261101/`.
+
+### 10.15 KDA stage in the pre-attention launch (mi355-4, 2026-11-01)
+
+`pre_attn(..., kda=L, state_len, ring=True)`: in_proj (6288 x 7168) tiles merge linbf in a bf16 buffer, arrive on
+a per-tile counter, and each K slice converts its rows to the tagged f32 pairs `kimi_k3`'s KDA tasks poll
+(scratch "proj", [S][6288]) and zeroes them; then `kimi_k3.gfx950.attention.kda.kda_tasks` unchanged (conv, f_b
+gate MFMA, l2norm, recurrence on the ReplaySSM ring, gated RMSNorm -> core_out [S, 1536]); its ~24 arguments
+packed in one int64 table (`pre_attn.kda_table`). `pre_attn_bench.py --kda 8` (R = m / 8 requests, num_acc 1..8,
+ring rows written, committed state read-only): reference = `test_kimi_k3_k1._kda_reference` vectorized over
+requests.
+
+```text
+m 16 (R 2):    53.1 us (38.2 without KDA)   core_out rel L2 1.04e-2 end to end, 4.2e-3 KDA alone
+m 128 (R 16): 123.5 us (64.8 without KDA)   core_out rel L2 1.00e-2 end to end, 3.9e-3 KDA alone
+```
+"KDA alone" feeds the reference the rows the stage read (from the scratch pairs): the 4e-3 is K1's own bf16
+roundings (conv out, g1, o); end to end the in_proj rounding (5e-3) is amplified by l2norm / gates / recurrence
+(threshold 3e-2 end to end, 5e-3 alone). The cost: K1 splits a (request, head) into 8 v-chunk tasks and every
+chunk recomputes the head's gate MFMA, q / k l2norm and conv: 1536 tasks at m = 128 (6 rounds) with 8x
+redundant front work -> the wide KDA task (Next 1).
+Results: `/shared_nfs/kimi-k31/results/pre_attn_kda_20261101/`.

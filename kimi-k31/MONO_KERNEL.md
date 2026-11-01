@@ -13,7 +13,7 @@ billishyahao). Commits: d7fb03e `kimi_k31` spec (DCP8, dsa backend, drift digest
 baa73de K1 on the ReplaySSM ring (`KdaPreBuild.ring`) + `test/kernels/test_kimi_k31_k1_ring.py` | 8888d88
 `test/kernels/kimi_k3/time_k2.py` (K2 time + stage timeline at TP8) | 6e50a20 K2 route by wave-max rounds +
 latent quantized once. The ring and route commits change `kimi_k3` code: coordinate with #13 before upstream.
-Uncommitted on top (2026-11-01): `sgl_amd_mono/kimi_k31/gfx950/stages/tile.py` (tile GEMM v0) +
+9cba298 (2026-11-01, pushed): `sgl_amd_mono/kimi_k31/gfx950/stages/tile.py` (tile GEMM v0) +
 `test/kernels/kimi_k31/tile_bench.py`.
 SGLang: `/sgl-workspace/sglang-k31-amd` (editable install), dev_amd-based.
 

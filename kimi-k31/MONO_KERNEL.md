@@ -2,7 +2,19 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-02 05:00 -- NEW SESSION: integration debugging / validation)
+## CONTINUE HERE (handoff 2026-11-01 22:30, mi355-4 -- gsm8k + CUDA graphs done, A/B half done, m384 fault open)
+
+**Update 2026-11-01 22:30 (section 10.22):** eager gsm8k PASSES (wide 0.99 vs off 0.98), CUDA graphs WORK
+(wide widths captured, gsm8k 0.98 vs off 0.99), A/B wide run done (buckets 16..256), off-control A/B was running
+when the session stopped -> read `results/ab/wide_ab_off_20261101/summary.txt` (if empty, rerun it).
+Code changes are UNCOMMITTED in `/sgl-workspace/sgl-amd-mono` (on top of 581b173): `wide.py` graph-safe KDA
+tables + widths limited to warmed buckets, `spec.py` debug logs removed, `layer_bench.py --no-t1 --restart`.
+**Next (new order):** (a) compare A/B on vs off (first look: wide c4 TPOT 8.72 ms vs doc baseline 7.8-7.9 -> may
+be SLOWER; profile c4 step if confirmed); (b) bucket 384 fault (10.22, deterministic bench repro); (c) commit code.
+After any fault: `rm -f /tmp/gpucore*` AND `gpucore*` in the cwd of the crashed process (torchrun from the repo
+root left 133 GB in `/sgl-workspace/sgl-amd-mono`, filled `/`, killed a server with "No space left").
+
+### Previous handoff (2026-11-02 05:00)
 
 **Status:** the wide-row KDA layer launch (`sgl_amd_mono/kimi_k31/gfx950/layer.py`, T1 .. T6 + DSpark capture)
 now SERVES verify steps end to end in an eager server: `SGLANG_AMD_MONO_K31_WIDE=1` routes R x 8 steps (R 2 ..
@@ -997,3 +1009,42 @@ outside it. Run: warmup 46 launches (buckets 16, 32) 295 s cold; 4 concurrent re
 `/generate` with `{"text": "Q: What is {12+i} + {30+i}? ...\nA:", "sampling_params": {"max_new_tokens": 40,
 "temperature": 0}}`. Logs: `/shared_nfs/kimi-k31/logs/server_wide9.log` (success), `server_wide6/8.log` (bugs
 b / c).
+
+### 10.22 Accuracy, CUDA graphs, A/B, the bucket-384 fault (mi355-4, 2026-11-01)
+
+gsm8k200, TEMP 0, THREADS 16 (R up to 16 -> rows <= 128), SIM=0 real draft, `--enable-amd-monokernel`,
+buckets 16,32,64,128; off = same server without `SGLANG_AMD_MONO_K31_WIDE`
+(`results/acc/wide_{gsm,graph}_{on,off}`):
+
+```text
+                 score  accept len (req-weighted)  wall
+eager  wide on   0.99   5.005                      170 s (incl. lazy capture-variant compile)
+eager  off       0.98   5.022                       63 s
+graph  wide on   0.98   4.955                       25 s
+graph  off       0.99   5.019                       26 s
+```
+Identical generations pairwise 91..103 / 200 for ALL pairs, incl. off-eager vs off-graph (91): at 16-way
+concurrency batch composition dominates; the wide path adds no visible divergence. Gate passes.
+
+CUDA graphs: SGLang's full-graph backend runs two eager forwards per shape (barrier'd) before capturing, so
+lazy work there is fine. Changes: KDA table built once per (bucket, layer) on first (eager) use, pointing at
+per-bucket persistent `st_idx` / `num_acc` (step: `fill_(-1)` + slot copy; assert not capturing on build);
+`epoch[0].add_(1)`; `wide_widths()` capped at max(`SGLANG_AMD_MONO_K31_WIDE_BUCKETS`) / 8 so no graph meets a
+cold bucket (R above it -> standard graphs). Log: "runs target_verify steps of batch size [1..16] (16 of 27
+captured decode graphs)"; 4 wide_req answers correct.
+
+A/B (ab_bench, SIM acc 3.84, buckets 16..256 -> c48 steps with R > 32 on standard graphs),
+`results/ab/wide_ab_on256_20261101`: c4 TPOT 8.72 / c16 16.61 / c48 31.35 ms, prefill 8k 527.6 ms.
+Off control same day: `results/ab/wide_ab_off_20261101` (was running at handoff). Doc baselines (other days):
+c4 7.78-7.94, c16 15.58-16.18, c48 31.34-31.94.
+
+Faults:
+(1) bucket 384, deterministic: the warmup's first variant faults on every rank (addr ~0x6000_0000_3000).
+Bench repro (8 GPUs, ~70 s; run from /tmp so cores land there):
+`torchrun --nproc-per-node 8 test/kernels/kimi_k31/layer_bench.py --rows 384 --nvb-a 3 --write-a --nvb-m 4 --no-t1`
+Needs t1=False (a run's first layer) + nvb_a 3 write + the 384 CFG; no fault with: t1 on, nvb 0, m 128,
+restart alone, up ks 8 instead of 4 (same plan sizes, only up task count 336 -> 672 = CTA task distribution),
+in/o bm 128. With t1 off the up GEMM does not run, so ks only moves task scheduling -> suspect a race exposed
+by timing (T2 starts without waiting), not a static OOB.
+(2) bucket 128 warmup, once in 3 cold starts, one GPU (addr 0x7385f8304000); rerun clean. Not chased.
+

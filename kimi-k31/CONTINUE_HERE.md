@@ -18,6 +18,8 @@ Four PRs open on kevin-mii/sglang-k31-amd against `dev_amd` (all behind default-
 #9 and #10 touch the same long-prefill path: with #10 on, #9 only matters where #10 declines.
 Not yet measured: #7 + #8 + #10 on together (different code; expect additive).
 
+**2026-11-01 22:30 (mi355-4): wide-row mono: gsm8k eager + graph PASS, CUDA graphs work, A/B half done, bucket-384
+fault open -> `MONO_KERNEL.md` CONTINUE HERE / section 10.22. Code uncommitted in /sgl-workspace/sgl-amd-mono.**
 **Next: decode mono kernel, NEW SESSION (2026-11-02): read `MONO_KERNEL.md` CONTINUE HERE first.** The wide-row
 layer launch serves R x 8 verify steps eagerly (`SGLANG_AMD_MONO_K31_WIDE=1`, commit 581b173); next is the gsm8k
 check, then CUDA graphs, then the A/B. After any GPU fault: `rm -f /tmp/gpucore*` (17 GB a rank).

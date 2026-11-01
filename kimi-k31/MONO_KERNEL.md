@@ -2,7 +2,7 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-02 02:00, for the next session)
+## CONTINUE HERE (handoff 2026-11-02 03:00, for the next session)
 
 **Status:** S1 (c1, <= 8 rows) runs on K3.1 in the real A/B config (DCP8 + DSPARK, ReplaySSM ring):
 c1 TPOT 4.96 -> 4.49 ms (-9.5%), P90 ITL 6.24 -> 5.67. No server running on mi355-4; GPUs free
@@ -100,12 +100,15 @@ f32 front merge -> router logits + latent to every rank, shared gate / up local 
 experts' input, top-16 noaux_tc) + SiTU + shared down. Layer 105 / 114 / 167 / 335 us at m = 16 / 32 / 128 /
 384. The launch now ends at exactly what `self.experts(expert_input, topk_output)` takes. Commit 5a221cc.
 Spec: everything here is the DSPARK verify step (R requests x 8 tokens, ReplaySSM ring, per-request num_acc);
-the draft step and the post-verify fold stay on SGLang; DSpark hidden captures are NOT yet written by the wide
-layer launch (PR #13's launches do it) -- needed before integration.
+the draft step and the post-verify fold stay on SGLang.
+
+**P2a step 13 done (2026-11-02 03:00):** DSpark capture from the wide layer launch (`kda_layer(..., capture=True)`,
+section 10.19): the attention seam's pre-norm mixture of layer i + 1 = SGLang's capture after layer i, gathered and
+copied into a column block of the packed aux buffer; rel L2 3.8-5.3e-3; +0.8 / +5.4 us at m = 16 / 128 on the 5
+capture layers only. Commit f026fc7.
 
 **Next, in order:**
-1. DSpark hidden captures (`dspark_layers_to_capture`) from the wide layer launch, as PR #13 does.
-2. SGLang integration for c4..c48: the residual stream and bank stay column-sharded across KDA layers (convert at
+1. SGLang integration for c4..c48: the residual stream and bank stay column-sharded across KDA layers (convert at
    the DSA layers until P2b/c), weights folded at load (W_up x w_n, cw = score_norm x score_proj); endpoint A/B.
 3. KDA stage timeline (21 us at m = 128).
 2. Tile GEMM speed (all GEMMs run at ~2.6-3 TB/s of the ~5 TB/s an aiter hgemm reaches, section 10.4/10.6) and
@@ -1029,3 +1032,20 @@ top-16 sets differing from the f32 reference: 10-12% of rows; on the launch's OW
 The end-to-end top-16 flips are the upstream rounding (logits ~N(0, 1), the 16th / 17th keys of 896 ~1e-3 apart,
 logits off by ~7e-3): the routing code is exact; whether the flip rate matters is the endpoint gsm8k gate's call.
 Results: `/shared_nfs/kimi-k31/results/kda_layer_20261102/tail_*.log`.
+
+### 10.19 DSpark capture from the wide layer launch (mi355-4, 2026-11-02)
+
+SGLang (`kimi_k3.py` bank path, `_dspark_capture_stream`): the capture after layer i is `aggregate_stream(prefix
+after layer i, bank, nvb of layer i + 1, layer i + 1's self_attention_res_{proj,norm})` -- the pre-norm mixture
+the next attention seam forms, bf16 [m, H] on every rank. DSpark's targets (`dflash_config.target_layer_ids`):
+0-based 7, 23, 51, 67, 83; the next layers 8, 24, 52, 68, 84 are all KDA (DSA at 0-based 3, 7, .., 91, 92), so
+each capture is the layer launch of layer i + 1 with `capture=True`: `attnres_row(..., emit_mixed=...)` pushes the
+mixture slice to every rank's "cap" region (+ a (src, row) flag), and a row stage copies the gathered row into
+`cap_out` with row stride `cap_ld` (a column block of the packed [m, 5 x H] aux buffer).
+`layer_bench.py --capture` (slot 2 of 5; the other blocks must stay zero):
+
+```text
+m 16:  106.1 us (105.3 without)  capture rel L2 3.84e-3   | nvb_a 3 + write: 110.6 us, 5.05e-3
+m 128: 172.5 us (167.1 without)  capture rel L2 3.84e-3   | nvb_a 3 + write: 176.4 us, 5.25e-3
+```
+Results: `/shared_nfs/kimi-k31/results/kda_layer_20261102/capture*.log`.

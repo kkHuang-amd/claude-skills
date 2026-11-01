@@ -1,6 +1,6 @@
 # Kimi-K3.1 — CONTINUE HERE
 
-Owner node: mi355-4. Last updated 2026-11-02 03:00.
+Owner node: mi355-4. Last updated 2026-11-02 04:00.
 
 **Status:** T0-T3 done; optimization loop in `OPT_TRACKER.md`. GPUs free, no server running.
 Four PRs open on kevin-mii/sglang-k31-amd against `dev_amd` (all behind default-off flags):
@@ -47,6 +47,8 @@ KDA-layer launch (pre_attn + KDA + post_attn).
 / 384 (section 10.18); next: DSpark captures, then SGLang integration + endpoint A/B.
 2026-11-02 03:00: DSpark capture from the wide layer launch (section 10.19); next: SGLang integration + endpoint
 A/B + gsm8k gate.
+2026-11-02 04:00: REAL-MODEL check of the wide layer launch passes at rows 32 / 128 (layer 8, t1 off; section
+10.20); next: T1 + shared expert on real data, then integration.
 
 **Previous section (`SPARSE_MLA_PREFILL.md`):** R1 HIP kernel passes E2E behind
 `SGLANG_ROCM_SPARSE_MLA_PREFILL_HIP=1`: kernel 2.5 ms vs Triton 5.0 (seq 16384), prefill TTFT

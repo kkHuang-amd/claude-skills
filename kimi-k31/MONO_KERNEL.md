@@ -2,7 +2,7 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-02 03:00, for the next session)
+## CONTINUE HERE (handoff 2026-11-02 04:00, for the next session)
 
 **Status:** S1 (c1, <= 8 rows) runs on K3.1 in the real A/B config (DCP8 + DSPARK, ReplaySSM ring):
 c1 TPOT 4.96 -> 4.49 ms (-9.5%), P90 ITL 6.24 -> 5.67. No server running on mi355-4; GPUs free
@@ -107,8 +107,18 @@ section 10.19): the attention seam's pre-norm mixture of layer i + 1 = SGLang's 
 copied into a column block of the packed aux buffer; rel L2 3.8-5.3e-3; +0.8 / +5.4 us at m = 16 / 128 on the 5
 capture layers only. Commit f026fc7.
 
+**P2a step 14 done (2026-11-02 04:00): REAL-MODEL check passes** (`kimi_k31/wide_check.py`, section 10.20): with
+`SGLANG_AMD_MONO_K31_WIDE_CHECK=8 launch_server.sh <tag> --enable-amd-monokernel --disable-cuda-graph`, layer 8's
+launch (t1=False) runs next to SGLang on the served weights / activations / KDA ring state at R 4 and R 16 (rows
+32 / 128): x 2.8e-3, core_out 5.8-6.5e-3, x' 3.4-4.1e-3, h 3.0-3.2e-3, latent 4.7-4.8e-3, logits 2.4-2.7e-3;
+routing rule identical to SGLang's on its logits (0%) and ours on our logits (0%), top-16 sets differ in 0-12%
+of rows (logit rounding). Not yet checked on real data: T1 (MoE tail of layer 7) and the shared expert output
+(neither the shared MLP module nor its down_proj runs on the merged-front path). Commit c1daac5.
+
 **Next, in order:**
-1. SGLang integration for c4..c48: the residual stream and bank stay column-sharded across KDA layers (convert at
+1. Real-model check of T1 and the shared expert: find the merged-front path's shared / latent-partial tensors
+   (`kimi_k3.py` fused front ~l. 1700-1900, `_reduce_latent_and_shared`), hook them at layer 7, run t1=True.
+2. SGLang integration for c4..c48: the residual stream and bank stay column-sharded across KDA layers (convert at
    the DSA layers until P2b/c), weights folded at load (W_up x w_n, cw = score_norm x score_proj); endpoint A/B.
 3. KDA stage timeline (21 us at m = 128).
 2. Tile GEMM speed (all GEMMs run at ~2.6-3 TB/s of the ~5 TB/s an aiter hgemm reaches, section 10.4/10.6) and
@@ -1049,3 +1059,24 @@ m 16:  106.1 us (105.3 without)  capture rel L2 3.84e-3   | nvb_a 3 + write: 110
 m 128: 172.5 us (167.1 without)  capture rel L2 3.84e-3   | nvb_a 3 + write: 176.4 us, 5.25e-3
 ```
 Results: `/shared_nfs/kimi-k31/results/kda_layer_20261102/capture*.log`.
+
+### 10.20 Real-model check of the wide-row layer launch (`kimi_k31/wide_check.py`, mi355-4, 2026-11-02)
+
+`SGLANG_AMD_MONO_K31_WIDE_CHECK=<layer>` (installed from the kimi_k31 spec's build; eager server): wraps
+`AttnResidual.forward` (both seams of the layer: its bank, nvb, write flag, and the (normed, prefix) it returns),
+o_proj's input (core_out), the experts' inputs (latent, topk_output incl. router_logits). At the attention seam
+it runs `kda_layer(rows, ..., t1=False)` from the seam's prefix with: the bank's column slice, the KDA state as
+K1 reads it but for R requests (conv window staged a pool slot, `st_idx` = the request's slot, num_acc 1, ring
+rows on copies, the committed state read only), real weights (front = gate rows 112 r .. | latent down rows 448 r
+.. | shared gate_up; cw = res_norm x res_proj). SGLang serves every step itself. Layer 8 (KDA, nvb 1), A/B config
+(DCP8, DSPARK, ring), 4 / 16 concurrent requests:
+
+```text
+rows (R x 8)   x        core_out   x'       h        latent   logits   top-16 rows differing (w on equal sets)
+32             2.8e-3   5.8-6.5e-3 3.4-4.1e-3 3.0-3.2e-3 4.8e-3 2.4-2.7e-3  0-12.5% (1.9-2.3e-3)
+128            2.8e-3   6.1-6.4e-3 3.7-3.9e-3 3.1e-3   4.7e-3   2.7e-3   7-8% (1.9-2.4e-3)
+routing: the noaux_tc rule on SGLang's logits = SGLang's ids (0%); ours = the rule on our logits (0%)
+```
+The weight / layout conventions (in_proj rows, KDA weights, ring, o_proj, both seams, front rows, bias) hold on
+the real model. Not covered yet: T1 (layer 7's MoE tail) and the shared expert output. Logs:
+`/shared_nfs/kimi-k31/results/wide_check_real_20261102/`.

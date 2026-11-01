@@ -13,16 +13,23 @@ billishyahao). Commits: d7fb03e `kimi_k31` spec (DCP8, dsa backend, drift digest
 baa73de K1 on the ReplaySSM ring (`KdaPreBuild.ring`) + `test/kernels/test_kimi_k31_k1_ring.py` | 8888d88
 `test/kernels/kimi_k3/time_k2.py` (K2 time + stage timeline at TP8) | 6e50a20 K2 route by wave-max rounds +
 latent quantized once. The ring and route commits change `kimi_k3` code: coordinate with #13 before upstream.
+Uncommitted on top (2026-11-01): `sgl_amd_mono/kimi_k31/gfx950/stages/tile.py` (tile GEMM v0) +
+`test/kernels/kimi_k31/tile_bench.py`.
 SGLang: `/sgl-workspace/sglang-k31-amd` (editable install), dev_amd-based.
 
+**Done 2026-11-01 (mi355-4):** S1 accuracy gate PASSES -- gsm8k1319 greedy THREADS=1 real draft: mono on
+1287/1319 (0.9757) vs off 1288 (0.9765), discordant 2 / 3 (McNemar p = 1.0), 1246/1319 identical
+generations, accept len 4.71 / 4.70 (section 10.1). P2a step 1 started: register-operand tile GEMM v0 is
+correct but 1.6x (m=16) to 4x (m=128) slower than tgemm; the structure is the cause (section 10.2).
+
 **Next, in order:**
-1. Accuracy gate with power: full gsm8k1319, THREADS=1, greedy, real draft (SIM=0), mono on vs off
-   (`gsm8k_gate.sh` takes THREADS; num_examples is 200 in the script -> add a knob), or KL vs mono off on
-   fixed prompts. 200-question runs: mono 0.97-0.985 (4 runs) vs off 0.98-0.99 (3 runs).
-2. P2a (section 7): the wide-row layer launch (16..384 rows) for KDA layers + MoE tail/front, experts on aiter
-   stage 1/2. Build order: MFMA tile GEMM stage from aiter FlyDSL a16w16 pieces (x does not fit LDS) ->
-   column-slice collectives (tagged <= 0.9 MB, waitcnt-flag above, section 6.2) -> the planner (stage graph
-   -> tasks -> CTAs by XCD) -> the launch. Then P2b/P2c (DSA front / back with DCP in kernel).
+1. **Decision for the user (section 10.3):** dense GEMMs at 128+ rows in the wide-row launch cost ~25% over
+   tgemm at 8 waves even with aiter's own kernel (in_proj 37.5 vs 29.8 us). Pick: (a) tile stage = aiter's
+   LDS/DMA structure as an in-launch stage, 128x128 tile, split-K 4 with f32 partials summed by the consumer;
+   (b) the same with a 1024-thread (16-wave) wide-row launch, the shape tgemm's winners use; (c) keep in_proj,
+   the MoE front and o_proj as tgemm launches and fuse only the seams / small ops between them.
+2. P2a (section 7) after that: column-slice collectives (tagged <= 0.9 MB, waitcnt-flag above, section 6.2)
+   -> the planner (stage graph -> tasks -> CTAs by XCD) -> the launch. Then P2b/P2c (DSA front / back).
 3. c1 leftovers (section 8/9): K1 in_proj ~2.4 TB/s vs hgemm 5.1 (~1-1.4 ms a step); router replicated per
    rank (drop the logits all-gather, ~5 us a layer); top-16 still 3.9 us.
 4. Side: the standard path is nondeterministic at bs 1 (108/200 identical greedy generations between two
@@ -35,7 +42,10 @@ source /workspace/claude-skills/kimi-k31/env.sh
 S=/workspace/claude-skills/kimi-k31/scripts
 bash $S/launch_server.sh <tag> --enable-amd-monokernel          # mono on; omit the flag for off
 AB_CONC="1" bash $S/ab_bench.sh <tag>                            # c1 TPOT -> results/ab/<tag>/summary.txt
-SIM=0 bash $S/launch_server.sh <tag> --enable-amd-monokernel; THREADS=1 TEMP=0 bash $S/gsm8k_gate.sh <tag> <log>
+SIM=0 bash $S/launch_server.sh <tag> --enable-amd-monokernel; NUM=1319 THREADS=1 TEMP=0 bash $S/gsm8k_gate.sh <tag> <log>
+cd /tmp && python /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k31/tile_bench.py --time --m 16,128 --nb 1,2 --ks 1,4
+python $S/tile_isa.py 128:6288:7168:1 /tmp/tile_isa      # vgpr / scratch / lds + disassembly, no launch
+python $S/hgemm_8wave_sweep.py 128                        # aiter hgemm at 8 waves vs tgemm
 cd /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k3 && torchrun --nproc-per-node 8 check_k2.py   # + check_moe.py, time_k2.py
 python /sgl-workspace/sgl-amd-mono/test/kernels/test_kimi_k31_k1_ring.py                      # 1 GPU
 ```
@@ -507,3 +517,67 @@ mono-vs-mono 62/200 is not evidence that step 1 changed numerics; the K2 kernel 
 inputs. Mono runs a little less reproducible (66 vs 108) and scores 0.97-0.985 over 4 runs vs 0.98-0.99 over 3:
 within 200-question noise; a 1319-question gsm8k (or KL vs mono off on fixed prompts) is the next gate
 before calling the c1 accuracy equal.
+
+## 10. S1 accuracy gate and P2a step 1: tile GEMM v0 (mi355-4, 2026-11-01)
+
+### 10.1 gsm8k1319 gate (S1 c1)
+
+`launch_server.sh` with SIM=0 (real draft), `NUM=1319 THREADS=1 TEMP=0 gsm8k_gate.sh`; sglang-k31-amd
+origin/dev_amd 3d2aa95c9d, sgl-amd-mono k31/mono-s1 @ 6e50a20.
+
+```text
+mono on   1287/1319 = 0.9757   accept len 4.709   wall 610 s   results/acc/g1319_mono_on_20261101
+mono off  1288/1319 = 0.9765   accept len 4.697   wall 683 s   results/acc/g1319_mono_off_20261101
+paired (evaluator's symbolic_correct): on-only 2, off-only 3, McNemar exact p = 1.0;
+identical generations 1246/1319 (paired_vs_off.txt; per-item output-rs0.jsonl copied next to metrics.json)
+```
+-> S1 accuracy equals mono off. gsm8k_gate.sh fixes: `NUM` knob (default 200); the accept-len window now
+compares full date-times (it read 0 lines when a run crossed midnight UTC).
+
+### 10.2 Tile GEMM v0 (`kimi_k31/gfx950/stages/tile.py`)
+
+v0 = PR #13 GEMV generalized: task = 16 nb weight rows x all m rows, the 8 waves split K (gemv's K order),
+both operands buffer-loaded straight into MFMA registers (weights NT, x from L2), partials summed through
+64 KB LDS in rounds; `emit(row, col, v4, live)` hook (bf16 / f32 stores provided), optional K split across
+CTAs (`ks`, f32 partials [ks, m, n] for the consumer to sum). `tile_bench.py`: rel L2 1.7e-3 (bf16 output
+rounding) at m 16 / 20 / 128 / 384, nb 1 / 2 / 4, ks 1 / 2 / 4, K tails (1536 = 1.5 chunks a wave).
+
+Graph-replayed, MALL-busting (us; tgemm = server's tuned path):
+
+```text
+                 m=16 best (nb,ks)   tgemm | m=128 best          tgemm | m=384 best         tgemm
+6288x7168        29.5 (2,1)          18.8  | 111.6 (2,1)          29.9  | 789 (2,1)           68.4
+7168x3584        17.5 (2,1)          11.2  |  50.7 (2,4)          21.7  | 304 (2,4)           37.3
+ 896x3584        10.4 (1,1)           4.7  |  11.1 (1,4)           7.0  |  49 (1,4)           13.0
+7168x1536         9.7 (2,1)           6.1  |  26.3 (2,2)          10.1  | 150 (2,2)           18.1
+```
+
+Why (ISA via `scripts/tile_isa.py`): (1) LLVM's scheduler sank every prefetch load to just before its MFMA
+(66 x `s_waitcnt vmcnt(1)`); `rocdl.sched_barrier(0)` around each unit keeps 36-43 loads in flight but
+changed nothing (126.9 vs 129.5 us at m=128 nb=1), so latency is not the limit. (2) Bytes per CU are: the
+CTAs pull ~25-31 GB/s each (the same per-CU rate as the 6 TB/s HBM read floor), and total traffic is
+(N / NT)(m + NT) K 2 -- x is reread by every task, so at m=128, NT=16-32 the x traffic is 4-8x the weights.
+`ks` does not change that sum (it only adds CTAs). Cutting it needs NT >= ~m, which with all 8 waves on K
+means m/16 x NT/16 x 4 accumulators a lane: 256 VGPRs (the 2-waves-a-SIMD cap) at m=128, NT=32 already
+(m=128 nb=2: 256 VGPR + 408 B scratch; m=384: 1576 B scratch). So v0's structure is a dead end past ~16 rows.
+
+aiter's own hgemm at 8 waves (`scripts/hgemm_8wave_sweep.py`, M=128; only t128x128x64 stages 2 w2x4x1
+passes the wrapper's config check at 512 threads):
+
+```text
+6288x7168  ks4 37.5 / ks2 48.7 / ks1 81.3   tgemm 29.8      7168x3584  ks4 25.7 / ks1 42.9   tgemm 20.6
+6016x7168  ks4 34.0 / ks1 80.9              tgemm 27.9      7168x1536  ks2 18.1 / ks1 21.5   tgemm 10.4
+```
+tgemm's winners are 16-wave (e.g. t128x128x64x4 ks4 w4x4x1). Without split-K the 128x128 tile leaves
+~200 CUs idle (49 tasks for in_proj) -> 2.7x; with split-K 4 (atomics) it is still +25%.
+
+### 10.3 Consequence for S2 (decision pending)
+
+At 128+ rows a dense GEMM inside a 512-thread launch costs ~+25% (best case, aiter structure + split-K) over
+tgemm; KDA layer at c16: in_proj + MoE front + latent up + o_proj ~ 90 us of tgemm a layer -> ~+20 us a layer
+if moved in naively, against the S2 estimate of -8..-9 ms/step (section 2, ~-90 us a layer). Options:
+(a) tile stage = aiter's structure (LDS async DMA, 128x128, w2x4x1) as an in-launch stage, split-K 4 with f32
+    partials that the consumer sums (no atomics / finish; fits the column-sharded RS of section 7);
+(b) as (a) in a 1024-thread wide-row launch (16 waves, tgemm's shape; 128 VGPRs a wave for every other stage);
+(c) keep in_proj / MoE front / o_proj as tgemm launches, the wide-row launch fuses only what lies between them
+    (seams, norms, router / top-k / sort prologue, latent up owner slice): ~3-4 launches a layer instead of 1.

@@ -2,7 +2,7 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-01 15:30, for the next session)
+## CONTINUE HERE (handoff 2026-11-01 17:30, for the next session)
 
 **Status:** S1 (c1, <= 8 rows) runs on K3.1 in the real A/B config (DCP8 + DSPARK, ReplaySSM ring):
 c1 TPOT 4.96 -> 4.49 ms (-9.5%), P90 ITL 6.24 -> 5.67. No server running on mi355-4; GPUs free
@@ -48,12 +48,21 @@ bytes ("flag" push) -- section 10.8. Commit 5ca0c64, pushed.
 **Layers a launch (answer to the user, 2026-11-01):** S1 = PR #13's per-layer launches (K1 per KDA layer x 69, K2
 per MoE layer x 92 = 161 mono launches a step; DSA attention, layer-1 dense FFN, draft outside). S2 design = one
 launch per layer (MoE tail L-1 + attention L + MoE front L) + aiter's 2 expert launches at wide rows. DSV4.1's
-mono is also per layer (K1 + K2 on every layer, `dsv41/MONO_KERNEL_EVAL.md`), not one kernel for all layers.
+mono is also per layer (K1 + K2 on every layer, `dsv41/MONO_KERNEL_EVAL.md`), not one kernel for all layers:
+its "30 whole" / "40 whole" count the layers run whole (K1 + K2) vs FFN-only, not layers merged into one launch
+(the 40-whole profile has 88 mono kernels a step, indexer / compressor between them).
 A multi-layer launch on K3.1 is capped by the 3 KDA : 1 DSA pattern (DSA attention outside -> <= 3 layers a
 launch) until P2b/P2c, and at wide rows by the routed experts in aiter.
 
+**P2a step 4 done (2026-11-01 17:30):** buffer parity by launch, not by epoch (section 10.10): the epoch-parity
+hazard reproduced (flag AG: 6265 silent mismatches; tagged: guard stop), launch parity 0 mismatches in 10 x 48k
+stress launches (steps of 4 and 3); the fused GEMM -> RS counter wait and AG -> GEMM flags pass 14 x 48k stress
+launches. Commit 7b852b3, pushed.
+
 **Next, in order:**
-1. Decide the parity scheme for consecutive launches of a step (section 10.7 (4)); stress the 10.8 counter wait.
+1. The planner (section 7): stage graph -> tasks -> CTAs by XCD per width bucket, starting with the KDA layer's
+   T1..T6 on the pieces that exist (gemm_rs for o_proj / shared down, ag_gemm for in_proj, coll for latent AR);
+   every launch must keep one all-ranks exchange (the parity rule, 10.10).
 2. P2a (section 7): the planner (stage graph -> tasks -> CTAs by XCD) -> the launch. Then P2b/P2c (DSA front / back).
 3. c1 leftovers (section 8/9): K1 in_proj ~2.4 TB/s vs hgemm 5.1 (~1-1.4 ms a step); router replicated per
    rank (drop the logits all-gather, ~5 us a layer); top-16 still 3.9 us.
@@ -774,3 +783,20 @@ skew between owners overlaps. The gather region is uncached peer memory, so x is
 the 50 N tiles: ~+10 us at 384 rows vs the standalone tile GEMM (64.7). Options if it matters: K steps of a task
 ordered to start on owners already landed; a local cached copy of x by the consumer.
 Results: `/shared_nfs/kimi-k31/results/ag_gemm_fused_20261101/`.
+
+### 10.10 Buffer parity across a step's launches (mi355-4, 2026-11-01)
+
+A step bumps the epoch once and runs its layer launches (slots) on one peer buffer. With the half picked by the
+epoch (the K3 scheme), a rank that finishes launch n can start n + 1 and write slices into the half a slow peer
+still reads for n. Reproduced (`coll_bench.py --kinds ag --step 4 --parity epoch --stress 300 --delay 5000`,
+delays also before the final read): flag format 6265 silent mismatches in 14k launches; tagged format hangs
+(the next tag never matches) -> guard stop on every rank. Fix (`coll.context`): half = (epoch x launches + slot)
+% 2, the global launch index, so consecutive launches alternate across step boundaries too. Two halves suffice
+only if every launch has an exchange in which each rank waits for every other (then no rank reaches n + 2 before
+all have left n) -- a rule for the planner. Stress with launch parity: ag / ar x tag / flag x 8 / 128 rows, steps
+of 4, 8 x 48048 launches, + steps of 3 (odd) 2 x 48048: 0 mismatches. Fused kernels with random CTA delays (before
+each arrival in gemm_rs; before / after the push in ag_gemm), steps of 4, 48000 launches each: gemm_rs 8 configs
+(ks 4 / 2 / 1, linbf / part, flag) worst rel L2 3.7e-3, ag_gemm 6 configs 3.2e-3 (part 9e-7). Timing unchanged.
+PR #13's K1 / K2 keep epoch parity but use tagged pairs only, so the same race there would be a guard stop, not
+wrong data; worth an audit of which of its regions are read after the reader's last awaited push.
+Results: `/shared_nfs/kimi-k31/results/parity_stress_20261101/`.

@@ -1,6 +1,6 @@
 # Kimi-K3.1 — CONTINUE HERE
 
-Owner node: mi355-4. Last updated 2026-11-01 15:30.
+Owner node: mi355-4. Last updated 2026-11-01 17:30.
 
 **Status:** T0-T3 done; optimization loop in `OPT_TRACKER.md`. GPUs free, no server running.
 Four PRs open on kevin-mii/sglang-k31-amd against `dev_amd` (all behind default-off flags):
@@ -29,6 +29,7 @@ format default; section 10.7); next is wiring them to the tile GEMMs.
 next is AG -> in_proj.
 2026-11-01 15:30: fused AG -> in_proj one launch, -14..-32% vs RCCL + F.linear (section 10.9); next: parity
 scheme, then the planner.
+2026-11-01 17:30: parity by launch index (epoch hazard reproduced, fixed, stressed; section 10.10); next: planner.
 
 **Previous section (`SPARSE_MLA_PREFILL.md`):** R1 HIP kernel passes E2E behind
 `SGLANG_ROCM_SPARSE_MLA_PREFILL_HIP=1`: kernel 2.5 ms vs Triton 5.0 (seq 16384), prefill TTFT

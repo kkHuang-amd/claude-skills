@@ -1,6 +1,6 @@
 # Kimi-K3.1 — CONTINUE HERE
 
-Owner node: mi355-4. Last updated 2026-10-31 17:00.
+Owner node: mi355-4. Last updated 2026-11-01 13:00.
 
 **Status:** T0-T3 done; optimization loop in `OPT_TRACKER.md`. GPUs free, no server running.
 Four PRs open on kevin-mii/sglang-k31-amd against `dev_amd` (all behind default-off flags):
@@ -23,6 +23,8 @@ S1 (c1) done in the real config: TPOT 4.96 -> 4.49 ms; code on fork kkHuang-amd/
 2026-11-01: gsm8k1319 gate PASSES (mono on 0.9757 vs off 0.9765, discordant 2/3). P2a step 1 (tile GEMM
 v0) measured; aiter hgemm with HTI off at 8 waves ties/beats tgemm (in_proj 27.9 vs 30.1 us), 16 waves no
 better and spills PR #13's K2 -> GEMMs go inside the 512-thread launch (`MONO_KERNEL.md` section 10.4).
+2026-11-01 13:00: P2a step 2 column-slice collectives done (bit-exact, 8 x 10^5 stress launches clean, tagged
+format default; section 10.7); next is wiring them to the tile GEMMs.
 
 **Previous section (`SPARSE_MLA_PREFILL.md`):** R1 HIP kernel passes E2E behind
 `SGLANG_ROCM_SPARSE_MLA_PREFILL_HIP=1`: kernel 2.5 ms vs Triton 5.0 (seq 16384), prefill TTFT

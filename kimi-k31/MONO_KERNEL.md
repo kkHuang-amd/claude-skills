@@ -2,7 +2,7 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-01 11:00, for the next session)
+## CONTINUE HERE (handoff 2026-11-01 13:00, for the next session)
 
 **Status:** S1 (c1, <= 8 rows) runs on K3.1 in the real A/B config (DCP8 + DSPARK, ReplaySSM ring):
 c1 TPOT 4.96 -> 4.49 ms (-9.5%), P90 ITL 6.24 -> 5.67. No server running on mi355-4; GPUs free
@@ -27,12 +27,20 @@ Section 10.3's "+25% at 8 waves" was a sweep artifact (HTI default); corrected i
 merged by lane-contiguous packed-bf16 atomics after an LDS shuffle ("linbf"); ties or beats tgemm on in_proj /
 MoE front / latent up at every bucket, o_proj +20-25% at m=128 / 384 (bucket table: section 10.6).
 
+**P2a step 2 done (2026-11-01 13:00):** column-slice collectives `stages/coll.py` (RS / AG / two-shot AR, tagged
+and waitcnt-flag formats), bit-exact at TP8, 0 mismatches in 8 x 10^5 stress launches; tagged ties or beats flag at
+every size, so tagged is the default (section 10.7). Commit 6162564 on `k31/mono-s1`, pushed.
+
+**Decisions (user, 2026-11-01):** (a) the consumer zeroes the atomic output it reads (one reader an element;
+buffers zeroed once at allocation); (b) linbf by default, an env knob (named when wired) switches the tile GEMMs to
+"part" for debugging / accuracy gates; tile-GEMM stages are exempt from "graph replays bit for bit".
+
 **Next, in order:**
-1. Two decisions for the user before wiring the tile stage in: (a) who zeroes the atomic outputs (the consumer
-   after it reads, or the previous launch); (b) bit-reproducibility: linbf atomics make the K-slice sum order
-   nondeterministic, "part" f32 partials are deterministic at ~1-2 us a GEMM + ~8x the consumer's read bytes.
-2. P2a (section 7): column-slice collectives (tagged <= 0.9 MB, waitcnt-flag above, section 6.2)
-   -> the planner (stage graph -> tasks -> CTAs by XCD) -> the launch. Then P2b/P2c (DSA front / back).
+1. Wire the collectives to the tile GEMMs (section 10.7 "Wiring"): o_proj / shared-down epilogue -> RS push per
+   finished tile (a per-tile K-slice arrival count: with linbf the tile is complete only after its last K slice;
+   that task reads, pushes and zeroes it = decision (a)); in_proj consumes AG x by K-chunk polls. Decide the
+   parity scheme for consecutive launches of a step (section 10.7 (4)).
+2. P2a (section 7): the planner (stage graph -> tasks -> CTAs by XCD) -> the launch. Then P2b/P2c (DSA front / back).
 3. c1 leftovers (section 8/9): K1 in_proj ~2.4 TB/s vs hgemm 5.1 (~1-1.4 ms a step); router replicated per
    rank (drop the logits all-gather, ~5 us a layer); top-16 still 3.9 us.
 4. Side: the standard path is nondeterministic at bs 1 (108/200 identical greedy generations between two
@@ -48,6 +56,7 @@ AB_CONC="1" bash $S/ab_bench.sh <tag>                            # c1 TPOT -> re
 SIM=0 bash $S/launch_server.sh <tag> --enable-amd-monokernel; NUM=1319 THREADS=1 TEMP=0 bash $S/gsm8k_gate.sh <tag> <log>
 cd /tmp && python /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k31/tile_bench.py --time --m 16,128 --nb 1,2 --ks 1,4
 cd /tmp && python /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k31/mma_bench.py --time --m 128 --cfg 128:128:2:4:4:2 --mode part,linbf
+cd /tmp && torchrun --nproc-per-node 8 /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k31/coll_bench.py --time   # collectives
 python $S/tile_isa.py 128:6288:7168:1 /tmp/tile_isa      # vgpr / scratch / lds + disassembly, no launch
 python $S/hgemm_8wave_sweep.py 128                        # aiter hgemm at 8 waves vs tgemm
 cd /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k3 && torchrun --nproc-per-node 8 check_k2.py   # + check_moe.py, time_k2.py
@@ -654,3 +663,45 @@ m     in_proj 6288x7168          latent up 7168x3584        owner 896x3584      
 Waves: bm 16 / 48 -> w1x8, bm 32 / 128 -> w2x4, bm 192 / 256 -> w4x2; bm = m rounded to 16 up to 48. tgemm's
 m=256 entries look untuned (7168x3584 62 us). Repro: `mma_bench.py --time --m 16,32,48 --cfg 16:128:1:8:4:2,...
 --mode linbf` (cfg = bm:bn:wm:wn:ks:depth; wm x wn must be 8).
+
+### 10.7 Column-slice collectives (`kimi_k31/gfx950/stages/coll.py`, mi355-4, 2026-11-01)
+
+RS / AG / two-shot AR over column slices (rank r owns columns [r sl, (r + 1) sl), sl = H / 8), on PR #13's
+`Mailbox`, `PeerBuffer` and guard. "tag": 16 B stores of 2 bf16 pairs + 2 tags; CTA group j (32 of the 256 CTAs)
+pushes to rank j, so a wave's destination base is uniform; consumers poll exactly the pairs they read. "flag":
+CTA b owns chunk b of every slice, plain 16 B uncached stores, `s_waitcnt vmcnt(0)` + barrier + a tagged flag a
+(phase, source, CTA). Both sum in f32 in rank order: bit-exact against the torch reference, deterministic.
+Regions are double-buffered by epoch parity. `test/kernels/kimi_k31/coll_bench.py`: every launch of a 20-launch
+graph has its own inputs, 3 input sets rotate between replays (stale data cannot pass).
+
+```text
+us a launch (graph replay, incl. the launch gap; 256 x 512 threads), all bit-exact
+shape       MB    AR tag / flag   AG tag / flag   RS tag / flag | 6.2 AR: HIP tagged64 / waitcnt / RCCL
+8 x 7168    0.11   9.0 / 15.7      5.4 / 12.7      6.1 / 11.2   |   8.3 / 14.6 / 15.8
+32 x 7168   0.46  10.1 / 18.3      6.9 / 13.5      7.5 / 11.7   |  10.4 / 16.0 / 28.5
+128 x 3584  0.92  14.1 / 18.7      9.6 / 15.1      9.9 / 13.0   |  19.0 / 17.4 / 30.3
+128 x 7168  1.84  23.3 / 24.5     14.1 / 19.3     14.5 / 17.5   |  35.3 / 23.1 / 40.9
+128 x 10752 2.75  32.9 / 33.4     18.7 / 26.1     19.0 / 23.8   |  60.1 / 31.5 / 42.9
+384 x 7168  5.51  59.8 / 63.3     32.8 / 52.1     31.7 / 47.9   | 133.1 / 65.3 / 59.0
+```
+Findings: (1) 16 B tagged stores with a uniform destination take tagged from 35.3 to 23.3 us at 128 x 7168; it
+now ties or beats flag at every size, so section 6.2's rule (tagged <= 0.9 MB, flag above) is replaced: tagged by
+default, flag kept for overlapped phases where link bytes matter (half the bytes). (2) The standalone AR beats
+RCCL to 128 rows and ties it at 384; AG and RS each cost about half an AR, so section 7's split (RS and AG at
+different stage boundaries) costs no more than today's AR before any overlap. (3) Stress (`--stress 2000
+--launches 50`, random per-CTA start delay 0..200 us and 0..10 us): AR 8 x 7168 and 128 x 7168, both formats,
+8 x 100050 launches, 0 mismatches -> the waitcnt publish ordering holds under skew (still not a documented
+guarantee; rerun the stress after ROCm / firmware changes). (4) Open: parity. The bench bumps the epoch every
+launch; in production a step's launches share an epoch (PR #13 tag scheme, `kimi_k3/gfx950/tag.py`), so two
+consecutive launches using one region need alternating parity from (epoch, slot) -- an odd launch count a step
+or a per-launch counter. Safe without parity only if every rank's read of launch L's region happens before a
+push the producer needs for launch L + 1.
+
+Wiring (next): with linbf the o_proj / shared-down tile is complete only after its last K slice; a per-tile
+arrival counter lets that task read the tile, RS-push it and zero it (decision (a)). in_proj takes x by K
+chunks from the AG region as the slices land; the AR inside T1 (latent) uses `tag_reduce` with an emit that
+feeds the latent norm instead of a store.
+
+Repro: `cd /tmp && torchrun --nproc-per-node 8 /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k31/coll_bench.py
+--time` (add `--shapes 8x7168,128x7168 --kinds ar --launches 50 --stress 2000 --delay 20000` for the stress).
+Results: `/shared_nfs/kimi-k31/results/coll_slices_20261101/{summary.txt,sweep.log,coll_stress_*.log}`.

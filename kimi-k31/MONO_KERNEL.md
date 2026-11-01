@@ -2,7 +2,7 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-01 13:00, for the next session)
+## CONTINUE HERE (handoff 2026-11-01 14:30, for the next session)
 
 **Status:** S1 (c1, <= 8 rows) runs on K3.1 in the real A/B config (DCP8 + DSPARK, ReplaySSM ring):
 c1 TPOT 4.96 -> 4.49 ms (-9.5%), P90 ITL 6.24 -> 5.67. No server running on mi355-4; GPUs free
@@ -35,11 +35,15 @@ every size, so tagged is the default (section 10.7). Commit 6162564 on `k31/mono
 buffers zeroed once at allocation); (b) linbf by default, an env knob (named when wired) switches the tile GEMMs to
 "part" for debugging / accuracy gates; tile-GEMM stages are exempt from "graph replays bit for bit".
 
+**P2a step 3a done (2026-11-01 14:30):** fused tile GEMM -> RS in one launch (`stages/gemm_coll.py`, o_proj
+7168 x 1536): 13.6 / 16.2 / 23.1 / 43.2 us at m = 16 / 32 / 128 / 384 vs hipBLASLt + RCCL 17.4 / 18.8 / 32.1 /
+46.6 (-7..-28%); "part" deterministic at +0..1 us. Remote stores need many CUs and, from 128 rows, half the
+bytes ("flag" push) -- section 10.8. Commit 5ca0c64, pushed.
+
 **Next, in order:**
-1. Wire the collectives to the tile GEMMs (section 10.7 "Wiring"): o_proj / shared-down epilogue -> RS push per
-   finished tile (a per-tile K-slice arrival count: with linbf the tile is complete only after its last K slice;
-   that task reads, pushes and zeroes it = decision (a)); in_proj consumes AG x by K-chunk polls. Decide the
-   parity scheme for consecutive launches of a step (section 10.7 (4)).
+1. P2a step 3b: AG -> in_proj in one launch (in_proj 6288 x 7168 consumes x by K chunks from the AG region as the
+   owners' slices land; the AG push is spread over CTAs, flag format from 128 rows, as 10.8 found for RS). Decide
+   the parity scheme for consecutive launches of a step (section 10.7 (4)).
 2. P2a (section 7): the planner (stage graph -> tasks -> CTAs by XCD) -> the launch. Then P2b/P2c (DSA front / back).
 3. c1 leftovers (section 8/9): K1 in_proj ~2.4 TB/s vs hgemm 5.1 (~1-1.4 ms a step); router replicated per
    rank (drop the logits all-gather, ~5 us a layer); top-16 still 3.9 us.
@@ -57,6 +61,7 @@ SIM=0 bash $S/launch_server.sh <tag> --enable-amd-monokernel; NUM=1319 THREADS=1
 cd /tmp && python /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k31/tile_bench.py --time --m 16,128 --nb 1,2 --ks 1,4
 cd /tmp && python /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k31/mma_bench.py --time --m 128 --cfg 128:128:2:4:4:2 --mode part,linbf
 cd /tmp && torchrun --nproc-per-node 8 /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k31/coll_bench.py --time   # collectives
+cd /tmp && torchrun --nproc-per-node 8 /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k31/gemm_coll_bench.py   # GEMM -> RS fused
 python $S/tile_isa.py 128:6288:7168:1 /tmp/tile_isa      # vgpr / scratch / lds + disassembly, no launch
 python $S/hgemm_8wave_sweep.py 128                        # aiter hgemm at 8 waves vs tgemm
 cd /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k3 && torchrun --nproc-per-node 8 check_k2.py   # + check_moe.py, time_k2.py
@@ -705,3 +710,34 @@ feeds the latent norm instead of a store.
 Repro: `cd /tmp && torchrun --nproc-per-node 8 /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k31/coll_bench.py
 --time` (add `--shapes 8x7168,128x7168 --kinds ar --launches 50 --stress 2000 --delay 20000` for the stress).
 Results: `/shared_nfs/kimi-k31/results/coll_slices_20261101/{summary.txt,sweep.log,coll_stress_*.log}`.
+
+### 10.8 Fused tile GEMM -> RS (`kimi_k31/gfx950/stages/gemm_coll.py`, mi355-4, 2026-11-01)
+
+One launch: GEMM tasks (tiles x K slices, a tile's slices consecutive tasks of one round), each slice merges
+into a local scratch tile at device scope (CM_DEV: the reader may sit on another XCD -- plain stores failed
+with "part" until then; linbf atomics were already coherent), counts itself in a per-tile counter (monotonic,
++ks a launch, no reset), waits for the tile's other slices, pushes 1 / ks of the rows to the column owner and
+zeroes them (decision (a)); after their GEMM tasks the CTAs reduce the owner slice piece by piece in rank order.
+`test/kernels/kimi_k31/gemm_coll_bench.py`: rel L2 vs the f32 reference on rotating inputs, "part" replays bit
+for bit; times fused | tile GEMM + memset + coll RS (3 launches) | F.linear + RCCL reduce_scatter.
+
+Where the time went (m = 128, t128x128 ks4, linbf; GC_PHASES): GEMM 14.6 -> + arrive 15.8 -> + tile loads 18.2
+-> + remote pushes 35.0 us when the last slice pushed the whole 64 KB tile alone: one CTA pushes only ~2-4 GB/s
+of remote stores (same per-CTA rate as the standalone RS), so the push must be spread over many CUs. Every
+slice pushing its rows: + push 12 us, i.e. ~3.2 MB of tagged bytes a rank at ~270 GB/s, near the links' limit
+-> the "flag" push (plain 16 B stores, one flag a (rows, tile) piece, owner CTA waits for the 8 sources' flags of
+a piece) halves the bytes: + push 5.8 us. ks = 1 with smaller tiles removes the wait, the atomics and the
+zeroing, and wins at 128 / 384 rows.
+
+```text
+o_proj 7168 x 1536, flag push, us a launch    fused   (GEMM alone)  3 launches  F.linear + RCCL
+m 16  t16x128  w1x8 ks4  linbf / part         13.6 / 14.7   (7.2)     13.7        17.4
+m 32  t32x128  w2x4 ks2  linbf / part         16.2 / 16.5   (9.8)     17.4        18.8
+m 128 t64x64   w2x4 ks1                       23.1          (13.2)    25.7        32.1
+m 384 t192x64  w4x2 ks1                       43.2          (23.1)    52.8        46.6
+```
+At 16 / 32 rows tag and flag tie (13.3 / 16.3 tagged). The fused GEMM runs ~1-2 us slower than the standalone
+tile GEMM (guard, context, persistent loop). Push + reduce still add ~6 us (m 16) to ~20 us (m 384) over the
+GEMM: inside the S2 launch this is what overlap with the next stage has to hide. Not yet stressed with random
+delays (the coll stress covers the transport; the counter wait is new).
+Results: `/shared_nfs/kimi-k31/results/gemm_rs_fused_20261101/{summary.txt,final.log,*sweep.log}`.

@@ -2,7 +2,7 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-01 17:30, for the next session)
+## CONTINUE HERE (handoff 2026-11-01 19:00, for the next session)
 
 **Status:** S1 (c1, <= 8 rows) runs on K3.1 in the real A/B config (DCP8 + DSPARK, ReplaySSM ring):
 c1 TPOT 4.96 -> 4.49 ms (-9.5%), P90 ITL 6.24 -> 5.67. No server running on mi355-4; GPUs free
@@ -59,10 +59,17 @@ hazard reproduced (flag AG: 6265 silent mismatches; tagged: guard stop), launch 
 stress launches (steps of 4 and 3); the fused GEMM -> RS counter wait and AG -> GEMM flags pass 14 x 48k stress
 launches. Commit 7b852b3, pushed.
 
+**P2a step 5 done (2026-11-01 19:00):** planner v0 (`kimi_k31/plan.py`: regions, stage list, checks) and the first
+multi-stage launch `gfx950/chain.py` = T4 -> T5 -> T6 (o_proj -> RS + residual -> RMSNorm with the sum of squares
+exchanged -> AG -> MoE front 2096 x 7168): 26-28 / 30-31 / 46-48 / 90-92 us at m = 16 / 32 / 128 / 384 vs the
+standard path (F.linear + RCCL AR + add + F.rms_norm + F.linear) 43 / 58 / 76 / 110 (-17..-46%); section 10.11.
+Commit 9b02f20, pushed.
+
 **Next, in order:**
-1. The planner (section 7): stage graph -> tasks -> CTAs by XCD per width bucket, starting with the KDA layer's
-   T1..T6 on the pieces that exist (gemm_rs for o_proj / shared down, ag_gemm for in_proj, coll for latent AR);
-   every launch must keep one all-ranks exchange (the parity rule, 10.10).
+1. A stage timeline for the chain (per-CTA clock marks, as PR #13's `timeline`), to see where the 48 us at
+   m = 128 go (o_proj 23 + front ~20 standalone, so overlap is still small); then XCD-aware placement.
+2. Extend the chain backwards: T1 (MoE tail: latent AR -> latent norm -> latent up on owner columns + shared RS)
+   and T2 (AttnRes seam on owner columns), then T3 (KDA at wide rows) -> one KDA-layer launch.
 2. P2a (section 7): the planner (stage graph -> tasks -> CTAs by XCD) -> the launch. Then P2b/P2c (DSA front / back).
 3. c1 leftovers (section 8/9): K1 in_proj ~2.4 TB/s vs hgemm 5.1 (~1-1.4 ms a step); router replicated per
    rank (drop the logits all-gather, ~5 us a layer); top-16 still 3.9 us.
@@ -800,3 +807,29 @@ each arrival in gemm_rs; before / after the push in ag_gemm), steps of 4, 48000 
 PR #13's K1 / K2 keep epoch parity but use tagged pairs only, so the same race there would be a guard stop, not
 wrong data; worth an audit of which of its regions are read after the reader's last awaited push.
 Results: `/shared_nfs/kimi-k31/results/parity_stress_20261101/`.
+
+### 10.11 Planner v0 and the post-attention chain (mi355-4, 2026-11-01)
+
+`kimi_k31/plan.py`: a launch = stages every CTA walks in order (task t on CTA t % 256), joined by mailbox words /
+flags only, no grid barrier; deadlock-free with every CTA resident and waits pointing backwards. `Plan` lays out
+named peer regions (two halves) and local scratch, lists stages with their waits, and checks (waits backwards,
+one all-ranks stage for the parity rule). `coll.region_context` gives any planned region `<name>_of` / `_own`.
+
+`gfx950/chain.py` (T4 -> T5 -> T6): oproj (gemm_rs tiles, flag push) -> rsred (owner piece sum in rank order +
+residual, new residual slice, piece mark in scratch) -> seam (a row a task: 8 waves split the 896 columns, sum of
+squares exchanged as tagged f32, RMSNorm, normalized slice pushed to every rank, row flag) -> front (2096 x 7168
+tiles waiting for their rows' and owners' flags, x' read from the gather region). v0 ran the seam a band (64
+rows) a CTA: 108 us at m = 128, one CTA pushing 0.9 MB; a row a task: 55 -> 48 us with the front at ks 8.
+`test/kernels/kimi_k31/chain_bench.py` checks the new residual slice and the front output vs an f32 reference:
+
+```text
+us a launch (steps of 4)   o_proj cfg        front cfg          chain linbf / part   standard   rel L2 res / front
+m 16                       t16x128 ks4       t16x128 ks8        27.6 / 26.1          43.0       3.7e-3 / 5.7e-3
+m 32                       t32x128 ks2       t32x128 ks8        31.4 / 29.7          58.6       3.2e-3 / 5.3e-3
+m 128                      t64x64  ks1       t128x128 ks8       48.3 / 45.5          76.1       2.5e-3 / 4.9e-3
+m 384                      t192x64 ks1       t128x128 ks4       91.7 / 89.5          110.2      2.5e-3 / 4.2e-3
+```
+linbf includes the front output memset; "part" leaves f32 partials for the consumer (its sum is not counted).
+16k launches a config re-checked clean (no random-delay stress in the chain yet). The standard column is torch
+ops, not SGLang's fused add-rmsnorm + custom AR; the endpoint A/B is the real comparison.
+Results: `/shared_nfs/kimi-k31/results/chain_post_attn_20261101/`.

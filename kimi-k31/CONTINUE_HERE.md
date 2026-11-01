@@ -1,6 +1,6 @@
 # Kimi-K3.1 — CONTINUE HERE
 
-Owner node: mi355-4. Last updated 2026-11-02 00:00.
+Owner node: mi355-4. Last updated 2026-11-02 01:00.
 
 **Status:** T0-T3 done; optimization loop in `OPT_TRACKER.md`. GPUs free, no server running.
 Four PRs open on kevin-mii/sglang-k31-amd against `dev_amd` (all behind default-off flags):
@@ -41,6 +41,8 @@ next: T1 (MoE tail), T2, T3.
 KDA task a (request, head) (section 10.15).
 2026-11-02 00:00: wide KDA task: m 128 pre_attn + KDA 86 us (KDA +21, standard ~24) (section 10.16); next: one
 KDA-layer launch (pre_attn + KDA + post_attn).
+2026-11-02 01:00: ONE wide-row KDA layer launch T1..T6 works: 82 / 136 / 272 us at m 16 / 128 / 384 (section
+10.17); next: T6 tail (router top-16, latent quant, shared down), then SGLang integration + endpoint A/B.
 
 **Previous section (`SPARSE_MLA_PREFILL.md`):** R1 HIP kernel passes E2E behind
 `SGLANG_ROCM_SPARSE_MLA_PREFILL_HIP=1`: kernel 2.5 ms vs Triton 5.0 (seq 16384), prefill TTFT

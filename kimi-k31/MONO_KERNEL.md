@@ -2,7 +2,7 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-02 00:00, for the next session)
+## CONTINUE HERE (handoff 2026-11-02 01:00, for the next session)
 
 **Status:** S1 (c1, <= 8 rows) runs on K3.1 in the real A/B config (DCP8 + DSPARK, ReplaySSM ring):
 c1 TPOT 4.96 -> 4.49 ms (-9.5%), P90 ITL 6.24 -> 5.67. No server running on mi355-4; GPUs free
@@ -90,10 +90,18 @@ vs the rows it read 3.9-4.2e-3, end to end 1.0e-2), but slow: +15 us at m = 16, 
 section 10.16): m = 128 pre_attn + KDA 123.5 -> 86.1 us (KDA +21 us over the 64.8 without it, standard KDA ~24);
 m = 16 54.4 (K1 split 53.1). Commit 2785f6c.
 
+**P2a step 11 done (2026-11-02 01:00):** ONE wide-row KDA layer launch T1 .. T6 (`gfx950/layer.py`, section
+10.17): 82 / 90 / 136 / 272 us at m = 16 / 32 / 128 / 384, every hand-off checked (mid, h, core_out, front),
+nvb + bank write pass. Estimate vs the c16 trace: the standard KDA layer minus its routed experts ~236 us ->
+~-100 us a layer, ~-6.9 ms of the 47.9 ms VERIFY step (to be confirmed at the endpoint). Commit 4ca4b77.
+
 **Next, in order:**
-1. One KDA-layer launch = pre_attn (+ wide KDA) + post_attn (T1 .. T6): core_out feeds o_proj inside the launch
-   (o_proj tiles wait for the heads of their K range), one plan, one peer buffer.
-2. KDA stage timeline (conv / gates / recurrence / norm per task) -- 21 us at m = 128 is one round of ~20 us tasks.
+1. T6 tail inside the launch: router logits -> top-16 (+ AG of the 0.06 MB logits), latent AG + mxfp8 quant into
+   aiter's stage-1 layout, shared SiTU + shared down -> the shared partial the next layer's T1 reads; then the
+   aiter expert launches sit between layer launches.
+2. SGLang integration for c4..c48: the residual stream and bank stay column-sharded across KDA layers (convert at
+   the DSA layers until P2b/c), weights folded at load (W_up x w_n, cw = score_norm x score_proj); endpoint A/B.
+3. KDA stage timeline (21 us at m = 128).
 2. Tile GEMM speed (all GEMMs run at ~2.6-3 TB/s of the ~5 TB/s an aiter hgemm reaches, section 10.4/10.6) and
    row-block pipelining of the chain at 256 / 384 rows.
 2. P2a (section 7): the planner (stage graph -> tasks -> CTAs by XCD) -> the launch. Then P2b/P2c (DSA front / back).
@@ -970,3 +978,27 @@ wide, KPT 16 (8 lanes a row, 2 rows a thread; default)            54.4     86.1
 At m = 16 only 24 tasks run (K1's 192 spread better; equal within 1.3 us, so one path). The KDA tasks wait for
 all of in_proj (a head's q / k / v / g / f_a / beta columns span the whole N range), so the stage does not
 overlap in_proj; its 21 us at m = 128 is one round of tasks. Results: `/shared_nfs/kimi-k31/results/pre_attn_kda_20261101/`.
+
+### 10.17 One wide-row KDA layer launch (`gfx950/layer.py`, mi355-4, 2026-11-02)
+
+`kda_layer(m, LayerCfg(up, in_proj, o_proj, front), L, nf, nvb_a, nvb_m, write_a, ...)`: `pre_attn`'s stages
+(push, lred, up, seam, inproj) + the wide KDA heads + `chain`'s (oproj, rsred, mseam, front) in one launch, one
+`Plan` (post regions prefixed `o_`), two `region_context`s on one peer buffer with one tag. In-launch hand-offs at
+device scope (reader may be on another XCD): core_out (KDA marks each (request, head) done in scratch; o_proj
+tiles wait for their rows' heads, x loads CM_DEV via `mma_tile(..., xcm)`), the prefix after the MoE tail (RS
+residual input, CM_DEV), the bank row the attention seam writes (MLP seam reads it CM_DEV).
+`test/kernels/kimi_k31/layer_bench.py` (f32 reference in SGLang's op order end to end):
+
+```text
+m (R x 8)   layer us   rel L2: mid      h        core_out   front     (configs: layer_bench.CFGS)
+16          82.4       3.9e-3   5.5e-3   1.0e-2     7.0e-3
+32          89.7       3.9e-3   5.4e-3   1.0e-2     6.9e-3
+128         135.8      3.9e-3   5.4e-3   1.0e-2     6.9e-3
+384         272.1      3.5e-3   4.9e-3   8.9e-3     6.0e-3
+16 / 128, nvb_a 3 + write, nvb_m 4: 87.2 / 140.6, all pass
+```
+The launch costs the sum of its halves (pre + KDA 54 / 86, chain 28 / 49 at m = 16 / 128): the stages are serial
+(10.12), merging saves the gaps only. What it replaces at c16 (section 6.1, per KDA layer): 446 us of kernels of
+which ~210 experts -> ~236 us vs 136 here, ~-100 us a layer x 69 = ~-6.9 ms a step, before the T6 tail (router
+top-16, latent quant, shared down) is added and before endpoint confirmation.
+Results: `/shared_nfs/kimi-k31/results/kda_layer_20261102/`.

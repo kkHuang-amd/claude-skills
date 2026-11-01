@@ -2,7 +2,7 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-01 14:30, for the next session)
+## CONTINUE HERE (handoff 2026-11-01 15:30, for the next session)
 
 **Status:** S1 (c1, <= 8 rows) runs on K3.1 in the real A/B config (DCP8 + DSPARK, ReplaySSM ring):
 c1 TPOT 4.96 -> 4.49 ms (-9.5%), P90 ITL 6.24 -> 5.67. No server running on mi355-4; GPUs free
@@ -40,10 +40,20 @@ buffers zeroed once at allocation); (b) linbf by default, an env knob (named whe
 46.6 (-7..-28%); "part" deterministic at +0..1 us. Remote stores need many CUs and, from 128 rows, half the
 bytes ("flag" push) -- section 10.8. Commit 5ca0c64, pushed.
 
+**P2a step 3b done (2026-11-01 15:30):** fused AG -> tile GEMM in one launch (`gemm_coll.ag_gemm`, in_proj
+6288 x 7168): 23.8 / 25.8 / 39.6 / 84.7 us at m = 16 / 32 / 128 / 384 vs RCCL all_gather + F.linear 35.1 / 37.2 /
+58.5 / 98.8 (-14..-32%); x read straight from the uncached gather region costs ~+10 us at 384 rows (section
+10.9). Commit 18fcfcc, pushed.
+
+**Layers a launch (answer to the user, 2026-11-01):** S1 = PR #13's per-layer launches (K1 per KDA layer x 69, K2
+per MoE layer x 92 = 161 mono launches a step; DSA attention, layer-1 dense FFN, draft outside). S2 design = one
+launch per layer (MoE tail L-1 + attention L + MoE front L) + aiter's 2 expert launches at wide rows. DSV4.1's
+mono is also per layer (K1 + K2 on every layer, `dsv41/MONO_KERNEL_EVAL.md`), not one kernel for all layers.
+A multi-layer launch on K3.1 is capped by the 3 KDA : 1 DSA pattern (DSA attention outside -> <= 3 layers a
+launch) until P2b/P2c, and at wide rows by the routed experts in aiter.
+
 **Next, in order:**
-1. P2a step 3b: AG -> in_proj in one launch (in_proj 6288 x 7168 consumes x by K chunks from the AG region as the
-   owners' slices land; the AG push is spread over CTAs, flag format from 128 rows, as 10.8 found for RS). Decide
-   the parity scheme for consecutive launches of a step (section 10.7 (4)).
+1. Decide the parity scheme for consecutive launches of a step (section 10.7 (4)); stress the 10.8 counter wait.
 2. P2a (section 7): the planner (stage graph -> tasks -> CTAs by XCD) -> the launch. Then P2b/P2c (DSA front / back).
 3. c1 leftovers (section 8/9): K1 in_proj ~2.4 TB/s vs hgemm 5.1 (~1-1.4 ms a step); router replicated per
    rank (drop the logits all-gather, ~5 us a layer); top-16 still 3.9 us.
@@ -62,6 +72,7 @@ cd /tmp && python /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k31/tile_bench.p
 cd /tmp && python /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k31/mma_bench.py --time --m 128 --cfg 128:128:2:4:4:2 --mode part,linbf
 cd /tmp && torchrun --nproc-per-node 8 /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k31/coll_bench.py --time   # collectives
 cd /tmp && torchrun --nproc-per-node 8 /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k31/gemm_coll_bench.py   # GEMM -> RS fused
+cd /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k31 && torchrun --nproc-per-node 8 ag_gemm_bench.py   # AG -> GEMM fused
 python $S/tile_isa.py 128:6288:7168:1 /tmp/tile_isa      # vgpr / scratch / lds + disassembly, no launch
 python $S/hgemm_8wave_sweep.py 128                        # aiter hgemm at 8 waves vs tgemm
 cd /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k3 && torchrun --nproc-per-node 8 check_k2.py   # + check_moe.py, time_k2.py
@@ -741,3 +752,25 @@ tile GEMM (guard, context, persistent loop). Push + reduce still add ~6 us (m 16
 GEMM: inside the S2 launch this is what overlap with the next stage has to hide. Not yet stressed with random
 delays (the coll stress covers the transport; the counter wait is new).
 Results: `/shared_nfs/kimi-k31/results/gemm_rs_fused_20261101/{summary.txt,final.log,*sweep.log}`.
+
+### 10.9 Fused AG -> tile GEMM (`gemm_coll.ag_gemm`, mi355-4, 2026-11-01)
+
+One launch: every rank pushes its x slice [m, 896] to all ranks' gather region (plain 16 B stores, CTA group j
+feeds rank j); each CTA counts itself in a local counter (+BLOCKS a launch, no reset) and the last one flags
+"source r landed" on every rank; a GEMM task waits only for the owners of its K range (2 at ks 4) and reads x
+straight from the gather region. `test/kernels/kimi_k31/ag_gemm_bench.py` (linbf; every column includes the
+output memset):
+
+```text
+in_proj 6288 x 7168, us    fused   (GEMM on the gather region, no push / wait)   coll AG + tile   RCCL AG + F.linear
+m 16  t16x128  w1x8 ks4    23.8    (19.9)                                         25.9             35.1
+m 32  t32x128  w2x4 ks4    25.8    (20.3)                                         26.1             37.2
+m 128 t128x128 w2x4 ks4    39.6    (32.7)                                         46.2             58.5
+m 384 t192x128 w4x2 ks2    84.7    (76.1)                                         99.0             98.8
+```
+rel L2 2.5-3.2e-3. The table-10.6 configs stay best (ks8, t64x128, t128x64 at 128 rows and ks4 / ks1 variants
+at 384 rows are 7-24 us worse). Push + wait add 4-9 us over the GEMM: every task waits at its start, so only
+skew between owners overlaps. The gather region is uncached peer memory, so x is re-read from memory by each of
+the 50 N tiles: ~+10 us at 384 rows vs the standalone tile GEMM (64.7). Options if it matters: K steps of a task
+ordered to start on owners already landed; a local cached copy of x by the consumer.
+Results: `/shared_nfs/kimi-k31/results/ag_gemm_fused_20261101/`.

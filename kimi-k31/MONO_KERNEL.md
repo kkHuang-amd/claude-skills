@@ -2,7 +2,7 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-01 23:00, for the next session)
+## CONTINUE HERE (handoff 2026-11-02 00:00, for the next session)
 
 **Status:** S1 (c1, <= 8 rows) runs on K3.1 in the real A/B config (DCP8 + DSPARK, ReplaySSM ring):
 c1 TPOT 4.96 -> 4.49 ms (-9.5%), P90 ITL 6.24 -> 5.67. No server running on mi355-4; GPUs free
@@ -86,11 +86,14 @@ section 10.15): in_proj tiles hand their rows to `kimi_k3`'s KDA tasks as tagged
 vs the rows it read 3.9-4.2e-3, end to end 1.0e-2), but slow: +15 us at m = 16, +59 us at m = 128 (standard KDA
 ~24 us a layer at c16). Commit 012e257.
 
+**P2a step 10 done (2026-11-02 00:00):** wide KDA task (`stages/kda_wide.py`, one a (request, head), ring only,
+section 10.16): m = 128 pre_attn + KDA 123.5 -> 86.1 us (KDA +21 us over the 64.8 without it, standard KDA ~24);
+m = 16 54.4 (K1 split 53.1). Commit 2785f6c.
+
 **Next, in order:**
-1. Wide KDA task: one task a (request, head) instead of K1's (request, head, v-chunk): the gate MFMA, q / k
-   l2norm and conv run once a head instead of 8 times, the recurrence holds the 128 x 128 state in 512 threads
-   (32 f32 a thread), the gated norm reduces in the CTA (no ONRM exchange); 192 tasks at m = 128 = one round.
-2. Then one KDA-layer launch = pre_attn (+ KDA) + post_attn (T1 .. T6).
+1. One KDA-layer launch = pre_attn (+ wide KDA) + post_attn (T1 .. T6): core_out feeds o_proj inside the launch
+   (o_proj tiles wait for the heads of their K range), one plan, one peer buffer.
+2. KDA stage timeline (conv / gates / recurrence / norm per task) -- 21 us at m = 128 is one round of ~20 us tasks.
 2. Tile GEMM speed (all GEMMs run at ~2.6-3 TB/s of the ~5 TB/s an aiter hgemm reaches, section 10.4/10.6) and
    row-block pipelining of the chain at 256 / 384 rows.
 2. P2a (section 7): the planner (stage graph -> tasks -> CTAs by XCD) -> the launch. Then P2b/P2c (DSA front / back).
@@ -949,3 +952,21 @@ roundings (conv out, g1, o); end to end the in_proj rounding (5e-3) is amplified
 chunk recomputes the head's gate MFMA, q / k l2norm and conv: 1536 tasks at m = 128 (6 rounds) with 8x
 redundant front work -> the wide KDA task (Next 1).
 Results: `/shared_nfs/kimi-k31/results/pre_attn_kda_20261101/`.
+
+### 10.16 Wide KDA task (`stages/kda_wide.py`, mi355-4, 2026-11-02)
+
+One task a (request, head), the head in one CTA (K1's math and rounding; ReplaySSM ring only, the committed state
+read, never written): conv a channel a thread (384 threads: q|k|v x 128), f_a / beta polled once, the gate MFMA
+once (wave w rows 16 w ..), q / k l2norm, the 128 x 128 state in registers (KPT K columns a thread, 128 / KPT
+lanes a row, 32 / KPT rows a thread), gated RMSNorm a wave a token. 192 tasks at m = 128 (one round) vs K1's 1536.
+
+```text
+pre_attn + KDA, us (KDA alone rel L2 3.9-4.3e-3 at every KPT)   m 16    m 128
+K1 tasks (8 a head)                                               53.1    123.5
+wide, KPT 4 (32 lanes a row, 8 rows a thread)                     61.8     93.8
+wide, KPT 8                                                       55.3     86.7
+wide, KPT 16 (8 lanes a row, 2 rows a thread; default)            54.4     86.1
+```
+At m = 16 only 24 tasks run (K1's 192 spread better; equal within 1.3 us, so one path). The KDA tasks wait for
+all of in_proj (a head's q / k / v / g / f_a / beta columns span the whole N range), so the stage does not
+overlap in_proj; its 21 us at m = 128 is one round of tasks. Results: `/shared_nfs/kimi-k31/results/pre_attn_kda_20261101/`.

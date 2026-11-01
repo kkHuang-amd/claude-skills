@@ -5,12 +5,11 @@ Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in se
 ## CONTINUE HERE (handoff 2026-11-01 22:30, mi355-4 -- gsm8k + CUDA graphs done, A/B half done, m384 fault open)
 
 **Update 2026-11-01 22:30 (section 10.22):** eager gsm8k PASSES (wide 0.99 vs off 0.98), CUDA graphs WORK
-(wide widths captured, gsm8k 0.98 vs off 0.99), A/B wide run done (buckets 16..256), off-control A/B was running
-when the session stopped -> read `results/ab/wide_ab_off_20261101/summary.txt` (if empty, rerun it).
+(wide widths captured, gsm8k 0.98 vs off 0.99), A/B done (buckets 16..256): wide is SLOWER than off at c4 / c16.
 Code changes are UNCOMMITTED in `/sgl-workspace/sgl-amd-mono` (on top of 581b173): `wide.py` graph-safe KDA
 tables + widths limited to warmed buckets, `spec.py` debug logs removed, `layer_bench.py --no-t1 --restart`.
-**Next (new order):** (a) compare A/B on vs off (first look: wide c4 TPOT 8.72 ms vs doc baseline 7.8-7.9 -> may
-be SLOWER; profile c4 step if confirmed); (b) bucket 384 fault (10.22, deterministic bench repro); (c) commit code.
+**Next (new order):** (a) A/B done: wide SLOWER (TPOT c4 8.72 vs 7.72, c16 16.61 vs 15.70, c48 31.35 vs
+31.28) -> profile a c4 wide step (per-layer host work, SGLang routed experts, gathers); (b) bucket 384 fault (10.22, deterministic bench repro); (c) commit code.
 After any fault: `rm -f /tmp/gpucore*` AND `gpucore*` in the cwd of the crashed process (torchrun from the repo
 root left 133 GB in `/sgl-workspace/sgl-amd-mono`, filled `/`, killed a server with "No space left").
 
@@ -1035,7 +1034,8 @@ captured decode graphs)"; 4 wide_req answers correct.
 
 A/B (ab_bench, SIM acc 3.84, buckets 16..256 -> c48 steps with R > 32 on standard graphs),
 `results/ab/wide_ab_on256_20261101`: c4 TPOT 8.72 / c16 16.61 / c48 31.35 ms, prefill 8k 527.6 ms.
-Off control same day: `results/ab/wide_ab_off_20261101` (was running at handoff). Doc baselines (other days):
+Off control same day (`results/ab/wide_ab_off_20261101`): c4 7.72 / c16 15.70 / c48 31.28, prefill 527.2
+-> wide is SLOWER: c4 +13%, c16 +5.8%, c48 +0.2% (accept len equal 3.82-3.85). Next: profile a c4 wide step. Doc baselines (other days):
 c4 7.78-7.94, c16 15.58-16.18, c48 31.34-31.94.
 
 Faults:

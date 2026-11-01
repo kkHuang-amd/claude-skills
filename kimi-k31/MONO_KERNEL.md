@@ -2,7 +2,7 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-01 19:00, for the next session)
+## CONTINUE HERE (handoff 2026-11-01 20:00, for the next session)
 
 **Status:** S1 (c1, <= 8 rows) runs on K3.1 in the real A/B config (DCP8 + DSPARK, ReplaySSM ring):
 c1 TPOT 4.96 -> 4.49 ms (-9.5%), P90 ITL 6.24 -> 5.67. No server running on mi355-4; GPUs free
@@ -65,11 +65,16 @@ exchanged -> AG -> MoE front 2096 x 7168): 26-28 / 30-31 / 46-48 / 90-92 us at m
 standard path (F.linear + RCCL AR + add + F.rms_norm + F.linear) 43 / 58 / 76 / 110 (-17..-46%); section 10.11.
 Commit 9b02f20, pushed.
 
+**P2a step 6 done (2026-11-01 20:00):** chain timeline (`chain_bench.py --timeline`, section 10.12): the stages
+run back to back, each near its standalone cost (m = 128: o_proj 9 + push 6 + RS 3 + seam 9 + front 12 us); W
+prefetch and x from cached memory do not shorten the front, so the next wins are tile-GEMM speed and, at
+384 rows, row-block pipelining -- not placement. Front placed on the top CTAs (-1.6 us at 384). Commit f810a90.
+
 **Next, in order:**
-1. A stage timeline for the chain (per-CTA clock marks, as PR #13's `timeline`), to see where the 48 us at
-   m = 128 go (o_proj 23 + front ~20 standalone, so overlap is still small); then XCD-aware placement.
-2. Extend the chain backwards: T1 (MoE tail: latent AR -> latent norm -> latent up on owner columns + shared RS)
+1. Extend the chain backwards: T1 (MoE tail: latent AR -> latent norm -> latent up on owner columns + shared RS)
    and T2 (AttnRes seam on owner columns), then T3 (KDA at wide rows) -> one KDA-layer launch.
+2. Tile GEMM speed (all GEMMs run at ~2.6-3 TB/s of the ~5 TB/s an aiter hgemm reaches, section 10.4/10.6) and
+   row-block pipelining of the chain at 256 / 384 rows.
 2. P2a (section 7): the planner (stage graph -> tasks -> CTAs by XCD) -> the launch. Then P2b/P2c (DSA front / back).
 3. c1 leftovers (section 8/9): K1 in_proj ~2.4 TB/s vs hgemm 5.1 (~1-1.4 ms a step); router replicated per
    rank (drop the logits all-gather, ~5 us a layer); top-16 still 3.9 us.
@@ -833,3 +838,24 @@ linbf includes the front output memset; "part" leaves f32 partials for the consu
 16k launches a config re-checked clean (no random-delay stress in the chain yet). The standard column is torch
 ops, not SGLang's fused add-rmsnorm + custom AR; the endpoint A/B is the real comparison.
 Results: `/shared_nfs/kimi-k31/results/chain_post_attn_20261101/`.
+
+### 10.12 Chain timeline (mi355-4, 2026-11-01)
+
+Timeline build (`chain.post_attn(..., timeline=True)`, PR #13's LDS stamps): per CTA the clock at the start, each
+stage's first wait done and its end; `chain_bench.py --timeline` shows the last launch of a step behind warm
+launches. The GPUs' s_memrealtime clocks are NOT aligned on mi355-4 (hundreds of us apart): each rank is shown
+against its own earliest start. Medians, us (m = 128, o t64x64 ks1, front t128x128 ks8):
+
+```text
+oproj first tile 9.0 | oproj pushed 14.7 (last 17.5) | RS pieces in 17.2, done 18.8 | seam pieces 20.6,
+sum-of-squares exchange 23.0, pushed 27.8 | front x' in 29.3, done 41.1 (launch 43-44 per rank; 48.5 a launch
+with the memset and the gaps). m = 16: 3.9 / 8.6 / 11.4 / 16.8 / 17.5 / 23.5. m = 384: 17.5 / 33.2 / 39.3 / 56.9
+/ 63.3 / 85.5.
+```
+Each stage is close to its standalone cost and they do not overlap (the front waits for every row's x'). Tried at
+m = 16 / 128 / 384 (us): front tasks on the top CTAs 28.0 / 48.5 / 90.4 vs 28.0 / 48.5 / 92.0; + W prefetch into
+L2 during the wait 27.1 / 48.7 / 96.7 (no gain; slower at 384); timing probe with x' from a cached local buffer:
+front 11.6 us at 128 rows, unchanged -> neither W nor the uncached x' read bounds the front. The front alone
+(mma_bench 2096 x 7168) is 16.5 us at 128 rows (tgemm 18.4), 11.5 in the chain: it is the tile GEMM's
+~2.6 TB/s. Defaults: front_top on, prefetch off.
+Results: `/shared_nfs/kimi-k31/results/chain_timeline_20261101/`.

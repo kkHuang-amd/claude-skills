@@ -2,7 +2,7 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-02 04:00, for the next session)
+## CONTINUE HERE (handoff 2026-11-02 04:30, for the next session)
 
 **Status:** S1 (c1, <= 8 rows) runs on K3.1 in the real A/B config (DCP8 + DSPARK, ReplaySSM ring):
 c1 TPOT 4.96 -> 4.49 ms (-9.5%), P90 ITL 6.24 -> 5.67. No server running on mi355-4; GPUs free
@@ -115,10 +115,14 @@ routing rule identical to SGLang's on its logits (0%) and ours on our logits (0%
 of rows (logit rounding). Not yet checked on real data: T1 (MoE tail of layer 7) and the shared expert output
 (neither the shared MLP module nor its down_proj runs on the merged-front path). Commit c1daac5.
 
+**P2a step 15 done (2026-11-02 04:30):** the real-model check covers the WHOLE launch: layer 7's fused-front
+`_forward_fused` (prefix_sum), `_forward_routed` (latent partial) and `_forward_shared` (shared partial) feed
+T1 (t1 on, layer 7's up_proj + latent norm); layer 8's `_forward_shared` is the shared reference. Rows 32 / 128:
+mid (T1) 2.3-2.5e-3, shared 5.3-6.0e-3, the rest 3.7-6.6e-3 (from our own mid), routing rule 0% / 0% (10.20).
+Commit c488c55.
+
 **Next, in order:**
-1. Real-model check of T1 and the shared expert: find the merged-front path's shared / latent-partial tensors
-   (`kimi_k3.py` fused front ~l. 1700-1900, `_reduce_latent_and_shared`), hook them at layer 7, run t1=True.
-2. SGLang integration for c4..c48: the residual stream and bank stay column-sharded across KDA layers (convert at
+1. SGLang integration for c4..c48: the residual stream and bank stay column-sharded across KDA layers (convert at
    the DSA layers until P2b/c), weights folded at load (W_up x w_n, cw = score_norm x score_proj); endpoint A/B.
 3. KDA stage timeline (21 us at m = 128).
 2. Tile GEMM speed (all GEMMs run at ~2.6-3 TB/s of the ~5 TB/s an aiter hgemm reaches, section 10.4/10.6) and
@@ -1078,5 +1082,9 @@ rows (R x 8)   x        core_out   x'       h        latent   logits   top-16 ro
 routing: the noaux_tc rule on SGLang's logits = SGLang's ids (0%); ours = the rule on our logits (0%)
 ```
 The weight / layout conventions (in_proj rows, KDA weights, ring, o_proj, both seams, front rows, bias) hold on
-the real model. Not covered yet: T1 (layer 7's MoE tail) and the shared expert output. Logs:
+the real model. Not covered yet: T1 (layer 7's MoE tail) and the shared expert output.
+Second run (widechk4, T1 on, inputs from layer 7's fused front: `_forward_fused` prefix_sum, `_forward_routed`
+latent partial, `_forward_shared` shared partial; the decode path calls neither the shared MLP module nor
+`routed_expert_down_proj`): mid (T1) 2.3-2.5e-3, x 3.7e-3, core 6.1-6.6e-3, x' 4.0-4.5e-3, h 3.7-3.8e-3, latent
+5.0-5.2e-3, shared 5.3-6.0e-3, logits 2.5-3.1e-3, top-16 sets differing 6-13%, routing rule 0% / 0%. Logs:
 `/shared_nfs/kimi-k31/results/wide_check_real_20261102/`.

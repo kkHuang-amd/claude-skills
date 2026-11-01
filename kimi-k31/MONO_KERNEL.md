@@ -19,7 +19,7 @@ wide widths only with the env), `kimi_k31/wide.py` (step loop, KDA state hand-of
 S=/workspace/claude-skills/kimi-k31/scripts
 SGLANG_AMD_MONO_K31_WIDE=1 SGLANG_AMD_MONO_K31_WIDE_BUCKETS=16,32 bash $S/launch_server.sh wideN \
   --enable-amd-monokernel --disable-cuda-graph
-python3 /tmp/wide_req.py 4      # 4 concurrent greedy requests (script in 10.21); log: rg 'k31 wide\]' <log>
+python3 $S/wide_req.py 4        # 4 concurrent greedy requests; log: rg 'k31 wide\]' <log>
 rm -f /tmp/gpucore*             # AFTER ANY GPU FAULT: each crash leaves ~17 GB a rank in /tmp (filled / once)
 ```
 **Next, in order:**

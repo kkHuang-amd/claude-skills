@@ -50,22 +50,37 @@ def jit_of(launcher):
     raise RuntimeError("no compiled jit object")
 
 
-from sgl_amd_mono.kimi_k31.gfx950.stages import tile  # noqa: E402
 
-out = sys.argv[2] if len(sys.argv) > 2 else None
-for spec in sys.argv[1].split(","):
-    m, n, k, nb = map(int, spec.split(":"))
-    launch = tile.standalone(m, n, k, nb)
-    launch(0, 0, 0, stream=0)
-    for a in jit_of(launch)._mem_cache.values():
-        elf = code_object(a._ir_text)
-        keys = ("vgpr_count", "agpr_count", "private_segment_fixed_size", "group_segment_fixed_size")
-        print(spec, {kk: note(elf, b"." + kk.encode()) for kk in keys}, flush=True)
-        if out:
-            with tempfile.NamedTemporaryFile(suffix=".co") as f:
-                f.write(elf)
-                f.flush()
-                text = subprocess.run([OBJDUMP, "-d", "--no-show-raw-insn", f.name], capture_output=True,
-                                      text=True, check=True).stdout
-            os.makedirs(out, exist_ok=True)
-            open(f"{out}/tile_{spec.replace(':', '_')}.s", "w").write(re.sub(r"\s*//.*", "", text))
+
+def regs(launch):
+    """Compile ``launch`` (zero args) -> [(elf, {vgpr, agpr, scratch, lds})] a variant."""
+    import inspect
+
+    sig = inspect.signature(getattr(launch, "__wrapped__", None) or getattr(launch, "func", launch))
+    launch(*[0 for p in sig.parameters.values() if p.name != "stream" and p.kind is p.POSITIONAL_OR_KEYWORD],
+           stream=0)
+    keys = ("vgpr_count", "agpr_count", "private_segment_fixed_size", "group_segment_fixed_size")
+    return [(e, {k: note(e, b"." + k.encode()) for k in keys})
+            for e in (code_object(a._ir_text) for a in jit_of(launch)._mem_cache.values())]
+
+
+if __name__ == "__main__":
+    from sgl_amd_mono.kimi_k31.gfx950.stages import tile  # noqa: E402
+
+    out = sys.argv[2] if len(sys.argv) > 2 else None
+    for spec in sys.argv[1].split(","):
+        m, n, k, nb = map(int, spec.split(":"))
+        launch = tile.standalone(m, n, k, nb)
+        launch(0, 0, 0, stream=0)
+        for a in jit_of(launch)._mem_cache.values():
+            elf = code_object(a._ir_text)
+            keys = ("vgpr_count", "agpr_count", "private_segment_fixed_size", "group_segment_fixed_size")
+            print(spec, {kk: note(elf, b"." + kk.encode()) for kk in keys}, flush=True)
+            if out:
+                with tempfile.NamedTemporaryFile(suffix=".co") as f:
+                    f.write(elf)
+                    f.flush()
+                    text = subprocess.run([OBJDUMP, "-d", "--no-show-raw-insn", f.name], capture_output=True,
+                                          text=True, check=True).stdout
+                os.makedirs(out, exist_ok=True)
+                open(f"{out}/tile_{spec.replace(':', '_')}.s", "w").write(re.sub(r"\s*//.*", "", text))

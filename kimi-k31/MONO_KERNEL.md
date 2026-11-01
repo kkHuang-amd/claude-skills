@@ -21,13 +21,16 @@ SGLang: `/sgl-workspace/sglang-k31-amd` (editable install), dev_amd-based.
 1287/1319 (0.9757) vs off 1288 (0.9765), discordant 2 / 3 (McNemar p = 1.0), 1246/1319 identical
 generations, accept len 4.71 / 4.70 (section 10.1). P2a step 1 started: register-operand tile GEMM v0 is
 correct but 1.6x (m=16) to 4x (m=128) slower than tgemm; the structure is the cause (section 10.2).
+Section 10.3's "+25% at 8 waves" was a sweep artifact (HTI default); corrected in 10.4.
 
 **Next, in order:**
-1. **Decision for the user (section 10.3):** dense GEMMs at 128+ rows in the wide-row launch cost ~25% over
-   tgemm at 8 waves even with aiter's own kernel (in_proj 37.5 vs 29.8 us). Pick: (a) tile stage = aiter's
-   LDS/DMA structure as an in-launch stage, 128x128 tile, split-K 4 with f32 partials summed by the consumer;
-   (b) the same with a 1024-thread (16-wave) wide-row launch, the shape tgemm's winners use; (c) keep in_proj,
-   the MoE front and o_proj as tgemm launches and fuse only the seams / small ops between them.
+1. **GEMM placement decided by measurement (section 10.4): option (a)**, 512-thread launch. With
+   `use_half_tile_interleaved=False` (aiter's wrapper defaults it on, which rejected nearly every 8-wave config
+   in the first sweep) aiter hgemm at 8 waves ties or beats tgemm: in_proj 27.9 vs 30.1, MoE front 26.6 vs
+   27.6, latent up 18.4 vs 20.6, o_proj 10.9 vs 10.1 us; 16 waves is no better (28.3 / 27.1 / 18.4 / 12.0),
+   and PR #13's K2 spills at 1024 threads. Next: the tile stage = aiter's non-HTI kernel body as an
+   in-launch stage (t128x128x64x4, w2x2x2 or w2x4x1), split-K 4 with f32 partials; measure the consumer-side
+   sum (in_proj partials 4 x 128 x 6288 f32 = 12.9 MB) against aiter's atomic split-K.
 2. P2a (section 7) after that: column-slice collectives (tagged <= 0.9 MB, waitcnt-flag above, section 6.2)
    -> the planner (stage graph -> tasks -> CTAs by XCD) -> the launch. Then P2b/P2c (DSA front / back).
 3. c1 leftovers (section 8/9): K1 in_proj ~2.4 TB/s vs hgemm 5.1 (~1-1.4 ms a step); router replicated per
@@ -571,7 +574,7 @@ passes the wrapper's config check at 512 threads):
 tgemm's winners are 16-wave (e.g. t128x128x64x4 ks4 w4x4x1). Without split-K the 128x128 tile leaves
 ~200 CUs idle (49 tasks for in_proj) -> 2.7x; with split-K 4 (atomics) it is still +25%.
 
-### 10.3 Consequence for S2 (decision pending)
+### 10.3 Consequence for S2 (superseded by 10.4: the +25% came from the HTI default)
 
 At 128+ rows a dense GEMM inside a 512-thread launch costs ~+25% (best case, aiter structure + split-K) over
 tgemm; KDA layer at c16: in_proj + MoE front + latent up + o_proj ~ 90 us of tgemm a layer -> ~+20 us a layer
@@ -581,3 +584,26 @@ if moved in naively, against the S2 estimate of -8..-9 ms/step (section 2, ~-90 
 (b) as (a) in a 1024-thread wide-row launch (16 waves, tgemm's shape; 128 VGPRs a wave for every other stage);
 (c) keep in_proj / MoE front / o_proj as tgemm launches, the wide-row launch fuses only what lies between them
     (seams, norms, router / top-k / sort prologue, latent up owner slice): ~3-4 launches a layer instead of 1.
+
+### 10.4 8 vs 16 waves, HTI off (mi355-4, 2026-11-01) -> option (a)
+
+`hgemm_8wave_sweep.py` now sweeps use_half_tile_interleaved (the wrapper's default is True; HTI rejects
+k_waves > 1 and most 8-wave tiles, which is why 10.2's sweep saw only one config), block_k 64/128, stages 2-4,
+split-K 1/2/4; `WAVES=16` sweeps 1024-thread configs. M=128, us (graph-replayed, MALL-busting):
+
+```text
+shape          tgemm | 8-wave best                      ks1 best | 16-wave best              ks1 best
+6288x7168      30.1  | 27.9 t128x128x64x4 ks4 w2x2x2    40.7     | 28.3 t128x128x64x3 ks4 w2x8x1  51.6
+6016x7168      27.6  | 26.6 t128x128x64x4 ks4 w2x2x2    39.9     | 27.1 t128x128x64x4 ks4 w2x8x1  50.9
+7168x3584      20.6  | 18.4 t128x128x64x3 ks4 w4x2x1    23.1     | 18.4 t128x128x64x4 ks4 w2x8x1  28.1
+ 896x3584       7.0  |  8.0 t128x32x128x3 ks4 w4x2x1    19.5     | 10.5 t128x64x128x3 ks4 w4x4x1  26.5
+7168x1536      10.1  | 10.9 t128x64x64x4 ks2 w2x4x1     11.4     | 12.0 t128x64x128x3 ks2 w4x4x1  14.7
+sum of the 4 big shapes: tgemm 88.4, 8-wave 83.8, 16-wave 85.8 us a KDA layer
+```
+(all ks > 1 rows use aiter's atomic split-K; ks1 is 1.3-2.4x slower at the K=7168 shapes, so the in-launch
+stage needs a K split -- with consumer-summed f32 partials that is extra traffic, to be measured.)
+
+1024 threads for PR #13's stages (`scripts/mono_threads_isa.py`, compile only, THREADS patched in
+common.plan): KDA front 205 -> 103 VGPR, no spill (twice the waves, half the chunks a wave); K2 layer_post
+219 -> 128 VGPR with 324-400 B scratch at s = 1 / 4 / 8 (a fixed-size stage, not the row count).
+-> (b) buys nothing on the GEMMs and costs spills; (a) is the plan.

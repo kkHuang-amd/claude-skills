@@ -2,12 +2,12 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-01)
+## CONTINUE HERE (handoff 2026-11-01 11:00, for the next session)
 
 **Status:** S1 (c1, <= 8 rows) runs on K3.1 in the real A/B config (DCP8 + DSPARK, ReplaySSM ring):
 c1 TPOT 4.96 -> 4.49 ms (-9.5%), P90 ITL 6.24 -> 5.67. No server running on mi355-4; GPUs free
 (2 external ~1.2 GB processes on one GPU are not ours).
-**Code:** `/sgl-workspace/sgl-amd-mono` branch `k31/mono-s1` @ 6e50a20, pushed to the fork
+**Code:** `/sgl-workspace/sgl-amd-mono` branch `k31/mono-s1` @ 7a76c4e, pushed to the fork
 kkHuang-amd/sgl-amd-mono (remote `fork`; `origin` = sgl-project). Base = PR #13 head 88aee67 (open,
 billishyahao). Commits: d7fb03e `kimi_k31` spec (DCP8, dsa backend, drift digests on dev_amd) | 5fb46b4 |
 baa73de K1 on the ReplaySSM ring (`KdaPreBuild.ring`) + `test/kernels/test_kimi_k31_k1_ring.py` | 8888d88
@@ -23,13 +23,15 @@ generations, accept len 4.71 / 4.70 (section 10.1). P2a step 1 started: register
 correct but 1.6x (m=16) to 4x (m=128) slower than tgemm; the structure is the cause (section 10.2).
 Section 10.3's "+25% at 8 waves" was a sweep artifact (HTI default); corrected in 10.4.
 
+**P2a step 1 done:** tile GEMM stage for m = 16..384, own FlyDSL (`stages/tile_mma.py`; no aiter gemm), split-K
+merged by lane-contiguous packed-bf16 atomics after an LDS shuffle ("linbf"); ties or beats tgemm on in_proj /
+MoE front / latent up at every bucket, o_proj +20-25% at m=128 / 384 (bucket table: section 10.6).
+
 **Next, in order:**
-1. **Tile GEMM stage done for m = 16..384 (sections 10.5-10.6)**: own FlyDSL (`stages/tile_mma.py`), split-K
-   merged by lane-contiguous packed-bf16 atomics after an LDS shuffle ("linbf"); ties or beats tgemm on in_proj /
-   MoE front / latent up at every bucket, o_proj +20-25% at m=128 / 384. Bucket table in 10.6. Open: who zeroes
-   the atomic outputs (e.g. the consumer after it reads, or the previous launch), and atomics make the sum
-   order nondeterministic ("part" f32 partials are deterministic at 8x the consumer's read bytes).
-2. P2a (section 7) after that: column-slice collectives (tagged <= 0.9 MB, waitcnt-flag above, section 6.2)
+1. Two decisions for the user before wiring the tile stage in: (a) who zeroes the atomic outputs (the consumer
+   after it reads, or the previous launch); (b) bit-reproducibility: linbf atomics make the K-slice sum order
+   nondeterministic, "part" f32 partials are deterministic at ~1-2 us a GEMM + ~8x the consumer's read bytes.
+2. P2a (section 7): column-slice collectives (tagged <= 0.9 MB, waitcnt-flag above, section 6.2)
    -> the planner (stage graph -> tasks -> CTAs by XCD) -> the launch. Then P2b/P2c (DSA front / back).
 3. c1 leftovers (section 8/9): K1 in_proj ~2.4 TB/s vs hgemm 5.1 (~1-1.4 ms a step); router replicated per
    rank (drop the logits all-gather, ~5 us a layer); top-16 still 3.9 us.
@@ -45,6 +47,7 @@ bash $S/launch_server.sh <tag> --enable-amd-monokernel          # mono on; omit 
 AB_CONC="1" bash $S/ab_bench.sh <tag>                            # c1 TPOT -> results/ab/<tag>/summary.txt
 SIM=0 bash $S/launch_server.sh <tag> --enable-amd-monokernel; NUM=1319 THREADS=1 TEMP=0 bash $S/gsm8k_gate.sh <tag> <log>
 cd /tmp && python /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k31/tile_bench.py --time --m 16,128 --nb 1,2 --ks 1,4
+cd /tmp && python /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k31/mma_bench.py --time --m 128 --cfg 128:128:2:4:4:2 --mode part,linbf
 python $S/tile_isa.py 128:6288:7168:1 /tmp/tile_isa      # vgpr / scratch / lds + disassembly, no launch
 python $S/hgemm_8wave_sweep.py 128                        # aiter hgemm at 8 waves vs tgemm
 cd /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k3 && torchrun --nproc-per-node 8 check_k2.py   # + check_moe.py, time_k2.py

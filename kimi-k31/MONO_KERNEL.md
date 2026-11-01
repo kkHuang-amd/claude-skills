@@ -14,7 +14,7 @@ baa73de K1 on the ReplaySSM ring (`KdaPreBuild.ring`) + `test/kernels/test_kimi_
 `test/kernels/kimi_k3/time_k2.py` (K2 time + stage timeline at TP8) | 6e50a20 K2 route by wave-max rounds +
 latent quantized once. The ring and route commits change `kimi_k3` code: coordinate with #13 before upstream.
 9cba298 (2026-11-01, pushed): `sgl_amd_mono/kimi_k31/gfx950/stages/tile.py` (tile GEMM v0) +
-`test/kernels/kimi_k31/tile_bench.py`; 06263ca: `stages/tile_mma.py` (LDS tile GEMM v1) + `mma_bench.py`.
+`test/kernels/kimi_k31/tile_bench.py`; 06263ca: `stages/tile_mma.py` (LDS tile GEMM v1) + `mma_bench.py`; 7a76c4e: split-K merge modes (linbf).
 SGLang: `/sgl-workspace/sglang-k31-amd` (editable install), dev_amd-based.
 
 **Done 2026-11-01 (mi355-4):** S1 accuracy gate PASSES -- gsm8k1319 greedy THREADS=1 real draft: mono on
@@ -24,11 +24,11 @@ correct but 1.6x (m=16) to 4x (m=128) slower than tgemm; the structure is the ca
 Section 10.3's "+25% at 8 waves" was a sweep artifact (HTI default); corrected in 10.4.
 
 **Next, in order:**
-1. **Own FlyDSL tile GEMM v1 works (section 10.5)**, no aiter gemm: `stages/tile_mma.py`, 128x128 tile,
-   w2x4, BK 64 through padded double-buffered LDS, split-K 4 with f32 partials: in_proj 30.1 (tgemm 29.4),
-   latent up 19.0 (21.3), owner slice 896x3584 6.3 (7.1, t128x32 w8x1 ks8), o_proj 11.4 (10.1) us at m=128.
-   Next: how the partials are summed in the launch (partial bytes, e.g. in_proj 12.9 MB, vs bf16 packed
-   atomics as aiter does), then m = 16 / 48 / 256 / 384 buckets, then wire it into the wide-row planner.
+1. **Tile GEMM stage done for m = 16..384 (sections 10.5-10.6)**: own FlyDSL (`stages/tile_mma.py`), split-K
+   merged by lane-contiguous packed-bf16 atomics after an LDS shuffle ("linbf"); ties or beats tgemm on in_proj /
+   MoE front / latent up at every bucket, o_proj +20-25% at m=128 / 384. Bucket table in 10.6. Open: who zeroes
+   the atomic outputs (e.g. the consumer after it reads, or the previous launch), and atomics make the sum
+   order nondeterministic ("part" f32 partials are deterministic at 8x the consumer's read bytes).
 2. P2a (section 7) after that: column-slice collectives (tagged <= 0.9 MB, waitcnt-flag above, section 6.2)
    -> the planner (stage graph -> tasks -> CTAs by XCD) -> the launch. Then P2b/P2c (DSA front / back).
 3. c1 leftovers (section 8/9): K1 in_proj ~2.4 TB/s vs hgemm 5.1 (~1-1.4 ms a step); router replicated per
@@ -626,3 +626,28 @@ Prefetch depth 2 / 4 / 6 changes nothing (in_proj 30.1 / 30.2 / 30.3): not load-
 for the big shapes (32.8). The stage excludes the partial sum: a separate torch sum adds 3.8 (in_proj) to
 10 us (o_proj, mostly its launch); fused into the consumer only the bytes remain (in_proj 4 x 128 x 6288 f32
 = 12.9 MB written + read). aiter's 27.9 uses packed bf16 atomics instead -- the next comparison.
+
+### 10.6 Split-K merge and m buckets (mi355-4, 2026-11-01)
+
+Merge modes (`--mode`): part = f32 partials [ks, m, n] for the consumer; atom / atombf = f32 / packed-bf16 adds
+straight from the MFMA layout (a lane adds 4 columns of one row: 16 rows a wave instruction); lin / linbf =
+the f32 tile shuffled through LDS (aliasing the x / W buffers) and added lane-contiguous (a wave covers
+whole 64 B lines, as aiter does). Masked lanes add at the buffer end (0x7FFFFFFF + 4 j wrapped and faulted).
+m=128, t128x128 w2x4 ks4, us: in_proj part 28.7 / atom 59.4 / atombf 41.0 / lin 32.5 / linbf 30.2;
+o_proj 11.3 / 50.3 / 28.8 / 18.4 / 12.7 -> linbf: the consumer reads plain bf16 (1.6 MB for in_proj vs 12.9 MB
+of partials), rel L2 3.2e-3 (bf16 rounding a K slice, as tgemm's own split-K).
+
+Best linbf config a bucket (us, ours / tgemm; tile, ks):
+
+```text
+m     in_proj 6288x7168          latent up 7168x3584        owner 896x3584          o_proj 7168x1536
+16    16.4 / 18.7 t16x128 ks4    9.8 / 11.1 t16x128 ks4     5.0 / 4.7 t16x128 ks8   5.8 / 6.1 t16x128 ks4
+32    17.6 / 20.5 t32x128 ks4    10.7 / 12.9 t32x128 ks4    4.9 / 5.0 t16x128 ks8   6.5 / 6.3 t32x128 ks4
+48    21.5 / 22.9 t48x128 ks4    12.0 / 15.2 t48x128 ks4    5.0 / 5.3 t16x128 ks8   7.6 / 7.5 t48x128 ks4
+128   30.2 / 30.1 t128x128 ks4   19.5 / 20.3 t128x128 ks4   6.5 / 7.1 t128x32 ks8   12.7 / 10.2 t128x128 ks4
+256   46.3 / 51.5 t256x128 ks4   28.8 / 62.2 t128x128 ks2   10.1 / 9.6 t128 ks8     16.9 / 27.7 t128x128 ks2
+384   64.7 / 69.1 t192x128 ks2   37.2 / 36.6 t192x128 ks2   11.6 / 12.9 t128 ks8    22.1 / 18.3 t192x128 ks2
+```
+Waves: bm 16 / 48 -> w1x8, bm 32 / 128 -> w2x4, bm 192 / 256 -> w4x2; bm = m rounded to 16 up to 48. tgemm's
+m=256 entries look untuned (7168x3584 62 us). Repro: `mma_bench.py --time --m 16,32,48 --cfg 16:128:1:8:4:2,...
+--mode linbf` (cfg = bm:bn:wm:wn:ks:depth; wm x wn must be 8).

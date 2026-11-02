@@ -2,7 +2,32 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-02 12:30, mi355-4 -- 10.25 root-caused: ROCm LLVM ALSO miscompiles an SGPR spill lane; fix = cut SGPR pressure)
+## CONTINUE HERE (handoff 2026-11-02 13:30, mi355-4 -- SGPR pressure cut (1048 -> ~50 spills), fault matrix clean on both compilers, section 10.26)
+
+**Status:** the wide layer launch no longer faults: SGPR spills cut from ~1100 to ~50 (m128) / ~140 (m384) by
+per-stage kernel-arg reloads, region addresses formed at use, a non-unrolled top-16 and per-wave peer puts
+(section 10.26). Fault matrix (2 compilers x nvb x t1 x step x 6 buckets, 50 runs): 0 faults; layer 2-5% faster.
+All other kimi_k31 kernel benches PASS. Code uncommitted. Server not run yet with these edits. GPUs free.
+**Next, in order:**
+1. Server gsm8k200 (DFLASH, CUDA graphs, `SGLANG_AMD_MONO_K31_WIDE=1`, default buckets 16..384, THREADS 16 and 48),
+   bundled LLVM first (default), then `SGLANG_AMD_MONO_ROCM_LLVM=/opt/rocm/llvm`. Pass: no fault, gsm8k within the
+   run-to-run band of mono-off (0.975-0.98 at 200).
+2. Remove `# DEBUG-K31` hooks (layer.py dstop / K31_DBG_LLVM, layer_bench K31_DBG_PAD / K31_DBG_PTRS / K31_DBG_OWN,
+   rocm_codegen K31_DBG_ROCM_DUMP), split commits (K1 DFLASH spec, SGPR pressure, bench), ask before pushing.
+3. Then: A/B wide vs off (wide was slower at c4 / c16 before, 10.22), report both compiler bugs (spill lane,
+   waterfall clobber) with the 10.24-10.26 evidence; decide whether `rocm_codegen` is still needed.
+**Repro (8 GPUs, from /tmp):**
+```bash
+/shared_nfs/kimi-k31/results/m384_fault_20261102/k31_spill.sh <tag> <rocm|bundled> --rows 128,384 --nvb-a 3 --write-a --nvb-m 4
+OUT=/tmp/m.txt /shared_nfs/kimi-k31/results/m384_fault_20261102/k31_matrix.sh     # full matrix, ~45 min
+```
+**Code state (uncommitted, /sgl-workspace/sgl-amd-mono on k31/mono-s1 @ ad8388a):** previous handoff's edits plus
+`common/ops.py` (sfresh64, KernArgs, sload64, uniform64), `gfx950/layer.py` (per-stage `ka`), `stages/coll.py`
+(lazy `_Context`, `put_each_peer`), `stages/moe_front.py` (top-16 loop, put_each_peer), `chain.py` / `pre_attn.py`
+(put_each_peer), `layer_bench.py` (wide.CFGS fallback, near-tie-aware own-logits check). Full diff:
+`/shared_nfs/kimi-k31/results/m384_fault_20261102/26_sgl_amd_mono_worktree.diff`.
+
+### Previous handoff (2026-11-02 12:30, superseded above): 10.25 root-caused: ROCm LLVM ALSO miscompiles an SGPR spill lane
 
 **Status:** 10.25 root-caused (section 10.25): with ROCm LLVM the T5 MLP seam's bank descriptor is reloaded from
 spill lanes holding (bank.lo, cw_a.hi): ROCm LLVM 23 overwrites an SGPR-spill lane, the same class of bug as the
@@ -1340,3 +1365,30 @@ This works around the backend bug rather than fixing it; a minimal LLVM reproduc
   (step >= 8, t1 off, nvb 1/1) and not others is code shape -> allocation, as in 10.24. The server's m128 l68 t0
   fault is likely the same (not traced). Fix: cut SGPR pressure (10.24 plan); the compiler swap only moves the bug.
   Artifacts: results dir `25_*` (IR, ISA, gdb log of rank 2, chase output), `rlane.py`, `k31_gdb_ptr.sh`.
+
+### 10.26 SGPR pressure cut: no fault on either compiler (mi355-4, 2026-11-02)
+
+Evidence and numbers: `/shared_nfs/kimi-k31/results/m384_fault_20261102/FINDINGS.md` (update 12:30-13:30),
+`matrix_sgpr_20261102.txt`; diff `26_sgl_amd_mono_worktree.diff`.
+- What kept SGPRs live across the launch: all 34 kernel args (loaded at the entry), every region's `_own` and the
+  8 peer bases (formed at the entry by `region_context`), scratch region pointers, and GVN merging equal address
+  math of different stages (T2 / T5 shared one bank rsrc, the 10.25 victim).
+- Edits: (1) `KernArgs`: a stage (or task loop body) re-reads the args it uses from the kernarg segment through
+  an opaque `s_mov_b64` (inline asm with side effects) of the segment pointer, so the loads are neither merged
+  nor hoisted; the layout comes from the kernel's annotations. (2) `region_context`: `<name>_own` formed at use,
+  peer bases read at use with `sload64` (scalar load, address readfirstlane'd). (3) top-16 routing as a
+  non-unrolled loop; a taken expert's key ORed to NaN / -inf instead of 14 live "free" masks (bit-identical
+  picks and weights). (4) `put_each_peer`: lane 0 of wave p puts to rank p instead of `if tid == p` x 8.
+- (4) was forced by a second bundled-LLVM bug: with (2) the 8 `tid == p` branches became a switch on tid with
+  the put merged behind a per-lane address -> waterfall loop whose `v_mov v6, -1 / v7, 0x27000` overwrite the
+  rsrc address VGPRs it loops on -> fault at 0x7001_0000_0000 on all ranks (ROCm LLVM compiled it correctly).
+- Spills (ROCm, 10.25 repro m128 nvb 1/1 t1 off l8): 1048 -> 688 -> 249 -> 59. t1 on a3w m4: m128 ~51, m384
+  ~131-150 (was ~1100). Remaining m384 spills are inside stage bodies; moving the GEMM A addresses into the tile
+  loops did not help (reverted).
+- Speed (`us: layer`, t1 on, a3w m4): bundled m128 173.6 -> 165.8, m384 343.4 -> 335.7; ROCm 166.0 / 336.0.
+- Fault matrix, 50 runs x 6 buckets (16..384, bench now uses `wide.CFGS` for 64 / 256): 0 faults on both
+  compilers. One "own logits: 1 rows" FAIL (rocm a0 m0 s68 rows 64), not reproduced in 60-replay stress; it is
+  a 16th / 17th near-tie under the kernel's v_exp + v_rcp sigmoid (1-3 ulp off torch), seen before these edits
+  in 10.24; the bench now ignores swaps of keys closer than 1e-6 (and w_own uses identical-id rows only).
+- Other kernels on the edited code: chain / pre_attn / coll / gemm_coll / ag_gemm benches PASS; coll flag stress
+  18 x 40020 launches, 0 mismatches.

@@ -10,7 +10,7 @@ SGLang: sglang-k31-amd at origin/dev_amd b588cf7952, unmodified. The open questi
 wide was SLOWER than off (10.22, DSpark, SIM 3.84: c4 8.72 vs 7.72, c16 16.61 vs 15.70, c48 31.35 vs 31.28 ms);
 the layer launch is now 2-5% faster but that has not been measured end to end. Mode: medium (high if wide is
 still slower and the step needs profiling). GPUs free, no server.
-**Progress (mi355-4, 2026-11-02): (a) / (b) / (c) done -> section 10.27: wide SLOWER (c4 +12%, c16 +4%, c48 +5%), stays opt-in; next is item 3 (profile a c4 wide step).**
+**Progress (mi355-4, 2026-11-02): (a) / (b) / (c) done -> section 10.27: wide SLOWER (c4 +12%, c16 +4%, c48 +5%), stays opt-in. c4 profile: +2.8 ms/step is conv-window glue in wide.py, the launch ties the standard chain (10.27).**
 **Next, in order (one server at a time; ~20 min to ready each, kill by the PID in logs/server_<tag>.pid):**
 1. Three servers, same DFLASH config, SIM=1 (simulated accept 3.84, so TPOT compares at equal acceptance),
    bundled LLVM (default), each followed by `ab_bench.sh <tag>` (decode 8k/1k c4 / c16 / c48 + prefill 8k):
@@ -1480,3 +1480,22 @@ never take it; the DFlash2 draft has no mono spec (normal forward). S1's gain is
 pattern as 10.22 (DSpark: +13% / +5.8% / +0.2%); the 2-5% layer speedup of 10.26 does not show. Server ready took
 1370 s vs ~150 s for (a) / (b) (decode graph capture ~11 s per bs with wide). Log: 68 covered layers, buckets 16..384,
 captures [] under DFLASH. Decision: wide stays opt-in. Next: profile one c4 wide step (Next item 3).
+
+c4 trace (capture_trace.sh c4 8k/1k, start after 2 prefill batches; TP0; breakdowns in
+`results/ab/dflash_wide384_20261102/trace_breakdown_c4_{wide,off}.txt`, raw traces deleted):
+```text
+VERIFY step (m32)        off 27.12 ms   wide 30.85 ms (+3.73)   both idle 0% -> GPU time, not host
+  elementwise            0.13           2.95  (+2.82)   68 x 6 gather / index_put / cat
+  kda+gemm+comm+attn_res+norm  12.65    13.20 (+0.55)   the launch vs the standard chain
+  moe                    10.83          10.83
+one KDA layer (layer 4)  off 234 us: 13 kernels before MoE = 113.5 us (AR, latent tail, attn_res, in_proj,
+                         KDA verify, gated norm, o_proj, AR, agg, shared gate_up, situ, shared down)
+                         wide 267-281 us: launch 113-117 us + 6 glue kernels ~30 us + the same MoE ~120 us
+```
+The glue is `wide.py` conv-window staging, not compute: before the launch `_kda_table` gathers conv state
+into `self.stage` (`self.stage[slots, :, :3] = conv[i][slots].mT`: gather + index_put), after it
+`_kda_finish` gathers conv[i][slots] and stage[slots], cats, and index_puts `intermediate_conv_window`.
+Even without the glue the m32 launch only TIES the standard chain (113-117 vs 113.5 us), so at c4 wide can at best
+match off. Next options: (1) launch reads conv state from the cache by st_idx and writes the verify windows
+itself (removes ~2 ms / step at c4, wide ~= off); (2) make the launch itself faster than the chain (the only way
+to a gain); check the c16 m128 layer the same way before deciding.

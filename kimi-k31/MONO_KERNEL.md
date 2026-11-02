@@ -2,27 +2,29 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-02 10:40, mi355-4 -- bucket-384 fault ROOT-CAUSED: compiler miscompile under SGPR pressure, section 10.24)
+## CONTINUE HERE (handoff 2026-11-02 12:00, mi355-4 -- bucket-384 fault FIXED by ROCm LLVM codegen, section 10.24)
 
-**Status:** the wide layer launch's bucket-384 fault is an AMDGPU backend miscompile under extreme SGPR pressure
-(`.sgpr_spill_count` 1105, `.sgpr_count` 106, `.vgpr_count` 254), not a size bug (K1 class) and not a race. T5's
-`_rs_piece` store (chain.py:114) takes its `prefix_out` descriptor from a spill slot that last held
-`par*half + offs["agf"]` (halves swapped) -> base 0x0000_6000_0000_0000. LLVM IR is correct. Compiler knobs do not
-help (`amdgpu-spill-sgpr-to-vgpr=false` still faults and is ~2x slower). Fix = cut SGPR pressure (10.24).
-**Now:** item 1 of the pressure plan (lazy addresses: `coll.region_context` without eager `_own` / `peer_bases`,
-scratch region pointers at use). Owner mi355-4, code in /sgl-workspace/sgl-amd-mono (uncommitted).
-**Pass criteria:** `.sgpr_spill_count` near 0 (ISA via `FLYDSL_DUMP_IR=1 FLYDSL_DEBUG_DUMP_ASM=1`), the repro
-below no longer faults, layer_bench PASS, `us: layer` m128 <= 173.6 / m384 <= 343.7 (t1 on, nvb a3w m4).
+**Status:** the bucket-384 fault is FlyDSL 0.4.1's bundled AMDGPU backend: the same LLVM IR through ROCm's LLVM
+(AMD clang 23.0.0git 8f497e09) is correct. New `sgl_amd_mono/common/rocm_codegen.py` routes FlyDSL device codegen
+through ROCm clang (LLVM IR -> hsaco; FlyDSL's own FLYDSL_COMPILE_LLVM_DIR path fails on MLIR syntax). With it the
+repro no longer faults and every layer_bench size / nvb / capture variant PASSes at the same speed (+-1%). Bundled
+still faults on the repro. Cutting SGPR pressure locally did not work (spills 1078 -> ~1000); not pursued now.
+All code uncommitted in /sgl-workspace/sgl-amd-mono (rocm_codegen.py, layer_bench.py option + per-replay barrier,
+moe_front.py CM_SYS logits read, DEBUG-K31 hooks in layer.py / layer_bench.py).
+**Next:** (1) wire `rocm_codegen.install()` into the server's mono init behind `SGLANG_AMD_MONO_ROCM_LLVM`
+(all mono kernels then compile through ROCm LLVM), check cold compile time; (2) gsm8k200 TEMP 0 THREADS 16, DFLASH,
+CUDA graphs, `SGLANG_AMD_MONO_K31_WIDE=1` with buckets up to 384, plus mono S1 only (K1/K2 now ROCm-compiled too);
+(3) remove DEBUG-K31 hooks, commit (ask the user); (4) report to FlyDSL with the IR + chase.py evidence.
+Then the old list below from its item 3 (DFLASH re-baseline, c4 wide profile).
 **Repro (8 GPUs, ~25 s warm, from /tmp):**
 ```bash
-ulimit -c 0; torchrun --nproc-per-node 8 /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k31/layer_bench.py \
-  --rows 384 --nvb-a 3 --write-a --nvb-m 4 --no-t1        # faults today; rm -f /tmp/gpucore* after
+ulimit -c 0; B=/sgl-workspace/sgl-amd-mono/test/kernels/kimi_k31/layer_bench.py
+torchrun --nproc-per-node 8 $B --rows 384 --nvb-a 3 --write-a --nvb-m 4 --no-t1        # bundled: faults
+SGLANG_AMD_MONO_ROCM_LLVM=/opt/rocm/llvm torchrun --nproc-per-node 8 $B --rows 384 --nvb-a 3 --write-a --nvb-m 4 --no-t1  # no fault
+rm -f /tmp/gpucore*     # --no-t1 always FAILs numerically (bench does not feed mid): fault check only
 ```
-**NEXT SESSION, in order:** (1) SGPR pressure items 1-3 of 10.24, measure after each; (2) then the old list
-below from its item 2 (commit wide / DFLASH edits, gsm8k with wide on, DFLASH re-baseline, c4 wide profile).
-Remove the `# DEBUG-K31` hooks (layer.py `K31_DBG_STOP` / `K31_DBG_LLVM`, layer_bench.py `K31_DBG_PAD`) before
-any commit.
 
+### Previous handoff (2026-11-02 10:40, root cause; superseded above)
 ### Previous handoff (2026-11-02 09:45, K1 under DFLASH root-caused + fixed, section 10.23)
 
 **Status:** root cause found and fixed (option B, no K1-decline mitigation). K1's scratch layout grows with the
@@ -1220,3 +1222,19 @@ Plan (measure spill count + `us: layer` + the repro after each):
    hoisted back to the entry).
 3. Route top-16: do not fully unroll (loop over k) so the per-compare masks do not all stay live.
 This works around the backend bug rather than fixing it; a minimal LLVM reproducer is a later item.
+
+10.24, continued (mi355-4, 2026-11-02 11:00-12:00):
+- ROCm LLVM 23 (`/opt/rocm/llvm/bin/clang -O3`) on the same IR: spills about the same (1097), but the chain.py:114
+  descriptor traces back to the entry kernarg load at byte 0x28 = prefix_out: correct. So the bug is the bundled
+  backend. `FLYDSL_COMPILE_LLVM_DIR=/opt/rocm/llvm` fails (ROCm mlir-opt rejects the bundled MLIR's rocdl syntax).
+- `sgl_amd_mono/common/rocm_codegen.py`: `install(llvm_dir)` sets FLYDSL_COMPILE_LLVM_DIR (FlyDSL then takes its
+  external path and keys its cache on it) and replaces that path's codegen: gpu.module -> LLVM IR -> ROCm clang
+  (`-O3 -nogpulib -mcode-object-version=6`) -> hsaco -> `gpu.binary`. Results: repro no fault (bundled still
+  faults); layer_bench rows 16 / 32 / 128 / 384 x (nvb 0, nvb a3w m4, + capture) all PASS on both compilers,
+  `us: layer` within +-1% (m384 a3w m4: ROCm 341.8, bundled 343.4).
+- Local SGPR-pressure edits (per-stage contexts, route picks folded per k): spills 1078 -> 987 / 1037, no speed
+  change; reverted. Per-stage working sets are near the limit on their own; K31_DBG_STOP leaves loop bodies in
+  the code, so spill sweeps with it are meaningless.
+- layer_bench "own logits: 1 rows" FAILs (rare, both compilers) were a bench race: a peer's next replay pushed
+  logits into this rank's buffer while it read them for the check. Fixed with a sync + barrier per replay
+  (6 runs x 2 sizes x 40 replays: 0 rows). route_row now reads the gathered logits with CM_SYS (hardening).

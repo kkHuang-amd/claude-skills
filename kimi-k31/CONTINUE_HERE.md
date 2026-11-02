@@ -1,6 +1,6 @@
 # Kimi-K3.1 — CONTINUE HERE
 
-Owner node: mi355-4. Last updated 2026-11-02 10:40.
+Owner node: mi355-4. Last updated 2026-11-02 12:00.
 
 **RULES: every optimization must follow `NUMERICS_RULES.md`** (linear ops / shared expert / MoE combine / AG-RS-AR
 in BF16, KDA state FP32, KV FP8 ok, MoE a4w4 + MX dispatch ok, no static EPLB).
@@ -10,7 +10,9 @@ nblocks >= 2 and hit the KV free list); gsm8k200 0.975, fix uncommitted in sgl-a
 HERE / section 10.23.**
 **2026-11-02 10:40 (mi355-4): mono wide bucket-384 fault root-caused: AMDGPU backend miscompile under extreme SGPR
 pressure (1105 SGPR spills), not a size bug or race -> `MONO_KERNEL.md` section 10.24.**
-**NEXT SESSION: `MONO_KERNEL.md` CONTINUE HERE (cut SGPR pressure, lazy addresses first).**
+**2026-11-02 12:00 (mi355-4): fixed by compiling mono kernels with ROCm LLVM instead of FlyDSL's bundled LLVM
+(`sgl_amd_mono/common/rocm_codegen.py`, uncommitted): repro clean, all layer_bench variants PASS, same speed.**
+**NEXT SESSION: `MONO_KERNEL.md` CONTINUE HERE (wire ROCm codegen into the server, gsm8k with wide on).**
 
 **2026-11-02 (mi355-4):** sglang-k31-amd moved to the rewritten `origin/dev_amd` b588cf7952 (DFlash2 drafts on ROCm
 DCP, A4W4 MoE); new draft `/shared_nfs/RadixArk/K31-DFlash2-MLA5-Preview1027-Step29301-SWA1024` (5 SWA-1024 MLA

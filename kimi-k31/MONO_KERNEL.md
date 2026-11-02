@@ -2,6 +2,37 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
+## CONTINUE HERE (handoff 2026-11-02 09:00, mi355-4 -- NEW SESSION: root-cause K1 under DFLASH, section 10.23)
+
+**Task (user, 2026-11-02): option B = find the root cause of mono S1's K1 breaking DFLASH serving.** Do NOT
+apply the "K1 declines under DFLASH" mitigation unless asked. Rules: `NUMERICS_RULES.md`.
+**State:** sglang-k31-amd detached at `origin/dev_amd` b588cf7952. Uncommitted: sgl-amd-mono (581b173 +
+wide graph-safety, spec DFLASH accept, layer_bench flags) and `# DEBUG-K31` prints in sglang-k31-amd
+`layers/attention/dsa/dsa_indexer.py`, `layers/attention/hybrid_linear_attn_backend.py` and sgl-amd-mono
+`kimi_k3/gfx950/k1.py` (env SGLANG_DEBUG_SLOTS / SGLANG_DEBUG_NO_K1 / SGLANG_DEBUG_INDEXK). No server running.
+**Facts (10.23):** fails only with mono S1 + K1 + DFLASH, when request A has had S1 (R = 1) verify steps and
+request B then prefills; DSpark fine; K1 forced off fine; THREADS=1 fine. Faults: DSA indexer kernels read 1-2
+pages past a buffer end; without a fault, requests read each other's state. K1's own SGLang writes (ring,
+conv window hand-off, bank count) verified in bounds.
+**Repro (eager, ~2.5 min load, fails within seconds):**
+```bash
+ulimit -c 0; S=/workspace/claude-skills/kimi-k31/scripts   # or the temp worktree copy
+D=/shared_nfs/RadixArk/K31-DFlash2-MLA5-Preview1027-Step29301-SWA1024
+SIM=0 bash $S/launch_server.sh k1dbg --enable-amd-monokernel --speculative-algorithm DFLASH \
+  --speculative-draft-model-path $D --cuda-graph-backend-prefill disabled --disable-cuda-graph
+python3 $S/wide_req.py 4     # contamination or fault; SGLANG_DEBUG_NO_K1=1 at launch -> clean
+rm -f /tmp/gpucore*          # after any fault
+```
+**Next ideas, in order:** (1) snapshot req_to_token rows, the KV / index-K allocator free list and the
+DFlash draft pool's page table before and after each S1 step (eager, rank 0) to find which step writes what;
+(2) diff what SGLang's KDA verify does under DFLASH vs DSPARK that K1 replaces (forward_metadata fields,
+kv_loc_plan, DFlash verify epilogue / accept path using target outputs); (3) tap 91 (DSA 91 -> DSA 92) is
+the only target tap DSpark lacks; (4) K1 + DFlash at TP8 with HIP_LAUNCH_BLOCKING=1 / AMD_SERIALIZE_KERNEL=3 to
+see whether the first bad access is a K1 launch.
+**Pass:** 4 concurrent wide_req answers correct, gsm8k200 THREADS 16 TEMP 0 within noise of no-mono 0.98,
+no fault; then remove all `# DEBUG-K31` code.
+
+### Previous handoff (2026-11-01 22:30)
 ## CONTINUE HERE (handoff 2026-11-01 22:30, mi355-4 -- gsm8k + CUDA graphs done, A/B half done, m384 fault open)
 
 **Update 2026-11-01 22:30 (section 10.22):** eager gsm8k PASSES (wide 0.99 vs off 0.98), CUDA graphs WORK

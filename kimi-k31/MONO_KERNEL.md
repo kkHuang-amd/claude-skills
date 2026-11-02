@@ -2,7 +2,16 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-02 21:00, mi355-4 -- run boundaries: option 1 + 2 done, exit column tail next)
+## CONTINUE HERE (handoff 2026-11-02 22:00, mi355-4 -- PAUSED: boundaries done, wide still ties / loses; launch body next)
+
+**Status (22:00, paused by the user):** 10.31: column exit (<= 64 rows) + deferred routed cast in the sgl-amd-mono
+worktree on 83d8a77, NOT committed (`results/entry_20261102/colx_worktree.diff`). Column exit checked (eager exit
+2.75e-3, gsm8k200 0.985 / 0.975). Same-session A/B c4 / c8 / c16 / c32 / c48 (TPOT x acc): wide +3.2 / +2.0 / -0.1 /
++3.0 / +0.6% vs off -> no bucket wins; wide stays opt-in. GPUs free, no server (mi355-4).
+**Next:** 10.31 Next (1) c32 traces (m256 loses 3%: which kind), (2) launch body vs chain per stage at m32 / m256,
+(3) re-check + commit the worktree wide.py.
+
+### Previous handoff (2026-11-02 21:00, superseded above)
 
 **Status (21:00):** 10.29 options 1 + 2 DONE (section 10.30), sgl-amd-mono k31/mono-s1 @ 83d8a77 (pushed to
 the fork; on 0a9684e). Gates: layer_bench all variants PASS incl. the new t1 on + restart,
@@ -1757,3 +1766,41 @@ Dafter_run  DSA layer after a run (23)     +0.37   +0.09   -0.08    +0.68 / +0.4
 Next: (a) exit through SGLang's column tail with this rank's prefix columns (one AR + the AG that carries the DSA
 layer's attention read; c4 ~-0.3); (b) the launch reads the prefix / bank by stride (no `pout` / bank copies,
 ~-0.2 at c16); (c) c4: the m32 launch only ties the chain (old Next 2).
+
+### 10.31 Column exit, deferred cast, per-bucket A/B (mi355-4, 2026-11-02, paused)
+
+Code: sgl-amd-mono worktree on 83d8a77, NOT committed (`results/entry_20261102/colx_worktree.diff`, `wide.py` only).
+- Column exit (`Wide._column_exit`, knob `SGLANG_AMD_MONO_K31_WIDE_COLUMN_EXIT`, default 1): at <= 64 rows the run's
+  exit is SGLang's column tail: lat_p / sh of a ping are views of one flat buffer, so one AR reduces the pair; this
+  rank's prefix columns are copied into `pfull[:, cols]` and `moe._column_tail_and_next_read(latent, shared, pfull)`
+  finishes this rank's stream columns + the stream AG that stages the DSA layer's attention read (consumed by its
+  `AttnResidual.forward`: same score_proj, prefix_sum None after `set_written`). Above 64 rows: option 1's path.
+- `_tail_front`: the routed input's bf16 cast rides the shared SiTU launch (SGLang's `defer_cast`), one launch less
+  a DSA layer.
+- `wide_widths()`: if `SGLANG_AMD_MONO_K31_WIDE_BUCKETS` leaves out the small buckets, rows up to the largest left-out
+  bucket below the smallest stay on SGLang's path (before: padded to the smallest bucket). Not tested yet.
+Checks (column exit only; the deferred cast is bit-identical by construction, not separately checked): eager
+`ENTRY_CHECK` (`server_colx_chk.log`): exit at rows 16 / 32 / 40 2.75e-3 median, max 3.7e-3 vs the gathered-prefix
+tail (option 1 path: 3.6e-3; the prefix no longer passes the AR), entry unchanged; gsm8k200 TEMP 0 (CUDA graphs,
+SIM=0, `results/acc/colx_t{48,16}`) 0.985 / 0.975 (accept 5.28 / 5.17), no fault.
+A/B 1 (column exit, no deferred cast; `results/ab/colx_wide384_20261102`, off = 10.30's run): TPOT 8.18 / 15.19 /
+30.00; trace c4: Dafter_run +0.37 -> +0.23 (AR = off's, `_latent_tail_partial` + `k3_ag_attn_res` as off), but the
+step diff stays +0.75 (Lfirst +0.39, L +0.14: run-to-run noise ~0.1 ms). Left in the c4 exit: the `pfull` copy and
+the routed cast (~0.1 ms/step each; the cast is fixed above).
+A/B 2 (+ deferred cast, all buckets; off rerun; same session; `results/ab/colx2_{wide384,off}_20261102`,
+`AB_CONC="4 8 16 32 48"`):
+```text
+TPOT ms           c4      c8      c16     c32     c48
+off               7.91   10.64   15.24   22.57   29.87     acc 3.83 / 3.83 / 3.86 / 3.84 / 3.83
+wide              8.10   10.85   15.31   23.19   30.04     acc 3.86 / 3.83 / 3.84 / 3.85 / 3.83
+TPOT x acc diff  +3.2%   +2.0%   -0.1%   +3.0%   +0.6%
+```
+- With the boundaries mostly fixed, wide wins at no bucket: c16 (m128) ties (10.30 measured -0.7%; off c16 15.38 vs
+  15.24 across sessions = the noise), c32 (m256) loses 3%. So a bucket subset does not help either; what is left is
+  the launch body vs the chain (m32 first launch 120 us vs the ~103 us chain it replaces; m256 unknown).
+Next (when resumed): (1) c32 traces wide / off (`capture_trace.sh <tag> <log> 32 8192 1024 14 4`; the off one was
+cut off, deleted) -> per-kind diff at m256, L especially; (2) per-stage timeline of the layer launch vs the chain's
+kernels at m32 / m256 (layer_bench + the chain kernels' trace times); (3) commit 10.31's wide.py after a
+layer_bench-free re-check (eager ENTRY_CHECK + gsm8k on the final code); (4) optional kernel: the last launch writes
+its prefix into `pfull` (stride H) and T1 reads SGLang's prefix by stride (drop the `pout` / `pfull` copies, ~0.2
+ms/step at c4).

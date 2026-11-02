@@ -158,6 +158,11 @@ Then state what you found in one or two lines and proceed.
     greps and checks across many turns.
   - Decide and act. Ask me only when genuinely blocked or when two readings of
     my request would produce materially different work.
+  - Mode / reasoning-effort switch: if the next step would clearly benefit
+    from a different mode (e.g. Plan vs Agent) or a higher reasoning effort
+    (e.g. a multi-path design change, a kernel / integration refactor whose
+    bugs show up only as accuracy loss), STOP before starting it and ask me
+    to switch. Say in one line why; do not switch or work around it silently.
   - Report faithfully: if something failed, show the actual error; if you
     skipped part of the task, say which part and why.
   - Do not commit, push, or touch anything outside the working directory

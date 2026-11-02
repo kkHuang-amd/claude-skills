@@ -2,7 +2,22 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-02 18:50, mi355-4 -- NEXT SESSION: shrink the run boundaries (old Next 2))
+## CONTINUE HERE (handoff 2026-11-02 21:00, mi355-4 -- run boundaries: option 1 + 2 done, exit column tail next)
+
+**Status (21:00):** 10.29 options 1 + 2 DONE (section 10.30), sgl-amd-mono k31/mono-s1 @ 83d8a77 (pushed to
+the fork; on 0a9684e). Gates: layer_bench all variants PASS incl. the new t1 on + restart,
+real-model entry / exit checks 3.5e-3 / 3.6e-3 median, wide_check = 10.28, gsm8k200 TEMP 0 0.99 (T48) / 0.98
+(T16). wide - off ms/step c4 / c16 / c48: +0.74 / -0.44 / +0.49 (was +1.37 / +0.54 / +2.22); TPOT off 7.83 /
+15.38 / 29.88, wide 8.18 / 15.27 / 30.09 -> c4 still slower, wide stays opt-in. GPUs free, no server (mi355-4).
+`~/.flydsl/cache` now holds this tree's binaries (old one in `cache.bak_entry_20261102`, do not restore).
+**Next, in order:** (a) exit through SGLang's column tail with this rank's prefix columns: one AR of [latent |
+shared] + the stream AG that runs the DSA layer's attention read (`_column_tail_and_next_read` /
+`gather_tail_read`), c4 exit +0.37 -> ~0; (b) the launch reads prefix / bank by stride (drop the `pout` / bank
+copies, ~0.2 ms/step); (c) c4 m32 launch body (old Next 2). Repro: 10.30 (`k31_gate.sh`, `k31_gate_rs.sh`,
+`ab_trace.sh <server-tag> <ab-tag> <trace-prefix>`; eager check `SGLANG_AMD_MONO_K31_WIDE_ENTRY_CHECK=40 SIM=0
+... --disable-cuda-graph` + `wide_req.py 4` / `16`).
+
+### Previous handoff (2026-11-02 18:50, superseded above)
 
 **Status:** Next 1 DONE (section 10.28): the layer launch reads SGLang's conv cache by slot and writes
 `intermediate_conv_window` itself; `wide.py` staging gone. Gates: layer_bench variants PASS, pre_attn_bench windows
@@ -12,7 +27,10 @@ wide 8.29 / 15.56 / 30.49 (was 8.81 / 15.94 / 31.16) -> wide still +5.3 / +1.7 /
 Code: sgl-amd-mono k31/mono-s1 @ 0a9684e, pushed to the fork kkHuang-amd/sgl-amd-mono (one commit on 2df98d8). sglang-k31-amd dev_amd b588cf7952
 unchanged. GPUs free, no server (mi355-4). `~/.flydsl/cache` was moved to `~/.flydsl/cache.bak_20261102` (old
 binaries; do not restore). Base worktree for A/B: /tmp/mono_base (2df98d8, mi355-4 only).
-**Next, in order:**
+**Update 19:50 (mi355-4):** profile done (section 10.29): wide - off c4 / c16 / c48 = +1.37 / +0.54 / +2.22 ms a
+step; entry +0.65 / +0.70 / +1.52, exit +0.68 / +0.48 / +0.59, launch body tie / -0.65 / tie. Next = 10.29 option 1
+(exit: no prefix AG), then option 2 (DSA MoE tail fused into the run's first launch); old-glue traces deleted.
+**Next, in order (pre-profile; superseded by the update above):**
 1. Shrink the run boundaries (~52 us a run x 23): measure entry / exit per run from c16 traces of the new code
    (`capture_trace.sh`, `scripts/seg_attr.py`; `traces/{wide384_c16,off_c16b}_20261102` are the old-glue traces,
    delete when done), then options: DSA layer reads / writes the column-sharded state (no fold / AG /
@@ -1650,3 +1668,92 @@ Off reproduces 10.27 within 0.3%. Removing the glue gains 0.52 / 0.38 / 0.67 ms 
 1.5 / 2.6 ms a step; c16 expected ~2.4); wide is still +5.3% / +1.7% / +2.3% vs off -> stays opt-in. What is left
 is the run boundaries (10.27: entry +0.71, exit +0.49 ms / step at c16) and, at c4, a launch that only ties the
 chain (m32), plus the window stores (+1-2% a layer). Diff: `results/convwin_20261102/sgl_amd_mono_worktree.diff`.
+
+### 10.29 Profile after the glue removal: where wide still loses (mi355-4, 2026-11-02)
+
+Traces (capture_trace.sh, DFLASH, SIM=1, TP0, steps[5:-2]): `traces/{wide,off}_c{4,16,48}_conv`; c4 / c16 / c48 start
+after 2 / 5 / 22 prefill batches, decode 2 / 2 / 5 s (c48 with 20 / 2 s caught no VERIFY step). Per-kind tables
+(`seg_attr.py` with the wide kinds on both, `cmp_seg.py`): `results/convwin_20261102/seg_{wide,off}_c*.txt`.
+```text
+VERIFY ms/step     c4: off 27.16 wide 28.53 (+1.37)   c16: 45.72 / 46.26 (+0.54)   c48: 73.73 / 75.95 (+2.22)
+wide - off by segment kind (ms/step)        c4      c16     c48
+L       covered mid / last layer (45)      +0.05   -0.65   +0.09   launch vs chain: tie / -14 us / tie a layer
+Lfirst  run entry (23)                     +0.65   +0.70   +1.52   t1-off launch + DSA MoE tail on SGLang + fold
+Dafter_run  DSA layer after a run (23)     +0.68   +0.48   +0.59   + one all_gather of the prefix (7168 wide)
+```
+- Glue is 0 now. The launch only beats the chain at m128 (c16); at m32 and m384 it ties.
+- Entry (wide c16 "rest" in Lfirst, us/step): AR 626 + latent up hgemm 443 + elementwise (fold / column copies)
+  323 + add_rmsnorm 97 + add3 89 + AG 75 = the DSA layer's MoE tail on SGLang + the fold, then a t1-off launch.
+- Exit: allgather_vec c4 +0.19, c16 +0.27, c48 +0.51 ms (the run's prefix AG before `_column_split_tail`), AR +0.09
+  / +0.07 / -0.02.
+Options and estimates (ms/step):
+1. Exit, small: add this rank's prefix columns into `shared_output[:, cols]` before the tail's all-reduce
+   (`_column_split_tail(lat_p, sh, None, cols)`): the AR carries the prefix, no AG. -0.19 / -0.27 / -0.51.
+2. Entry: the DSA layers' MLP is `KimiK3MoE` too, so run their MoE front / routed / shared on SGLang but not the
+   tail, and fuse the tail into the next run's first launch (t1 on, w_up of the DSA layer), as for covered layers.
+   Lfirst would then cost about what L costs: -0.6 / -1.0 / -1.5.
+3. With 1 + 2: c4 ~+0.5 (still slower, ~2%), c16 ~-0.8 (faster, ~1.7%), c48 ~+0.2 (tie). Beyond that the launch
+   body must beat the chain at m32 / m384 (per-stage timeline vs the chain's kernels), or wide stays per bucket
+   (`SGLANG_AMD_MONO_K31_WIDE_BUCKETS`, e.g. m64..256 only).
+
+### 10.30 Run boundaries: exit without the prefix AG (10.29 option 1), DSA MoE tail in the run's first launch (option 2) (mi355-4, 2026-11-02)
+
+Code: sgl-amd-mono k31/mono-s1 @ 83d8a77 (on 0a9684e; fork; diff also in
+`results/entry_20261102/sgl_amd_mono_worktree.diff`). Logs `logs/entry/`, `logs/server_entry_*.log`.
+- Option 1 (`wide.py` leave): `sh[:, cols] += pout` (this rank's prefix columns into its columns of the shared
+  partial, in place: the next run's first launch never reads sh with t1 off, and now reads its own), then
+  `_column_split_tail(lat_p, sh, None, cols)`: the tail's all-reduce carries the prefix; no all-gather, no clone.
+- Option 2 (`wide.py`): `Wide.entry` = the standard layers whose MoE tail runs in the next run's first launch
+  (`_tail_fusable`: KimiK3MoE, `_ffn_writes_stream`, `_eligible_for_fused_front`, not SP / mega MoE; knob
+  `SGLANG_AMD_MONO_K31_WIDE_ENTRY_T1`, default 1) = the 22 DSA layers 3, 7, .., 87 (layer 0 has a dense MLP: the
+  first run keeps fold + t1 off). `_tail_front`: SGLang's layer up to `ffn_boundary.prepare`, then `_fused_front`
+  -> `_forward_shared(sh[ping])` / `_forward_routed(lat_p[ping])` (the TP partials) and `pout[ping] =
+  written_residual[:, cols]`; no tail, no fold, no `mid` copy. The first launch is t1 on with the DSA layer's
+  `fold_up`. Every block-write layer (12, 24, .., 84) starts a run, so the new variant is t1 on + restart
+  (warmup 138 -> 96 launches: the t1-off variants are gone but for run 1).
+- `SGLANG_AMD_MONO_K31_WIDE_ENTRY_CHECK=<steps>` (eager): entry = the launch's `mid` vs SGLang's whole MoE
+  (`mlp(x, prefix_sum)`) on the same input; exit = the stream vs the gathered-prefix tail.
+- layer_bench `--restart`: the reference now restarts the prefix (h = y, no mid); h carries core's error undiluted
+  (h 1.2e-2 = core 1.2e-2; 5.7e-3 with the prefix), so restart's thresholds are h < 3e-2, topk_w < 2e-3.
+
+Bench gate (`results/entry_20261102/k31_gate.sh`, cache off, bundled): a0/m0, a1/m1, a3w/m4, a3w/m4 68 launches,
+capture, pre_attn kda 8 (nvb 0 / 3w): PASS at 16..384 as 10.28; t1 on + restart (nvb a1w/m2, a3w/m4, a7w/m8,
+`k31_gate_rs.sh`): PASS at 16..384, mid 3.9e-3, h 1.2-1.3e-2 (= core), no fault.
+Real model, eager, DFLASH, SIM=0 (`server_entry_chk.log`, `wide_req.py 4` / `16`): entry mid rel 3.5e-3 median,
+max 5.7e-3 (rows 16 / 32 / 72 / 112 / 128, 506 checks); exit stream 3.3e-3 .. 3.6e-3 median, max 4.1e-3 (529):
+the prefix now passes one or two more bf16 roundings at the stream's magnitude (the add into sh, the AR), below the
+path's own per-layer error (core 6-7e-3). wide_check layer 8 (no WIDE, `server_entry_wchk.log`, 4 / 16 x 2): mid
+(T1) <= 2.6e-3, x 3.8e-3, core 7.5e-3, windows 3.35e-3, latent 5.2e-3 (= 10.28).
+Server gsm8k200 TEMP 0 (wide on, buckets 16..384, DFLASH, CUDA graphs, SIM=0, bundled; `results/acc/entry_t{48,16}`):
+THREADS 48 0.99 (accept 5.14), THREADS 16 0.98 (5.12); no fault, running-req up to 47 (10.28: 0.975 / 0.98).
+A/B (DFLASH, SIM=1, CUDA graphs, bundled, same session, `~/.flydsl/cache` moved aside first ->
+`cache.bak_entry_20261102`, do not restore; `results/ab/entry_{wide384,off}_20261102`):
+```text
+case                         TPOT c4 / c16 / c48 ms   P90 ITL c4 / c16 / c48 ms   acc c4/c16/c48     prefill 8k TTFT
+off                          7.83 / 15.38 / 29.88     9.42 / 16.00 / 26.39        3.87 / 3.80 / 3.83 460.1
+wide, option 1 + 2           8.18 / 15.27 / 30.09     9.87 / 15.84 / 26.54        3.84 / 3.84 / 3.82 460.4
+wide, 10.28                  8.29 / 15.56 / 30.49    10.05 / 16.26 / 27.14                           460.2
+```
+Traces (`capture_trace.sh` c4 / c16 / c48 = 2 / 5 / 22 prefill batches, 2 / 2 / 5 s; `traces/{wide,off}_entry_c*`),
+`seg_attr.py` with the wide kinds on both + `cmp_seg.py` (`results/entry_20261102/{seg_*,cmp_c*}.txt`), ms/step:
+```text
+VERIFY ms/step     c4: off 27.16 wide 27.90 (+0.74)   c16: 45.79 / 45.35 (-0.44)   c48: 73.63 / 74.12 (+0.49)
+wide - off by kind                          c4      c16     c48     (10.29: c4 / c16 / c48)
+L       covered mid / last layer (45)      +0.03   -0.66   -0.02    +0.05 / -0.65 / +0.09
+Lfirst  run entry (23)                     +0.33   +0.13   +0.57    +0.65 / +0.70 / +1.52
+Dafter_run  DSA layer after a run (23)     +0.37   +0.09   -0.08    +0.68 / +0.48 / +0.59
+```
+- Entry: the first launch now costs what a mid-run launch costs (c16 177 us, was 151 with t1 off; +0.33 / +0.60
+  / +1.08 ms/step launch) and SGLang's tail is gone (Lfirst rest 1.23 / 1.85 / 3.15 -> 0.58 / 0.64 / 1.15). What
+  is left in Lfirst rest (c16 per run): the `pout` and bank column copies (~4-5 us each, ~0.2 ms/step), the
+  block-write bank AG + its copies (7 runs, ~25 us each), run 1's fold.
+- Exit: the prefix AG is gone (c16 allgather_vec 1.33 -> 1.04 ms in Dafter_run); at c4 the exit still pays a
+  second AR (`cross_device_reduce_2stage` +149 us/step vs off): `_column_split_tail` = AR(latent) -> norm -> up
+  -> AR(shared), while off's tail at <= 64 rows is SGLang's column tail = one AR of [latent | shared] + the stream
+  AG that also runs the DSA layer's attention read (`_column_tail_and_next_read`).
+- Decision rule (wide on only if <= off at c4 / c16 / c48 beyond ~1%): c16 -1.0% (step) / -0.7% (TPOT), c48 +0.7% /
+  +0.7% (tie), c4 +2.7% / +4.5% -> wide stays opt-in; option 1 + 2 cut the gap by 0.63 / 0.98 / 1.73 ms/step
+  (10.29 estimate 0.8 / 1.3 / 2.0).
+Next: (a) exit through SGLang's column tail with this rank's prefix columns (one AR + the AG that carries the DSA
+layer's attention read; c4 ~-0.3); (b) the launch reads the prefix / bank by stride (no `pout` / bank copies,
+~-0.2 at c16); (c) c4: the m32 launch only ties the chain (old Next 2).

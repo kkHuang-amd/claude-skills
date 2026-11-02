@@ -2,7 +2,39 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-02 14:45, mi355-4 -- NEXT SESSION: wide on / off A/B on the DFLASH config)
+## CONTINUE HERE (handoff 2026-11-02 16:35, mi355-4 -- NEXT SESSION: remove the wide glue, then the run boundaries)
+
+**Status:** A/B and c4 / c16 profiling done (section 10.27). DFLASH, SIM 3.84: off TPOT c4 7.86 / c16 15.28 / c48
+29.76 ms; S1 = off (widths 1..8 = one request only); S1 + wide 8.81 / 15.94 / 31.16 (+12 / +4 / +5%) -> wide stays
+opt-in. c16 VERIFY 45.62 -> 48.40 ms, fully attributed: glue +2.37 (wide.py conv-window staging: `_kda_table`
+gather + index_put into `self.stage`, `_kda_finish` gather x2 + cat + index_put into `intermediate_conv_window`,
+6 small kernels a layer), run boundaries +1.20 (entry +0.71: t1-off launch + SGLang MoE tail of the DSA layer +
+fold / column copies; exit +0.49: full-hidden all-gather + `_column_split_tail`), launch body -0.68 (m128: 163.5 vs
+176.9 us a layer; m32 ties), MoE -0.17. Runs are 3 KDA layers (DSA every 4th) -> boundary ~52 us a run > launch gain
+~30 us a run. Draft (DFlash2) is NOT on mono (no spec; DRAFT ~1.5 of ~31 ms at c4). Code unchanged: sgl-amd-mono
+k31/mono-s1 @ 2df98d8, sglang-k31-amd dev_amd b588cf7952. GPUs free, no server. Mode: high for step 1 (kernel args /
+stage change; mind SGPR pressure, 10.24-10.26).
+**Next, in order:**
+1. Remove the glue: the layer launch reads the conv state from SGLang's conv cache by slot (`st_idx` / mamba slot,
+   layer `mamba_idx`) instead of `self.stage`, and writes the verify windows (`intermediate_conv_window[i, vrows]`,
+   layout [R, L, 3, C]) itself; delete the staging in `wide.py` `_kda_table` / `_kda_finish`. Gates: layer_bench
+   variants PASS, `wide_check.py` real-model PASS, fault matrix (both compilers) clean, spills not above 10.26,
+   server gsm8k200 TEMP 0 >= 0.975 (10.26: 0.985). Then A/B wide vs off c4 / c16 / c48; expected c16 ~ -2.4 ms/step,
+   still ~+0.5 ms vs off.
+2. Shrink the run boundaries (~52 us a run x 23): measure entry / exit per run from the c16 traces
+   (`scripts/seg_attr.py`; `traces/{wide384_c16,off_c16b}_20261102` kept for this, delete when done), then options:
+   DSA layer reads / writes the column-sharded state (no fold / AG / column-split tail), or fuse the DSA layer's MoE
+   tail into the next run's first launch (t1 on). Decision rule as before: wide on only if <= off at c4 / c16 / c48
+   beyond ~1% noise.
+3. Longer term (design only first): cover the DSA layer in the launch (one run for the whole model); draft on mono
+   is low value here (~5% of the step).
+**Repro:** A/B / trace commands as in the previous handoff below (launch_server.sh + DFLASH args, ab_bench.sh,
+capture_trace.sh; at c4 pass start_after_prefill_batches=2 or it waits forever:
+`capture_trace.sh <tag> <server_log> 4 8192 1024 2 2`). Wide server cold start ~23 min (graph capture ~11 s / bs),
+~4 min with warm kernel caches. Segment attribution:
+`K=$(python3 scripts/seg_attr.py <wide TP0> | rg -o 'kinds: \S+' | cut -d' ' -f2); python3 scripts/seg_attr.py <off TP0> "" $K`
+
+### Previous handoff (2026-11-02 14:45, superseded above): wide on / off A/B on the DFLASH config
 
 **Status:** wide layer launch fault-free and accurate (10.26: gsm8k200 0.985 bundled / 0.98 ROCm, buckets 16..384,
 DFLASH, CUDA graphs). Code on the fork kkHuang-amd/sgl-amd-mono `k31/mono-s1` @ 2df98d8 (= the local tree, clean).
@@ -10,7 +42,7 @@ SGLang: sglang-k31-amd at origin/dev_amd b588cf7952, unmodified. The open questi
 wide was SLOWER than off (10.22, DSpark, SIM 3.84: c4 8.72 vs 7.72, c16 16.61 vs 15.70, c48 31.35 vs 31.28 ms);
 the layer launch is now 2-5% faster but that has not been measured end to end. Mode: medium (high if wide is
 still slower and the step needs profiling). GPUs free, no server.
-**Progress (mi355-4, 2026-11-02): (a) / (b) / (c) done -> section 10.27: wide SLOWER (c4 +12%, c16 +4%, c48 +5%), stays opt-in. c4 / c16 profile (10.27): +2.8 ms/step is conv-window glue in wide.py; launch ties (m32) / beats by 13 us a layer (m128) the chain, but ~1 ms/step goes elsewhere outside the launches -> without glue wide ~= off.**
+**Progress (mi355-4, 2026-11-02, done): (a) / (b) / (c) -> section 10.27: wide SLOWER (c4 +12%, c16 +4%, c48 +5%), stays opt-in. c4 / c16 profile (10.27): +2.8 ms/step is conv-window glue in wide.py; launch ties (m32) / beats by 13 us a layer (m128) the chain, but ~1 ms/step goes elsewhere outside the launches -> without glue wide ~= off.**
 **Next, in order (one server at a time; ~20 min to ready each, kill by the PID in logs/server_<tag>.pid):**
 1. Three servers, same DFLASH config, SIM=1 (simulated accept 3.84, so TPOT compares at equal acceptance),
    bundled LLVM (default), each followed by `ab_bench.sh <tag>` (decode 8k/1k c4 / c16 / c48 + prefill 8k):

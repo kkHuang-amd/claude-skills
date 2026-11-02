@@ -1513,6 +1513,24 @@ sum to the same 21.0 ms, so ~0.9 ms is spent outside the launches (as at c4, ~1 
 (fold + column gather), 7 block-write all-gathers, `_column_split_tail` (unverified). Without the glue c16 ties off.
 To beat off both are needed: remove the glue (launch reads / writes the conv cache by slot) and find the ~1 ms
 outside the launches. Wide c16 raw trace kept for that: `traces/wide384_c16_20261102` (off c16 trace deleted).
+
+c16 segment attribution (`scripts/seg_attr.py`, off re-captured as `off_c16b`; same segment positions; ms/step;
+`results/ab/dflash_wide384_20261102/seg_attr_c16_{wide,off}.txt`). Layout: 23 runs of 3 covered KDA layers + 1 DSA.
+```text
+segment kind (n)               off     wide                                     wide - off
+covered mid/last (45)  chain   8.48    launch 7.80 + glue 1.54                  -0.68 launch, +1.54 glue
+run entry (23)         chain   4.56    launch(t1 off) 3.45 + glue 0.83 + 1.83   +0.71 boundary, +0.83 glue
+                                       (1.83 = previous DSA layer's MoE tail on SGLang, fold / column copies
+                                        elementwise_kernel 0.32, all-gather 0.07)
+DSA after a run (23)           10.90   11.39 (all-gather 1.37 vs 1.06: prefix AG; AR +0.08)  +0.49 boundary
+MoE (all)                      20.74   20.56                                    -0.17
+total                                                                           +2.72 (measured +2.78)
+```
+So: glue +2.37, run boundaries (entry +0.71, exit +0.49) +1.20, launch body -0.68, MoE -0.17. Runs are only 3 layers
+long (a DSA layer every 4th), so each run pays an entry (t1-off launch + SGLang MoE tail + fold / column copies) and
+an exit (full-hidden all-gather + `_column_split_tail`); the boundary cost (~52 us a run) is larger than the launch
+gain over 3 layers (~30 us a run). To beat off: remove the glue AND either shrink the boundary or cover the DSA
+layer too (one run for the whole model, no per-run entry / exit).
  Next options: (1) launch reads conv state from the cache by st_idx and writes the verify windows
 itself (removes ~2 ms / step at c4, wide ~= off); (2) make the launch itself faster than the chain (the only way
 to a gain); check the c16 m128 layer the same way before deciding.

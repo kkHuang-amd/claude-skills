@@ -10,7 +10,7 @@ SGLang: sglang-k31-amd at origin/dev_amd b588cf7952, unmodified. The open questi
 wide was SLOWER than off (10.22, DSpark, SIM 3.84: c4 8.72 vs 7.72, c16 16.61 vs 15.70, c48 31.35 vs 31.28 ms);
 the layer launch is now 2-5% faster but that has not been measured end to end. Mode: medium (high if wide is
 still slower and the step needs profiling). GPUs free, no server.
-**Progress (mi355-4, 2026-11-02): (a) off, (b) S1 done -> section 10.27; (c) S1 + wide running.**
+**Progress (mi355-4, 2026-11-02): (a) / (b) / (c) done -> section 10.27: wide SLOWER (c4 +12%, c16 +4%, c48 +5%), stays opt-in; next is item 3 (profile a c4 wide step).**
 **Next, in order (one server at a time; ~20 min to ready each, kill by the PID in logs/server_<tag>.pid):**
 1. Three servers, same DFLASH config, SIM=1 (simulated accept 3.84, so TPOT compares at equal acceptance),
    bundled LLVM (default), each followed by `ab_bench.sh <tag>` (decode 8k/1k c4 / c16 / c48 + prefill 8k):
@@ -1472,6 +1472,11 @@ Config: `launch_server.sh` (DCP8, SIM=1 accept 3.84, no radix, CUDA graphs) + `-
 case (tag)                        TPOT c4 / c16 / c48 ms   P90 ITL c4 / c16 / c48 ms   prefill 8k TTFT ms  faults
 (a) off   dflash_off_20261102      7.86 / 15.28 / 29.76     9.45 / 15.89 / 26.32        461.4               0
 (b) S1    dflash_s1_20261102       7.87 / 15.27 / 29.82     9.47 / 15.96 / 26.31        462.3               0
+(c) wide  dflash_wide384_20261102  8.81 / 15.94 / 31.16    10.58 / 16.81 / 28.11        459.7               0
 ```
 (b) = (a) as expected: S1 builds widths 1..8 only (one request x 8 tokens; log `widths [8]`), so c4 / c16 / c48
 never take it; the DFlash2 draft has no mono spec (normal forward). S1's gain is c1 only.
+(c) vs (a): TPOT +12.1% / +4.3% / +4.7% (c4 / c16 / c48), accept 3.84-3.85 in all three -> wide is SLOWER, same
+pattern as 10.22 (DSpark: +13% / +5.8% / +0.2%); the 2-5% layer speedup of 10.26 does not show. Server ready took
+1370 s vs ~150 s for (a) / (b) (decode graph capture ~11 s per bs with wide). Log: 68 covered layers, buckets 16..384,
+captures [] under DFLASH. Decision: wide stays opt-in. Next: profile one c4 wide step (Next item 3).

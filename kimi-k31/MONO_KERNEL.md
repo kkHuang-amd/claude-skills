@@ -8,12 +8,13 @@ Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in se
 buckets 16..384: bundled 0.985 / 0.985 (THREADS 16 / 48), ROCm LLVM 0.98 / 0.98; no fault; bucket 384 used
 (running-req up to 46-48). Fixes: SGPR pressure cut + per-wave peer puts (10.26), and the `rocm_codegen` scope
 now follows the direct caller of FlyDSL (SGLang's GEMM inside wide.backbone kept failing on ROCm clang). All code
-committed locally (not pushed). GPUs free, no server.
+committed, pushed to the fork (k31/mono-s1 2df98d8). GPUs free, no server.
 **Next, in order:**
 1. DONE 2026-11-02 14:50: DEBUG-K31 hooks removed (re-verified: t1-on PASS both compilers, 10.24 / 10.25 repros
    clean), 6 local commits on k31/mono-s1 (ad8388a..2df98d8: wide CUDA graphs, DFLASH, CM_SYS logits read, SGPR
    pressure, ROCm codegen, layer_bench); pre-split state kept as branch k31/mono-s1-backup-20261102.
-   NOT pushed: push to the fork (kkHuang-amd/sgl-amd-mono) only after the user says so.
+   Pushed to the fork kkHuang-amd/sgl-amd-mono k31/mono-s1 (2df98d8), 2026-11-02 14:40. SGLang needs no change: the
+   server runs sglang-k31-amd at origin/dev_amd b588cf7952 unmodified.
 2. A/B wide on vs off on the DFLASH serving config (`ab_bench.sh`: c4 / c16 / c48 TPOT; wide was slower at c4 /
    c16 in 10.22 with the old code). Bundled LLVM unless ROCm is faster; then decide on keeping `rocm_codegen`.
 3. Report both compiler bugs (10.24 / 10.25 spill-lane corruption, 10.26 waterfall rsrc clobber) with the evidence.

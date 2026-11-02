@@ -1048,3 +1048,31 @@ in/o bm 128. With t1 off the up GEMM does not run, so ks only moves task schedul
 by timing (T2 starts without waiting), not a static OOB.
 (2) bucket 128 warmup, once in 3 cold starts, one GPU (addr 0x7385f8304000); rerun clean. Not chased.
 
+### 10.23 Rebase onto DFlash2 dev_amd; mono S1 K1 breaks under DFLASH (mi355-4, 2026-11-02, OPEN)
+
+sglang-k31-amd -> rewritten `origin/dev_amd` b588cf7952 (detached; untracked skinny-GEMM files kept). The
+`kimi_k3.py` changes (A4W4 MoE env, shared RS overlap on the row-sharded prefill tail) do not touch mono's
+contract. Mono fix: kimi_k31 spec accepts `speculative_algorithm` DFLASH (was refused); DFLASH taps
+[7, 23, 51, 67, 83, 91] reuse the DSpark bank-path captures (`set_dflash_layers_to_capture` ->
+`set_dspark_layers_to_capture`, no +1 shift). Draft
+`/shared_nfs/RadixArk/K31-DFlash2-MLA5-Preview1027-Step29301-SWA1024` (DFlash2, 5 SWA-1024 MLA layers, block 8).
+Launch: `launch_server.sh <tag> --enable-amd-monokernel --speculative-algorithm DFLASH
+--speculative-draft-model-path <draft>` (later args override the script's DSpark ones).
+
+gsm8k200 TEMP 0 THREADS 16 SIM=0 (`results/acc/dflash_*`): wide ON 0.985 (accept 4.67 req-weighted), no mono
+0.98 (4.96). Mono ON + wide OFF FAILS every time (5/5): GPU faults in DSA indexer kernels
+(`indexer_k_quant_and_cache`, `_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle`, addr 1-2 pages past a buffer
+end) and, without a fault, requests contaminate each other (4 concurrent greedy requests answer each other's
+numbers) and gsm8k collapses (acc ~2%, accept len 2.00).
+Bisection: no mono OK; DSpark + mono S1 on the new code OK (1 then 2 x 4 requests); THREADS=1 (all steps S1,
+R = 1) OK (0.95 / 40, accept 5.19); S1 steps of request A then a prefill of request B -> fault; mono with K1
+forced to decline (K2 still on) OK. => K1 (S1's KDA launch) under DFLASH. Checked and ruled out: K1's slot /
+SGLang commit slot agree; K1 hand-off row 0 of a 49-row `intermediate_conv_window`; ring shapes rawk / rawv / g
+(69, 49, 12, 16, 128), beta (69, 49, 12, 16) = what K1 assumes; conv staging zero-stride; `SGLANG_AMD_MONO_CHECK`
+on one request: 1608 checks, 0 violations. Open leads: tap 91 (DSA layer, next layer 92 DSA) is the only
+target-side tap DSpark lacks; K1's bank bookkeeping (`attn_res._count_write(None)`) vs what the tap reads.
+Mitigation candidate: K1 declines under DFLASH (verified on 2 x 4 requests only).
+Temporary debug code (marked `# DEBUG-K31`, remove before any commit): sglang-k31-amd `dsa_indexer.py`,
+`hybrid_linear_attn_backend.py`; sgl-amd-mono `kimi_k3/gfx950/k1.py` (env SGLANG_DEBUG_SLOTS / SGLANG_DEBUG_NO_K1
+/ SGLANG_DEBUG_INDEXK). Launch with `ulimit -c 0` (core dumps filled `/` twice).
+

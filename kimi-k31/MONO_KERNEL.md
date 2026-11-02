@@ -10,7 +10,7 @@ SGLang: sglang-k31-amd at origin/dev_amd b588cf7952, unmodified. The open questi
 wide was SLOWER than off (10.22, DSpark, SIM 3.84: c4 8.72 vs 7.72, c16 16.61 vs 15.70, c48 31.35 vs 31.28 ms);
 the layer launch is now 2-5% faster but that has not been measured end to end. Mode: medium (high if wide is
 still slower and the step needs profiling). GPUs free, no server.
-**Progress (mi355-4, 2026-11-02): (a) / (b) / (c) done -> section 10.27: wide SLOWER (c4 +12%, c16 +4%, c48 +5%), stays opt-in. c4 profile: +2.8 ms/step is conv-window glue in wide.py, the launch ties the standard chain (10.27).**
+**Progress (mi355-4, 2026-11-02): (a) / (b) / (c) done -> section 10.27: wide SLOWER (c4 +12%, c16 +4%, c48 +5%), stays opt-in. c4 / c16 profile (10.27): +2.8 ms/step is conv-window glue in wide.py; launch ties (m32) / beats by 13 us a layer (m128) the chain, but ~1 ms/step goes elsewhere outside the launches -> without glue wide ~= off.**
 **Next, in order (one server at a time; ~20 min to ready each, kill by the PID in logs/server_<tag>.pid):**
 1. Three servers, same DFLASH config, SIM=1 (simulated accept 3.84, so TPOT compares at equal acceptance),
    bundled LLVM (default), each followed by `ab_bench.sh <tag>` (decode 8k/1k c4 / c16 / c48 + prefill 8k):
@@ -1498,6 +1498,21 @@ into `self.stage` (`self.stage[slots, :, :3] = conv[i][slots].mT`: gather + inde
 `_kda_finish` gathers conv[i][slots] and stage[slots], cats, and index_puts `intermediate_conv_window`.
 Without the glue wide is still ~28.0 vs 27.1 ms (+0.9 ms, +3%): per layer the m32 launch ties the chain (113-117 vs
 113.5 us), the rest (+1.22 - 0.32) is not attributed yet (run entry / exit, block-write all-gathers, column-split
-tail: unverified). So at c4 removing the glue is not enough to beat off. Next options: (1) launch reads conv state from the cache by st_idx and writes the verify windows
+tail: unverified). So at c4 removing the glue is not enough to beat off.
+
+c16 trace (same method, start after 5 prefill batches; breakdowns `trace_breakdown_c16_{wide,off}.txt`):
+```text
+VERIFY step (m128)       off 45.62 ms   wide 48.40 ms (+2.78)   idle 0%
+  elementwise            0.56           3.40  (+2.84)   the same 68 x 6 glue, ~34 us a layer
+  kda+gemm+comm+attn_res+norm  21.01    20.99 (-0.02)
+  moe / other            20.32 / 0.91   20.32 / 0.91
+one KDA layer (layer 4)  off 404 us: 15 kernels before MoE = 176.9 us; wide: launch 163.5 us (-13.4) + glue 34.3 us
+```
+At m128 the launch beats the chain by ~13 us a layer (~0.9 ms / step over 68 layers), but the launch-side categories
+sum to the same 21.0 ms, so ~0.9 ms is spent outside the launches (as at c4, ~1 ms): candidates run entry / exit
+(fold + column gather), 7 block-write all-gathers, `_column_split_tail` (unverified). Without the glue c16 ties off.
+To beat off both are needed: remove the glue (launch reads / writes the conv cache by slot) and find the ~1 ms
+outside the launches. Wide c16 raw trace kept for that: `traces/wide384_c16_20261102` (off c16 trace deleted).
+ Next options: (1) launch reads conv state from the cache by st_idx and writes the verify windows
 itself (removes ~2 ms / step at c4, wide ~= off); (2) make the launch itself faster than the chain (the only way
 to a gain); check the c16 m128 layer the same way before deciding.

@@ -2,7 +2,38 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-02 11:45, mi355-4 -- ROCm LLVM exposes a 2nd fault (bucket 128, t1 off, nvb 1/1), section 10.25)
+## CONTINUE HERE (handoff 2026-11-02 12:30, mi355-4 -- 10.25 root-caused: ROCm LLVM ALSO miscompiles an SGPR spill lane; fix = cut SGPR pressure)
+
+**Status:** 10.25 root-caused (section 10.25): with ROCm LLVM the T5 MLP seam's bank descriptor is reloaded from
+spill lanes holding (bank.lo, cw_a.hi): ROCm LLVM 23 overwrites an SGPR-spill lane, the same class of bug as the
+bundled LLVM in 10.24, on a different variant. IR is correct. Neither compiler is safe for the wide layer launch
+at ~1000+ SGPR spills, so the compiler swap is NOT a fix. Keep `SGLANG_AMD_MONO_K31_WIDE` and
+`SGLANG_AMD_MONO_ROCM_LLVM` off on the server. Mono S1 (K1 / K2, bundled LLVM) is not affected. GPUs free, no server.
+**Next, in order:**
+1. Cut SGPR pressure (10.24 plan): (a) lazy region addresses in `coll.region_context` (keep `own` / `peers` / `par`,
+   form `<name>_own` / peer addresses at use); (b) kernel args through a device-side pointer table loaded per stage
+   (guard against CSE / hoisting back to the entry; this also ends T2 and T5 sharing one launch-long bank rsrc);
+   (c) route top-16 not fully unrolled. After each: spill count (`rg -c v_writelane` on the ISA dump),
+   `us: layer`, and the matrix in 2 on BOTH compilers.
+2. Fault matrix, both compilers: rows 16 / 32 / 64 / 128 / 256 / 384 x (nvb 0, nvb 1/1, a3w m4) x t1 on / off x
+   step 1 / 4 / 8 / 68. Pass: no fault anywhere, t1-on variants PASS numerically, `us: layer` within +-2%.
+3. Then server gsm8k200 (DFLASH, CUDA graphs, wide on, buckets to 384, THREADS 16 and 48), commit (ask), report to
+   FlyDSL and ROCm LLVM (IR + ISA + `rlane.py` evidence; minimal reproducer later).
+**Repro of the 10.25 evidence (8 GPUs, ~35 s incl. cold compile, from /tmp):**
+```bash
+ulimit -c 0; B=/sgl-workspace/sgl-amd-mono/test/kernels/kimi_k31/layer_bench.py; export PYTHONPATH=$(dirname $B):$PYTHONPATH
+SGLANG_AMD_MONO_ROCM_LLVM=/opt/rocm/llvm FLYDSL_RUNTIME_ENABLE_CACHE=0 K31_DBG_ROCM_DUMP=/tmp/k31_rocm_dump K31_DBG_PTRS=1 \
+  torchrun --nproc-per-node 8 --no-python /shared_nfs/kimi-k31/results/m384_fault_20261102/k31_gdb_ptr.sh $B \
+  --rows 128 --nvb-a 1 --nvb-m 1 --no-t1 --launches 8 --step 8      # logs/m384dbg/gdb_m128ptr_r<rank>.log
+python3 /shared_nfs/kimi-k31/results/m384_fault_20261102/rlane.py /tmp/k31_rocm_dump/<kernel>.s <line> v205 15,16
+rm -f /tmp/gpucore*
+```
+**Code state (uncommitted, /sgl-workspace/sgl-amd-mono on k31/mono-s1 @ ad8388a):** as in the previous handoff, plus
+two more `# DEBUG-K31` hooks: `K31_DBG_ROCM_DUMP=<dir>` in `common/rocm_codegen.py` (rank 0 keeps `.ll` and adds
+`.s` of each ROCm compile) and `K31_DBG_PTRS=1` in `layer_bench.py` (each rank prints every buffer's range to
+stderr). Remove all `# DEBUG-K31` before any commit.
+
+### Previous handoff (2026-11-02 11:45, superseded: 10.25 root-caused above; ROCm LLVM exposes a 2nd fault)
 
 **Status:** ROCm LLVM codegen (10.24) fixes the bucket-384 fault but is NOT a clean fix: with it the server died
 in wide warmup (bucket 128) and a bench variant faults every time. Server path blocked until this is understood.
@@ -1270,7 +1301,7 @@ This works around the backend bug rather than fixing it; a minimal LLVM reproduc
   logits into this rank's buffer while it read them for the check. Fixed with a sync + barrier per replay
   (6 runs x 2 sizes x 40 replays: 0 rows). route_row now reads the gathered logits with CM_SYS (hardening).
 
-### 10.25 ROCm LLVM exposes a second fault: bucket 128, t1 off, nvb 1/1 (mi355-4, 2026-11-02, OPEN)
+### 10.25 ROCm LLVM exposes a second fault: bucket 128, t1 off, nvb 1/1 (mi355-4, 2026-11-02, ROOT-CAUSED: spill-lane miscompile)
 
 - Wiring: `sgl_amd_mono.register_specs()` calls `rocm_codegen.install()` when `SGLANG_AMD_MONO_ROCM_LLVM` is set;
   scope = kernels whose compile is triggered from this repo's code (call-stack check), aiter's FlyDSL kernels keep
@@ -1292,3 +1323,20 @@ This works around the backend bug rather than fixing it; a minimal LLVM reproduc
 - Open: whether base 0x7fbe11dc0000 is that launch's bank (then the load is in range and something else faults)
   or another buffer; dmesg reports a write. Common factor of 10.24 and 10.25: the SGPR pressure (~1000+ spills);
   each compiler fails on a different variant.
+- Root cause (mi355-4, 2026-11-02 11:45-12:30): ROCm LLVM 23 miscompiles an SGPR spill lane, the same class as 10.24.
+  Run: the m128 repro with every rank under rocgdb, `FLYDSL_RUNTIME_ENABLE_CACHE=0`, rank 0 keeping the ROCm `.ll` / `.s`
+  of the same compile (`K31_DBG_ROCM_DUMP`), and each rank printing every buffer's range (`K31_DBG_PTRS`).
+  Rank 2 faults at attnres.py:67 from layer.py:295 with base s[64:65] = 0x7fbe_11a00000; its bank is
+  0x7fbc_11a00000 and cw_a 0x7fbe_d4c25000, so the descriptor is (bank.lo, cw_a.hi). No rank's (bank.lo, 0x7fbe)
+  falls in any of its tensors: every rank computes a bad address, the first to reach it faults, the guard stops
+  the rest (hence "3-7 GPUs").
+- IR: T5's rsrc = `make.buffer.rsrc(inttoptr %6)`, %6 = kernel arg 6 = bank (T2's seam has the other one). Correct.
+- ISA (matches the gdb disassembly): s[64:65] <- v205 lanes 15 / 16. Flow-sensitive reaching defs of the lanes
+  (`rlane.py`, results dir): the only def reaching T5's reload is in the loop header .LBB0_57: it reads lane 16
+  (bank.hi) and lane 18 (cw_a.hi), computes `s13 = bank.hi & 0xffff` (bank rsrc word 1, used live by T2's seam
+  load, so T2 is right) and `s73 = cw_a.hi & 0xffff`, then writes s73 to lane 16. Entry: `s_load_dwordx16 s[12:27]`
+  of kernarg 0 puts bank (arg 6) in lanes 15 / 16 and cw_a (arg 7) in 17 / 18; the back-edge shuffles keep pairs.
+- Verdict: both compilers corrupt an SGPR spill slot in this kernel, on different variants; why some variants
+  (step >= 8, t1 off, nvb 1/1) and not others is code shape -> allocation, as in 10.24. The server's m128 l68 t0
+  fault is likely the same (not traced). Fix: cut SGPR pressure (10.24 plan); the compiler swap only moves the bug.
+  Artifacts: results dir `25_*` (IR, ISA, gdb log of rank 2, chase output), `rlane.py`, `k31_gdb_ptr.sh`.

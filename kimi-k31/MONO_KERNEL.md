@@ -1486,7 +1486,8 @@ c4 trace (capture_trace.sh c4 8k/1k, start after 2 prefill batches; TP0; breakdo
 ```text
 VERIFY step (m32)        off 27.12 ms   wide 30.85 ms (+3.73)   both idle 0% -> GPU time, not host
   elementwise            0.13           2.95  (+2.82)   68 x 6 gather / index_put / cat
-  kda+gemm+comm+attn_res+norm  12.65    13.20 (+0.55)   the launch vs the standard chain
+  kda+gemm+comm+attn_res+norm  12.65    13.87 (+1.22)   the launch vs the standard chain
+  other                  1.25           0.92  (-0.32)
   moe                    10.83          10.83
 one KDA layer (layer 4)  off 234 us: 13 kernels before MoE = 113.5 us (AR, latent tail, attn_res, in_proj,
                          KDA verify, gated norm, o_proj, AR, agg, shared gate_up, situ, shared down)
@@ -1495,7 +1496,8 @@ one KDA layer (layer 4)  off 234 us: 13 kernels before MoE = 113.5 us (AR, laten
 The glue is `wide.py` conv-window staging, not compute: before the launch `_kda_table` gathers conv state
 into `self.stage` (`self.stage[slots, :, :3] = conv[i][slots].mT`: gather + index_put), after it
 `_kda_finish` gathers conv[i][slots] and stage[slots], cats, and index_puts `intermediate_conv_window`.
-Even without the glue the m32 launch only TIES the standard chain (113-117 vs 113.5 us), so at c4 wide can at best
-match off. Next options: (1) launch reads conv state from the cache by st_idx and writes the verify windows
+Without the glue wide is still ~28.0 vs 27.1 ms (+0.9 ms, +3%): per layer the m32 launch ties the chain (113-117 vs
+113.5 us), the rest (+1.22 - 0.32) is not attributed yet (run entry / exit, block-write all-gathers, column-split
+tail: unverified). So at c4 removing the glue is not enough to beat off. Next options: (1) launch reads conv state from the cache by st_idx and writes the verify windows
 itself (removes ~2 ms / step at c4, wide ~= off); (2) make the launch itself faster than the chain (the only way
 to a gain); check the c16 m128 layer the same way before deciding.

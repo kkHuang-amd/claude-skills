@@ -18,7 +18,25 @@ All `# DEBUG-K31` code removed from both trees; sglang-k31-amd clean at `origin/
 `results/acc/dflash_mono_k1fix`.
 DSPARK regression with the fix: mono S1, gsm8k200 TEMP 0 THREADS 1 (K1 every step) 0.98, accept 4.947, 4 concurrent
 correct, no fault (`results/acc/dspark_mono_k1fix_t1`).
-**Next:** section 10.22's open items (bucket-384 fault, A/B).
+**NEXT SESSION (planned 2026-11-02 09:55), in order:**
+1. Bucket-384 fault (10.22 (1), deterministic bench repro, 8 GPUs ~70 s). First a cheap audit with today's
+   lesson: every buffer the wide planner sizes (`pl.scratch_bytes()`, peer offsets, per-stage regions) vs what
+   each stage writes at rows 384 / nvb 3-4 (K1 had a layout that grew with nblocks and a size taken at
+   nblocks 1). Only if sizes hold, chase the race hypothesis (T2 starting without waiting).
+   Also check the bucket-128 one-in-three cold-start warmup fault (10.22 (2)) against the same audit.
+2. Commit the remaining uncommitted sgl-amd-mono edits on top of ad8388a (ask the user first): `kimi_k31/wide.py`
+   graph-safe KDA tables + widths capped to warmed buckets, `kimi_k31/spec.py` DFLASH accepted + debug logs
+   removed, `layer_bench.py --no-t1 --restart`. Before committing: gsm8k200 TEMP 0 THREADS 16 with
+   `SGLANG_AMD_MONO_K31_WIDE=1` on DFLASH + CUDA graphs (previous wide-on DFLASH run 0.985 was before ad8388a).
+3. Re-baseline on the serving config, which is now DFLASH (draft below): ab_bench c1 (S1) / c4 / c16 / c48 for
+   no mono, mono S1, mono S1 + wide. Earlier A/B numbers are DSpark-only (S1 c1 4.96 -> 4.49 ms; wide slower
+   c4 +13% / c16 +5.8%).
+4. Wide slower than off at c4 / c16: profile one c4 wide step (per-layer host work, SGLang routed experts, bank
+   / prefix gathers) and attribute the gap.
+5. Lower priority: warmup compile cost (~150 s a bucket cold; nvb as a runtime value, fewer buckets).
+Rules for every item: `NUMERICS_RULES.md`; `ulimit -c 0` before a server; after a fault `rm -f /tmp/gpucore*` and
+`gpucore*` in the crashed process's cwd; after a scheduler exception kill -9 the whole server tree (a SIGTERM'd
+TP0 left TP1-7 spinning at 100%).
 **Repro of the old failure (pre-fix k1.py):**
 ```bash
 ulimit -c 0; S=/workspace/claude-skills/kimi-k31/scripts

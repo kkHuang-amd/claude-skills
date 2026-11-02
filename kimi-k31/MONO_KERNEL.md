@@ -9,15 +9,16 @@ layer's bank depth (`nblocks`), but `k1.scratch_bytes()` sized the runner's shar
 K1 layer with `nblocks >= 2` wrote its `x` rows (bf16) up to ~50 KB past the end of `runner.scratch`. Under DFLASH
 the caching allocator placed the KV allocator's `free_pages` right after the scratch, so the next prefill / verify
 drew garbage page ids: DSA indexer faults, or two requests sharing pages (cross-talk). Details in 10.23.
-**Fix (uncommitted, sgl-amd-mono working tree on 581b173):** `kimi_k3/gfx950/k1.py` `scratch_bytes()` sizes for
+**Fix (committed locally, sgl-amd-mono `k31/mono-s1` ad8388a on 581b173, NOT pushed; wide / DFLASH-accept /
+layer_bench edits still uncommitted):** `kimi_k3/gfx950/k1.py` `scratch_bytes()` sizes for
 `MAX_BLOCKS` (738,560 -> 789,056 B); `warmup()` asserts each K1 layer's `kda.scratch_bytes(key)` fits the runner.
 All `# DEBUG-K31` code removed from both trees; sglang-k31-amd clean at `origin/dev_amd` b588cf7952.
 **Verified (mi355-4, 2026-11-02):** mono S1 + K1 + DFLASH, wide off, CUDA graphs on: gsm8k200 TEMP 0 THREADS 16
 0.975 (accept 5.13 req-weighted; no mono 0.98 / 4.96), 3 x 4 concurrent `wide_req` correct, no fault.
 `results/acc/dflash_mono_k1fix`.
-**Next:** (1) ask the user, then commit the k1.py fix on `k31/mono-s1` (with or apart from the wide / DFLASH-accept
-changes). (2) The overrun was there under DSPARK too (it hit whatever followed the scratch); re-run one DSPARK mono
-S1 gsm8k200 as a regression check. (3) Back to section 10.22's open items (bucket-384 fault, A/B).
+DSPARK regression with the fix: mono S1, gsm8k200 TEMP 0 THREADS 1 (K1 every step) 0.98, accept 4.947, 4 concurrent
+correct, no fault (`results/acc/dspark_mono_k1fix_t1`).
+**Next:** push ad8388a when the user says so; then section 10.22's open items (bucket-384 fault, A/B).
 **Repro of the old failure (pre-fix k1.py):**
 ```bash
 ulimit -c 0; S=/workspace/claude-skills/kimi-k31/scripts
@@ -1130,4 +1131,6 @@ Fix: `scratch_bytes()` sizes for `MAX_BLOCKS` (runner scratch 789,056 B; K2 alre
 fails at load instead of corrupting a neighbour. Result: wide_req 4 correct with the debug checks on (no free-list
 change, no indexer OOB); gsm8k200 TEMP 0 THREADS 16 with CUDA graphs 0.975, accept 5.126 req-weighted, wall 26.7 s
 (`results/acc/dflash_mono_k1fix`; no mono 0.98 / 4.956), 2 more x 4 concurrent correct, no fault.
+DSPARK regression (same fix): gsm8k200 TEMP 0 THREADS 1 0.98, accept 4.947, wall 85 s, 4 concurrent correct
+(`results/acc/dspark_mono_k1fix_t1`). Commit: sgl-amd-mono `k31/mono-s1` ad8388a (k1.py only, local).
 

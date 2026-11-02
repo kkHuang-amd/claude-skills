@@ -2,7 +2,41 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-02 14:35, mi355-4 -- wide on passes server gsm8k200 on both compilers, section 10.26)
+## CONTINUE HERE (handoff 2026-11-02 14:45, mi355-4 -- NEXT SESSION: wide on / off A/B on the DFLASH config)
+
+**Status:** wide layer launch fault-free and accurate (10.26: gsm8k200 0.985 bundled / 0.98 ROCm, buckets 16..384,
+DFLASH, CUDA graphs). Code on the fork kkHuang-amd/sgl-amd-mono `k31/mono-s1` @ 2df98d8 (= the local tree, clean).
+SGLang: sglang-k31-amd at origin/dev_amd b588cf7952, unmodified. The open question is speed: with the OLD code
+wide was SLOWER than off (10.22, DSpark, SIM 3.84: c4 8.72 vs 7.72, c16 16.61 vs 15.70, c48 31.35 vs 31.28 ms);
+the layer launch is now 2-5% faster but that has not been measured end to end. Mode: medium (high if wide is
+still slower and the step needs profiling). GPUs free, no server.
+**Next, in order (one server at a time; ~20 min to ready each, kill by the PID in logs/server_<tag>.pid):**
+1. Three servers, same DFLASH config, SIM=1 (simulated accept 3.84, so TPOT compares at equal acceptance),
+   bundled LLVM (default), each followed by `ab_bench.sh <tag>` (decode 8k/1k c4 / c16 / c48 + prefill 8k):
+   (a) off: no `--enable-amd-monokernel`                       -> results/ab/dflash_off_20261102
+   (b) S1 only: `--enable-amd-monokernel`                       -> results/ab/dflash_s1_20261102
+   (c) S1 + wide: (b) + `SGLANG_AMD_MONO_K31_WIDE=1` (buckets 16..384) -> results/ab/dflash_wide384_20261102
+   Check each server log for faults (`rg -c 'Memory access fault|Traceback'`) and that (c) logs `[k31 wide]` steps.
+2. Table TPOT / ITL / prefill TTFT for (a) / (b) / (c) into section 10.27 + OPT_TRACKER row 13 (node + date).
+   Decision: wide stays opt-in unless (c) <= (b) and (c) <= (a) at c4 / c16 / c48 beyond noise (~1%; rerun a case
+   alone if it is an outlier, record both).
+3. If (c) is slower: profile one c4 wide step (`capture_trace.sh`, `trace_breakdown.py`, `trace_layer_seq.py`):
+   per-layer host work, SGLang routed experts between launches, bank copies; compare to the standard step.
+   Optional: (c) again with `SGLANG_AMD_MONO_ROCM_LLVM=/opt/rocm/llvm` if ROCm's layer time differs.
+**Repro (from /tmp):**
+```bash
+ulimit -c 0; S=/workspace/claude-skills/kimi-k31/scripts; D=/shared_nfs/RadixArk/K31-DFlash2-MLA5-Preview1027-Step29301-SWA1024
+DF="--speculative-algorithm DFLASH --speculative-draft-model-path $D"
+bash $S/launch_server.sh dflash_off $DF                                                  # (a)
+bash $S/launch_server.sh dflash_s1 --enable-amd-monokernel $DF                          # (b)
+SGLANG_AMD_MONO_K31_WIDE=1 bash $S/launch_server.sh dflash_wide384 --enable-amd-monokernel $DF   # (c)
+rg -m1 'ready to roll|Traceback|Memory access fault' /shared_nfs/kimi-k31/logs/server_<tag>.log   # wait
+bash $S/ab_bench.sh <tag>_20261102; rg 'TPOT|TTFT' /shared_nfs/kimi-k31/results/ab/<tag>_20261102/summary.txt
+kill $(cat /shared_nfs/kimi-k31/logs/server_<tag>.pid); rm -f /tmp/gpucore*
+```
+
+### Previous handoff (2026-11-02 14:35, superseded above): wide on passes server gsm8k200 on both compilers
+
 
 **Status:** the wide layer launch is fault-free and accurate in the server: gsm8k200 TEMP 0, DFLASH, CUDA graphs,
 buckets 16..384: bundled 0.985 / 0.985 (THREADS 16 / 48), ROCm LLVM 0.98 / 0.98; no fault; bucket 384 used

@@ -1,6 +1,6 @@
 # Kimi-K3.1 — CONTINUE HERE
 
-Owner node: mi355-4. Last updated 2026-11-02 12:00.
+Owner node: mi355-4. Last updated 2026-11-02 11:45.
 
 **RULES: every optimization must follow `NUMERICS_RULES.md`** (linear ops / shared expert / MoE combine / AG-RS-AR
 in BF16, KDA state FP32, KV FP8 ok, MoE a4w4 + MX dispatch ok, no static EPLB).
@@ -12,7 +12,9 @@ HERE / section 10.23.**
 pressure (1105 SGPR spills), not a size bug or race -> `MONO_KERNEL.md` section 10.24.**
 **2026-11-02 12:00 (mi355-4): fixed by compiling mono kernels with ROCm LLVM instead of FlyDSL's bundled LLVM
 (`sgl_amd_mono/common/rocm_codegen.py`, uncommitted): repro clean, all layer_bench variants PASS, same speed.**
-**NEXT SESSION: `MONO_KERNEL.md` CONTINUE HERE (wire ROCm codegen into the server, gsm8k with wide on).**
+**2026-11-02 11:45 (mi355-4): NOT clean -- with ROCm LLVM the server died in wide warmup and a bench variant
+(bucket 128, t1 off, nvb 1/1, step >= 8) faults every time (bundled does not) -> `MONO_KERNEL.md` section 10.25.**
+**NEXT SESSION (high reasoning): `MONO_KERNEL.md` CONTINUE HERE (chase the 10.25 fault's descriptor first).**
 
 **2026-11-02 (mi355-4):** sglang-k31-amd moved to the rewritten `origin/dev_amd` b588cf7952 (DFlash2 drafts on ROCm
 DCP, A4W4 MoE); new draft `/shared_nfs/RadixArk/K31-DFlash2-MLA5-Preview1027-Step29301-SWA1024` (5 SWA-1024 MLA

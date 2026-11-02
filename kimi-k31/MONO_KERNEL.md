@@ -2,7 +2,38 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-02 12:00, mi355-4 -- bucket-384 fault FIXED by ROCm LLVM codegen, section 10.24)
+## CONTINUE HERE (handoff 2026-11-02 11:45, mi355-4 -- ROCm LLVM exposes a 2nd fault (bucket 128, t1 off, nvb 1/1), section 10.25)
+
+**Status:** ROCm LLVM codegen (10.24) fixes the bucket-384 fault but is NOT a clean fix: with it the server died
+in wide warmup (bucket 128) and a bench variant faults every time. Server path blocked until this is understood.
+Do NOT run the server with `SGLANG_AMD_MONO_ROCM_LLVM` until 10.25 is resolved. Mode: high reasoning.
+**Repro (8 GPUs, ~25 s warm, from /tmp; deterministic):**
+```bash
+ulimit -c 0; B=/sgl-workspace/sgl-amd-mono/test/kernels/kimi_k31/layer_bench.py
+SGLANG_AMD_MONO_ROCM_LLVM=/opt/rocm/llvm torchrun --nproc-per-node 8 $B --rows 128 --nvb-a 1 --nvb-m 1 --no-t1 --launches 8 --step 8   # faults (3-7 GPUs)
+torchrun --nproc-per-node 8 $B --rows 128 --nvb-a 1 --nvb-m 1 --no-t1 --launches 68 --step 68        # bundled LLVM: no fault
+rm -f /tmp/gpucore*     # --no-t1 always FAILs numerically (bench does not feed mid): fault check only
+```
+rocgdb on all ranks: `/shared_nfs/kimi-k31/results/m384_fault_20261102/k31_gdb_wrap.sh` pattern (precise-memory,
+`FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1`, one log per rank; see 10.25 for the m128 wrapper).
+**Next, in order:**
+1. Is the faulting load's descriptor base (s[64:67] = 0x7fbe11dc0000) the right buffer? Print the bench's tensor
+   pointers (bank, cw_m, prefix_out ...) on the faulting rank, or chase the descriptor in the ROCm ISA (needs an
+   ISA dump of the ROCm build: in rocm_codegen keep the .ll / add `-S` output when a dump dir is set; chase.py and
+   rdef.py in the results dir work on ROCm ISA, chase.py follows VGPR-lane spills).
+2. If the base is wrong: same method as 10.24 (IR correct? reaching defs of the spill slot) -> compiler bug in
+   ROCm LLVM too -> the real fix is SGPR pressure (both compilers fail on different variants).
+   If the base is right (in-range load faulting?), re-read: the dmesg says write; the faulting instruction may be
+   a store nearby -> kernel race / OOB, possibly the same as 10.22 (2) (bucket 128 cold start, 1 in 3, bundled).
+3. Then resume: server gsm8k200 (DFLASH, CUDA graphs, wide on, buckets to 384; THREADS 16 and 48), commit, report
+   to FlyDSL.
+**Code state (uncommitted, /sgl-workspace/sgl-amd-mono on k31/mono-s1 @ ad8388a):** `common/rocm_codegen.py` (new),
+`__init__.py` (install behind SGLANG_AMD_MONO_ROCM_LLVM), `stages/moe_front.py` (rgat read CM_SYS),
+`test/kernels/kimi_k31/layer_bench.py` (ROCm option, per-replay barrier, DEBUG-K31 pad), `gfx950/layer.py`
+(DEBUG-K31 `K31_DBG_STOP` / `K31_DBG_LLVM` only), plus the older `spec.py` / `wide.py` edits. Remove all
+`# DEBUG-K31` before any commit. GPUs free, no server.
+
+### Previous handoff (2026-11-02 12:00 doc time, superseded: "FIXED by ROCm LLVM" was premature)
 
 **Status:** the bucket-384 fault is FlyDSL 0.4.1's bundled AMDGPU backend: the same LLVM IR through ROCm's LLVM
 (AMD clang 23.0.0git 8f497e09) is correct. New `sgl_amd_mono/common/rocm_codegen.py` routes FlyDSL device codegen
@@ -1238,3 +1269,26 @@ This works around the backend bug rather than fixing it; a minimal LLVM reproduc
 - layer_bench "own logits: 1 rows" FAILs (rare, both compilers) were a bench race: a peer's next replay pushed
   logits into this rank's buffer while it read them for the check. Fixed with a sync + barrier per replay
   (6 runs x 2 sizes x 40 replays: 0 rows). route_row now reads the gathered logits with CM_SYS (hardening).
+
+### 10.25 ROCm LLVM exposes a second fault: bucket 128, t1 off, nvb 1/1 (mi355-4, 2026-11-02, OPEN)
+
+- Wiring: `sgl_amd_mono.register_specs()` calls `rocm_codegen.install()` when `SGLANG_AMD_MONO_ROCM_LLVM` is set;
+  scope = kernels whose compile is triggered from this repo's code (call-stack check), aiter's FlyDSL kernels keep
+  the bundled codegen (`SGLANG_AMD_MONO_ROCM_LLVM_SCOPE=all` for every kernel). test_contract: 5 failures, the
+  same on the unmodified `__init__.py` (pre-existing).
+- Server (`launch_server.sh rocm_wide384`, SIM=0, DFLASH draft, `--enable-amd-monokernel`,
+  `SGLANG_AMD_MONO_K31_WIDE=1`, default buckets 16..384, CUDA graphs): weights loaded, warmup built buckets
+  16 / 32 / 64 / 128, then GPU 7 faulted in `k31_kda_layer_m128_..._a10_m10of8_l68_..._t0_r0` at 0x7e71358b3000
+  (heap range), dmesg write + PERMISSION_FAULTS 0x5; rank 7 aborted (`logs/server_rocm_wide384.log`).
+- Bench: `--rows 128 --nvb-a 1 --nvb-m 1 --no-t1 --launches S --step S` faults for S = 8 / 16 / 32 / 68 with
+  ROCm LLVM (3 / 3 runs at 68), on 3-7 GPUs, heap addresses. Bundled LLVM at S = 68: no fault. ROCm, t1 on,
+  S = 68: PASS. The 10.24 sweeps never ran nvb 1/1 + t1 off + step > 4.
+- rocgdb on every rank (ROCm build, debug info; wrapper `/tmp/k31_gdb_rocm.sh`: every rank under
+  `rocgdb -batch -ex 'set amdgpu precise-memory on' -ex run -ex 'info line *$pc' -ex 'bt 6' -ex 'info registers'`,
+  log `logs/m384dbg/gdb_m128rocm_r<rank>.log`): ranks 0 / 4 / 6 SIGSEGV at attnres.py:67 from layer.py:295
+  (T5 MLP seam: `post._seam_row` -> `attnres_row`), faulting instr `buffer_load_dwordx4 v[26:29], v2, s[64:67]`,
+  s[64:67] = (lo 0x11dc0000, hi 0x7fbe, -1, 0x27000), v2 = 0x42800 = row 19's bank offset ((row*nbk + r)*sl*2
+  bytes). Ranks 1 / 2 / 3 / 5 stopped at guard.py:97 (the deliberate stop after a peer failed).
+- Open: whether base 0x7fbe11dc0000 is that launch's bank (then the load is in range and something else faults)
+  or another buffer; dmesg reports a write. Common factor of 10.24 and 10.25: the SGPR pressure (~1000+ spills);
+  each compiler fails on a different variant.

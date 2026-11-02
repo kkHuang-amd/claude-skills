@@ -2,7 +2,32 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-02 16:35, mi355-4 -- NEXT SESSION: remove the wide glue, then the run boundaries)
+## CONTINUE HERE (handoff 2026-11-02 18:50, mi355-4 -- NEXT SESSION: shrink the run boundaries (old Next 2))
+
+**Status:** Next 1 DONE (section 10.28): the layer launch reads SGLang's conv cache by slot and writes
+`intermediate_conv_window` itself; `wide.py` staging gone. Gates: layer_bench variants PASS, pre_attn_bench windows
+exact, fault matrix 50 runs both compilers 0 faults, wide_check real model windows 3.1-3.4e-3, gsm8k200 TEMP 0
+0.975 (T48) / 0.98 (T16), spills m128 51 -> 28, m384 131 -> 106. A/B TPOT c4 / c16 / c48: off 7.87 / 15.30 / 29.79,
+wide 8.29 / 15.56 / 30.49 (was 8.81 / 15.94 / 31.16) -> wide still +5.3 / +1.7 / +2.3%, stays opt-in.
+Code: sgl-amd-mono k31/mono-s1 @ 0a9684e, pushed to the fork kkHuang-amd/sgl-amd-mono (one commit on 2df98d8). sglang-k31-amd dev_amd b588cf7952
+unchanged. GPUs free, no server (mi355-4). `~/.flydsl/cache` was moved to `~/.flydsl/cache.bak_20261102` (old
+binaries; do not restore). Base worktree for A/B: /tmp/mono_base (2df98d8, mi355-4 only).
+**Next, in order:**
+1. Shrink the run boundaries (~52 us a run x 23): measure entry / exit per run from c16 traces of the new code
+   (`capture_trace.sh`, `scripts/seg_attr.py`; `traces/{wide384_c16,off_c16b}_20261102` are the old-glue traces,
+   delete when done), then options: DSA layer reads / writes the column-sharded state (no fold / AG /
+   `_column_split_tail`), or fuse the DSA layer's MoE tail into the next run's first launch (t1 on). Decision rule:
+   wide on only if <= off at c4 / c16 / c48 beyond ~1% noise.
+2. c4: the m32 launch only ties the chain; check whether the window stores (24 a channel) or the lazy table loads
+   cost the +1-2% a layer (`layer_bench --rows 32,128 --nvb-a 3 --write-a --nvb-m 4`, base vs new, cache off).
+3. Longer term (design only first): cover the DSA layer in the launch (one run for the whole model).
+**Repro:** gates: `/shared_nfs/kimi-k31/results/convwin_20261102/{k31_gate.sh,k31_spill2.sh,k31_matrix2.sh}` (copy
+to /tmp; matrix sets FLYDSL_RUNTIME_ENABLE_CACHE=0). Servers / A/B as in the 14:45 handoff below
+(`SGLANG_AMD_MONO_K31_WIDE=1 bash $S/launch_server.sh <tag> --enable-amd-monokernel $DF`, `ab_bench.sh <tag>`);
+wide cold start ~23 min, ~3 min warm. Real-model check: `SGLANG_AMD_MONO_K31_WIDE_CHECK=8 SIM=0 ... --disable-cuda-graph`,
+then `python3 $S/wide_req.py 4` / `16`.
+
+### Previous handoff (2026-11-02 16:35, superseded above: Next 1 done in 10.28): remove the wide glue, then the run boundaries
 
 **Status:** A/B and c4 / c16 profiling done (section 10.27). DFLASH, SIM 3.84: off TPOT c4 7.86 / c16 15.28 / c48
 29.76 ms; S1 = off (widths 1..8 = one request only); S1 + wide 8.81 / 15.94 / 31.16 (+12 / +4 / +5%) -> wide stays
@@ -1566,3 +1591,62 @@ layer too (one run for the whole model, no per-run entry / exit).
  Next options: (1) launch reads conv state from the cache by st_idx and writes the verify windows
 itself (removes ~2 ms / step at c4, wide ~= off); (2) make the launch itself faster than the chain (the only way
 to a gain); check the c16 m128 layer the same way before deciding.
+
+### 10.28 Conv-window glue removed: the launch reads SGLang's conv cache and writes the verify windows (mi355-4, 2026-11-02)
+
+Code: sgl-amd-mono k31/mono-s1 @ 0a9684e (on 2df98d8; fork). Results / scripts:
+`/shared_nfs/kimi-k31/results/convwin_20261102/`, logs `/shared_nfs/kimi-k31/logs/convwin/`.
+- `stages/kda_wide.kda_head`: the conv state is read only, by its strides (SGLang's conv cache [slot, 3, C] passed as
+  `.mT`; no write-back), and the conv thread of channel c stores token j's window (the 3 conv inputs up to and
+  including token j: `seq[j + 1 .. j + 3]`, seq = carried window ++ the L new inputs) to
+  `conv_win[win_row[req], j, q, c]` = SGLang's `intermediate_conv_window[0][layer]` (dense [size + 1, L, 3, C] for
+  KDA: `conv_window_dedup_enabled` is False for KDA; written by strides, so the dedup view would also work).
+  No store if the slot or `win_row` is < 0. 24 bf16 stores a channel instead of the 11 conv-state stores.
+- `pre_attn.kda_table`: + `conv_win`, `win_row` (int32 [R]) pointers and `cw_seq / cw_tok / cw_q`; `_kda_args`
+  loads an entry where it is read (none live across the stage; 10.26 style).
+- `wide.py`: `self.stage`, the `_kda_table` gather + index_put and `_kda_finish` (gather x2 + cat + index_put) are
+  gone; `_kda_step` fills `st_idx` and `win_row` (= vrows) once a step (4 small ops a step instead of 6 a layer).
+  The KDA table (built once per bucket / layer) points at the cache and the layer's window buffer.
+- Checks: `layer_bench` windows rel L2 vs the reference in_proj rows + the unused row untouched; `pre_attn_bench`
+  windows exact vs its own in_proj rows; `wide_check` compares ours to the windows SGLang's attention wrote, after
+  the layer (`windows` in its line).
+
+Bench gate (bundled, `k31_gate.sh`): a0/m0, a1/m1, a3w/m4, a3w/m4 68 launches, capture: PASS at 16..384, windows
+rel L2 4.6e-3 .. 6.8e-3 (in_proj rounding vs the torch reference); restart FAIL on h / latent / shared as before
+(the bench keeps the reference unchanged for --restart; mid / core / windows pass); --no-t1 FAILs in the base too
+(same reason, a fault / spill variant only). pre_attn_bench kda 8 (nvb 0 and 3w): PASS, windows 0 off.
+Spills (bundled, rank-0 ISA, `k31_spill2.sh`): t1 on a3w/m4 m128 51 -> 28, m384 131 -> 106; t1 off a1/m1 m128
+60 -> 35; sgpr_count 106 / 104 unchanged, vgpr 171 -> 173, 250 -> 251.
+Layer time (a3w/m4 t1 on, bundled, same session, base = 2df98d8 worktree):
+```text
+m         16      32      64      128     256     384
+base us   106.3   115.6   131.3   163.9   282.5   336.4
+new  us   107.0   116.6   132.2   167.2   286.1   341.1    (+0.7 .. +4.7 us, ~1-2%: the window stores)
+```
+against ~34 us a layer of glue removed (10.27, m128). FlyDSL cache hazard found on the way: the runtime cache key
+does not cover helper modules called through module attributes (`pre._kda_args`, `kdaw.kda_heads`): the base
+worktree, run after the new code with the cache on, loaded the new layer binary (same name and key) and faulted.
+Use `FLYDSL_RUNTIME_ENABLE_CACHE=0` for A/B of kernel edits, and move `~/.flydsl/cache` aside before a server on
+changed kernel code (else it serves the old binary with the new table layout).
+Fault matrix (`k31_matrix2.sh` = 10.26's matrix, cache off; `results/convwin_20261102/matrix.txt`): 50 runs x 6
+buckets, both compilers: 0 faults, every exit 0, every t1-on run PASS (t1-off FAIL by design, see above).
+Real model (`wide_check`, layer 8, DFLASH, eager, SIM=0, 4 / 16 concurrent x 2; logs
+`logs/server_convwin_chk{,2}.log`): windows vs the ones SGLang's attention wrote 3.1e-3 .. 3.4e-3 rel L2 (rows 16 /
+32 / 128, 25 steps; our in_proj rounding vs SGLang's, same order as x 3.7e-3), core 6.1e-3 .. 7.1e-3, latent 5.1e-3
+(as 10.20). The first run faulted (addr 0x0) at rows 40 on the width-128 config: wide_check launched unpadded rows
+on the next bucket's config, which is wrong in the base too (layer_bench m 24 / 40 / 48 / 56 on the next bucket's
+config: latent rel 0.08-0.10 FAIL with base and new; no fault there); serving always pads to the bucket.
+wide_check now checks only steps whose rows are a configured width.
+Server gsm8k200 TEMP 0 (wide on, buckets 16..384, DFLASH, CUDA graphs, SIM=0, bundled; `results/acc/convwin_t{48,16}`):
+THREADS 48 0.975 (accept 5.10), THREADS 16 0.98 (5.14); no fault, running-req up to 44 (10.26: 0.985 / 0.985).
+A/B (DFLASH, SIM=1 accept 3.84, CUDA graphs, bundled, same session; `results/ab/convwin_{wide384,off}_20261102`):
+```text
+case                         TPOT c4 / c16 / c48 ms   P90 ITL c4 / c16 / c48 ms   prefill 8k TTFT ms
+off (rerun)                  7.87 / 15.30 / 29.79     9.47 / 15.91 / 26.33        461.4
+wide, glue removed           8.29 / 15.56 / 30.49    10.05 / 16.26 / 27.14        460.2
+wide, 10.27 (with glue)      8.81 / 15.94 / 31.16    10.58 / 16.81 / 28.11        459.7
+```
+Off reproduces 10.27 within 0.3%. Removing the glue gains 0.52 / 0.38 / 0.67 ms TPOT (x 3.84 tokens = ~2.0 /
+1.5 / 2.6 ms a step; c16 expected ~2.4); wide is still +5.3% / +1.7% / +2.3% vs off -> stays opt-in. What is left
+is the run boundaries (10.27: entry +0.71, exit +0.49 ms / step at c16) and, at c4, a launch that only ties the
+chain (m32), plus the window stores (+1-2% a layer). Diff: `results/convwin_20261102/sgl_amd_mono_worktree.diff`.

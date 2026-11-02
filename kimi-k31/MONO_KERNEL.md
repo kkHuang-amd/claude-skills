@@ -2,7 +2,34 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-02 13:30, mi355-4 -- SGPR pressure cut (1048 -> ~50 spills), fault matrix clean on both compilers, section 10.26)
+## CONTINUE HERE (handoff 2026-11-02 14:35, mi355-4 -- wide on passes server gsm8k200 on both compilers, section 10.26)
+
+**Status:** the wide layer launch is fault-free and accurate in the server: gsm8k200 TEMP 0, DFLASH, CUDA graphs,
+buckets 16..384: bundled 0.985 / 0.985 (THREADS 16 / 48), ROCm LLVM 0.98 / 0.98; no fault; bucket 384 used
+(running-req up to 46-48). Fixes: SGPR pressure cut + per-wave peer puts (10.26), and the `rocm_codegen` scope
+now follows the direct caller of FlyDSL (SGLang's GEMM inside wide.backbone kept failing on ROCm clang). All code
+uncommitted. GPUs free, no server.
+**Next, in order:**
+1. Remove `# DEBUG-K31` hooks (layer.py dstop / K31_DBG_LLVM; layer_bench K31_DBG_PAD / K31_DBG_PTRS / K31_DBG_OWN;
+   rocm_codegen K31_DBG_ROCM_DUMP), re-run `k31_spill.sh` t1-on on both compilers, split commits (K1 DFLASH
+   spec; SGPR pressure + put_each_peer; rocm_codegen; bench), ask before pushing.
+2. A/B wide on vs off on the DFLASH serving config (`ab_bench.sh`: c4 / c16 / c48 TPOT; wide was slower at c4 /
+   c16 in 10.22 with the old code). Bundled LLVM unless ROCm is faster; then decide on keeping `rocm_codegen`.
+3. Report both compiler bugs (10.24 / 10.25 spill-lane corruption, 10.26 waterfall rsrc clobber) with the evidence.
+**Repro (8 GPUs, from /tmp):**
+```bash
+S=/workspace/claude-skills/kimi-k31/scripts; D=/shared_nfs/RadixArk/K31-DFlash2-MLA5-Preview1027-Step29301-SWA1024
+SGLANG_AMD_MONO_K31_WIDE=1 SIM=0 bash $S/launch_server.sh wide384 --enable-amd-monokernel --speculative-algorithm DFLASH \
+  --speculative-draft-model-path $D      # + SGLANG_AMD_MONO_ROCM_LLVM=/opt/rocm/llvm for ROCm codegen; ~20 min cold
+NUM=200 THREADS=48 TEMP=0 bash $S/gsm8k_gate.sh wide384_t48 /shared_nfs/kimi-k31/logs/server_wide384.log
+```
+**Code state (uncommitted, /sgl-workspace/sgl-amd-mono on k31/mono-s1 @ ad8388a):** as in the 13:30 handoff plus
+`common/rocm_codegen.py` `_from_repo` (direct caller). Full diff:
+`/shared_nfs/kimi-k31/results/m384_fault_20261102/26_sgl_amd_mono_worktree.diff`.
+
+### Previous handoff (2026-11-02 13:30, superseded above): SGPR pressure cut, fault matrix clean on both compilers
+
+
 
 **Status:** the wide layer launch no longer faults: SGPR spills cut from ~1100 to ~50 (m128) / ~140 (m384) by
 per-stage kernel-arg reloads, region addresses formed at use, a non-unrolled top-16 and per-wave peer puts
@@ -1392,3 +1419,8 @@ Evidence and numbers: `/shared_nfs/kimi-k31/results/m384_fault_20261102/FINDINGS
   in 10.24; the bench now ignores swaps of keys closer than 1e-6 (and w_own uses identical-id rows only).
 - Other kernels on the edited code: chain / pre_attn / coll / gemm_coll / ag_gemm benches PASS; coll flag stress
   18 x 40020 launches, 0 mismatches.
+- Server (mi355-4, 2026-11-02 14:35), gsm8k200 TEMP 0, DFLASH, CUDA graphs, wide on, buckets 16..384, SIM=0
+  (`results/acc/wide384_sgpr_*`): bundled THREADS 16 0.985 (accept 5.143) / THREADS 48 0.985 (5.258); ROCm LLVM
+  0.98 (5.136) / 0.98 (5.102). No fault; running-req up to 46 / 48. The first ROCm server died in decode graph
+  capture: SGLang's FlyDSL bf16 GEMM (llvm option `slp-vectorize-once-used`, bundled-only) went through ROCm clang
+  because wide.backbone was on the stack; `rocm_codegen._from_repo` now uses the innermost frame outside FlyDSL.

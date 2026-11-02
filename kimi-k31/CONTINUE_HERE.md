@@ -1,6 +1,6 @@
 # Kimi-K3.1 — CONTINUE HERE
 
-Owner node: mi355-4. Last updated 2026-11-02 13:30.
+Owner node: mi355-4. Last updated 2026-11-02 14:35.
 
 **RULES: every optimization must follow `NUMERICS_RULES.md`** (linear ops / shared expert / MoE combine / AG-RS-AR
 in BF16, KDA state FP32, KV FP8 ok, MoE a4w4 + MX dispatch ok, no static EPLB).
@@ -19,7 +19,9 @@ rebuilt as (bank.lo, cw_a.hi)); IR correct. Both compilers fail on this kernel -
 the compiler swap. Wide mono + ROCM_LLVM stay off; mono S1 unaffected -> `MONO_KERNEL.md` section 10.25.**
 **2026-11-02 13:30 (mi355-4): SGPR pressure cut (spills ~1100 -> ~50 / ~140); fault matrix clean on BOTH compilers
 (50 runs x 6 buckets), layer 2-5% faster, other kernel benches PASS; uncommitted -> `MONO_KERNEL.md` section 10.26.**
-**NEXT: `MONO_KERNEL.md` CONTINUE HERE (server gsm8k200 with wide on, bundled LLVM first).**
+**2026-11-02 14:35 (mi355-4): wide on passes server gsm8k200 (DFLASH, CUDA graphs, buckets to 384): bundled 0.985 /
+0.985 (THREADS 16 / 48), ROCm LLVM 0.98 / 0.98, no fault. Uncommitted.**
+**NEXT: `MONO_KERNEL.md` CONTINUE HERE (remove DEBUG-K31, split commits, then wide on/off A/B).**
 
 **2026-11-02 (mi355-4):** sglang-k31-amd moved to the rewritten `origin/dev_amd` b588cf7952 (DFlash2 drafts on ROCm
 DCP, A4W4 MoE); new draft `/shared_nfs/RadixArk/K31-DFlash2-MLA5-Preview1027-Step29301-SWA1024` (5 SWA-1024 MLA

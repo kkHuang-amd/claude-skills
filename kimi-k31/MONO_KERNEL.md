@@ -2,7 +2,28 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-02 09:45, mi355-4 -- K1 under DFLASH ROOT-CAUSED + FIXED, section 10.23)
+## CONTINUE HERE (handoff 2026-11-02 10:40, mi355-4 -- bucket-384 fault ROOT-CAUSED: compiler miscompile under SGPR pressure, section 10.24)
+
+**Status:** the wide layer launch's bucket-384 fault is an AMDGPU backend miscompile under extreme SGPR pressure
+(`.sgpr_spill_count` 1105, `.sgpr_count` 106, `.vgpr_count` 254), not a size bug (K1 class) and not a race. T5's
+`_rs_piece` store (chain.py:114) takes its `prefix_out` descriptor from a spill slot that last held
+`par*half + offs["agf"]` (halves swapped) -> base 0x0000_6000_0000_0000. LLVM IR is correct. Compiler knobs do not
+help (`amdgpu-spill-sgpr-to-vgpr=false` still faults and is ~2x slower). Fix = cut SGPR pressure (10.24).
+**Now:** item 1 of the pressure plan (lazy addresses: `coll.region_context` without eager `_own` / `peer_bases`,
+scratch region pointers at use). Owner mi355-4, code in /sgl-workspace/sgl-amd-mono (uncommitted).
+**Pass criteria:** `.sgpr_spill_count` near 0 (ISA via `FLYDSL_DUMP_IR=1 FLYDSL_DEBUG_DUMP_ASM=1`), the repro
+below no longer faults, layer_bench PASS, `us: layer` m128 <= 173.6 / m384 <= 343.7 (t1 on, nvb a3w m4).
+**Repro (8 GPUs, ~25 s warm, from /tmp):**
+```bash
+ulimit -c 0; torchrun --nproc-per-node 8 /sgl-workspace/sgl-amd-mono/test/kernels/kimi_k31/layer_bench.py \
+  --rows 384 --nvb-a 3 --write-a --nvb-m 4 --no-t1        # faults today; rm -f /tmp/gpucore* after
+```
+**NEXT SESSION, in order:** (1) SGPR pressure items 1-3 of 10.24, measure after each; (2) then the old list
+below from its item 2 (commit wide / DFLASH edits, gsm8k with wide on, DFLASH re-baseline, c4 wide profile).
+Remove the `# DEBUG-K31` hooks (layer.py `K31_DBG_STOP` / `K31_DBG_LLVM`, layer_bench.py `K31_DBG_PAD`) before
+any commit.
+
+### Previous handoff (2026-11-02 09:45, K1 under DFLASH root-caused + fixed, section 10.23)
 
 **Status:** root cause found and fixed (option B, no K1-decline mitigation). K1's scratch layout grows with the
 layer's bank depth (`nblocks`), but `k1.scratch_bytes()` sized the runner's shared scratch for `nblocks=1`. Every
@@ -1152,3 +1173,50 @@ change, no indexer OOB); gsm8k200 TEMP 0 THREADS 16 with CUDA graphs 0.975, acce
 DSPARK regression (same fix): gsm8k200 TEMP 0 THREADS 1 0.98, accept 4.947, wall 85 s, 4 concurrent correct
 (`results/acc/dspark_mono_k1fix_t1`). Commit: sgl-amd-mono `k31/mono-s1` ad8388a (k1.py only, local).
 
+### 10.24 Bucket-384 fault: AMDGPU miscompile under SGPR pressure (mi355-4, 2026-11-02)
+
+Artifacts: `/shared_nfs/kimi-k31/results/m384_fault_20261102/` (`FINDINGS.md`, IR, both ISAs, gdb log, the
+CFG / spill-chain scripts `chase.py` / `rdef.py`); logs `logs/m384dbg/`.
+Evidence, in order:
+- Server and bench faults: "Write access to a read-only page" at 0x6000_0000_0xxx on every rank, TCP client
+  (dmesg). The guard's deliberate stop is a store to 0x0 (the m32 faults in `server_wide6/8.log` were that).
+- Scratch padded by its own size on both sides (0xA5 canary): still faults -> no scratch overrun.
+- Stage bisection (debug `K31_DBG_STOP`): T2 .. route clean; adding `situ_row` faults, yet the faulting store
+  is in T5, which runs earlier -> register-allocation (code-shape) effect.
+- rocgdb (`set amdgpu precise-memory on`, `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1`): `buffer_store_dwordx4 ...
+  s[20:23]` at chain.py:114 (`_rs_piece`: store of the new residual to `rsrc(res_out)`, res_out = kernel arg
+  `prefix_out`), called from layer.py:292. Descriptor base 0x0000_6000_0000_0000; source pair s[62:63] =
+  (lo 0, hi 0x01026000).
+- LLVM IR: that store's rsrc is `make.buffer.rsrc(inttoptr %5)`, %5 = prefix_out. IR is correct.
+- ISA: s[62:63] is reloaded from SGPR-spill lanes 10/11 (v250 in the default build). Same lane layout with
+  `amdgpu-spill-sgpr-to-vgpr=false` (scratch slot 0, lanes 10/11), which still faults with the same value;
+  `no-stack-slot-sharing=true` still faults; `verify-machineinstrs` reports nothing.
+- CFG reaching definitions on the nospill ISA: the only store reaching T5's reload of that slot is in the kernel
+  front (.LBB0_57), lanes 10/11 <- s[54:55] <- `preg` (sync.py:121) = `par*half + offs["agf"]`
+  (0x1026000 = the pre-half peer region `agf`), hi / lo swapped -> exactly the observed (0, 0x1026000).
+Verdict: the backend feeds T5's prefix_out descriptor from the agf-offset spill slot. Why only bucket 384 /
+nvb_a 3 write / t1 off (and why bm 128, ks 8, t1 on hide it): each changes the code shape and so the SGPR
+allocation; only some allocations collide. Corrections to 10.22: with t1 off the up loop is empty, so ks changes
+the `pdone` size and the code, not "only task scheduling"; the race hypothesis is refuted.
+
+Compiler workaround cost (layer_bench `us: layer`, nvb a3w m4, t1 on), and it does not fix the fault:
+```text
+                          m128    m384
+default                   173.6   343.7
+spill-sgpr-to-vgpr=false  341.4   635.5
+```
+
+Where the pressure comes from (static spill instrs, default build: writelane 1105 + readlane 1143 of 27,847):
+`coll.region_context` builds every region's `_own` address and `peer_bases` (8 peer bases) at kernel entry for
+ca / co / cf (~20 x 64-bit live across the launch; sync.py:126 / 121 / 116 / 141 ~520), the 34 64-bit kernel
+args stay live, layer.py:215-232 builds 10 scratch region pointers at entry (~180), and the unrolled route
+top-16 argmax (moe_front.py:121-130, a 64-bit lane mask per compare, ~290). The wave limit is ~102 SGPRs.
+
+Plan (measure spill count + `us: layer` + the repro after each):
+1. Lazy addresses: `region_context` keeps only `own`, `peers` and `par`; `<name>_own` / `<name>_of(p)` form
+   the address at use (peer base `s_load` from the `peers` table, scalar-cache hit); scratch regions as
+   `scratch + const` at use.
+2. Kernel args through a device-side pointer table, loaded per stage (guard against the loads being CSE'd /
+   hoisted back to the entry).
+3. Route top-16: do not fully unroll (loop over k) so the per-compare masks do not all stay live.
+This works around the backend bug rather than fixing it; a minimal LLVM reproducer is a later item.

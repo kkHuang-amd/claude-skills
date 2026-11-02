@@ -10,6 +10,7 @@ SGLang: sglang-k31-amd at origin/dev_amd b588cf7952, unmodified. The open questi
 wide was SLOWER than off (10.22, DSpark, SIM 3.84: c4 8.72 vs 7.72, c16 16.61 vs 15.70, c48 31.35 vs 31.28 ms);
 the layer launch is now 2-5% faster but that has not been measured end to end. Mode: medium (high if wide is
 still slower and the step needs profiling). GPUs free, no server.
+**Progress (mi355-4, 2026-11-02): (a) off done -> section 10.27; (b) S1 running.**
 **Next, in order (one server at a time; ~20 min to ready each, kill by the PID in logs/server_<tag>.pid):**
 1. Three servers, same DFLASH config, SIM=1 (simulated accept 3.84, so TPOT compares at equal acceptance),
    bundled LLVM (default), each followed by `ab_bench.sh <tag>` (decode 8k/1k c4 / c16 / c48 + prefill 8k):
@@ -1460,3 +1461,14 @@ Evidence and numbers: `/shared_nfs/kimi-k31/results/m384_fault_20261102/FINDINGS
   0.98 (5.136) / 0.98 (5.102). No fault; running-req up to 46 / 48. The first ROCm server died in decode graph
   capture: SGLang's FlyDSL bf16 GEMM (llvm option `slp-vectorize-once-used`, bundled-only) went through ROCm clang
   because wide.backbone was on the stack; `rocm_codegen._from_repo` now uses the innermost frame outside FlyDSL.
+
+### 10.27 A/B on the DFLASH config: off / S1 / S1 + wide (mi355-4, 2026-11-02)
+
+Config: `launch_server.sh` (DCP8, SIM=1 accept 3.84, no radix, CUDA graphs) + `--speculative-algorithm DFLASH`
+(K31-DFlash2 draft), bundled LLVM; sgl-amd-mono k31/mono-s1 @ 2df98d8, sglang-k31-amd dev_amd b588cf7952.
+`ab_bench.sh`: decode 8k/1k c4 / c16 / c48 (n = 4c) + prefill 8k c1. Results `/shared_nfs/kimi-k31/results/ab/<tag>`.
+
+```text
+case (tag)                        TPOT c4 / c16 / c48 ms   P90 ITL c4 / c16 / c48 ms   prefill 8k TTFT ms  faults
+(a) off   dflash_off_20261102      7.86 / 15.28 / 29.76     9.45 / 15.89 / 26.32        461.4               0
+```

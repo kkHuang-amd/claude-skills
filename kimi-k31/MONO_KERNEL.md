@@ -2,7 +2,36 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-02 22:00, mi355-4 -- PAUSED: boundaries done, wide still ties / loses; launch body next)
+## CONTINUE HERE (handoff 2026-11-03 12:00, mi355-4 -- wide L=6 works; still opt-in; launch-body optimizations next)
+
+**Status:** 10.32: K3.1-Pro weights, DFLASH step55000, AgentX settings (6 draft tokens, SIM 3.399). Wide supports
+L = 6 (sgl-amd-mono `k31/mono-s1` @ 8fc10da, pushed to the kkHuang-amd fork: partial-tile flag fix + L=6 + layer
+timeline). L=6 same-session A/B (TPOT x acc vs off): c4 +1.0 / c8 -0.7 / c16 -1.4 / c32 +1.7 / c48 -1.3% -> wide
+stays opt-in. c32 (m192) trace: +1.10 ms/step = L +0.46, Lfirst +0.75 (launch +0.40, pout / bank copies +0.39),
+Dafter_run -0.12. sglang-k31-amd detached at origin/dev_amd 4b7f7b13e8 (team k31-mono's 7 commits not merged).
+**Goal:** wide <= off beyond 1% at every bucket c4..c48.
+**Next, in order (each through the full gate below):**
+1. MoE front stage (m192 / m288 at L=6; +24 us at m256 L=8, 10.32): `layer_bench --timeline` vs `chain_bench
+   --timeline`; first finish_front's cross-XGMI latent push as whole 128 B lines, then FLAG_STRIDE on the
+   many-writer flags (mono-kernel skill section 5); weight prefetch while front waits for the seam only if measured
+   (vmcnt completes in order).
+2. Lfirst pout / bank copies: the launch reads SGLang's prefix / bank by stride (10.31 Next 4).
+3. route: per-lane sort + 16 wave-max pops (team mono/kimi-k31 05dfa48).
+4. Uncached launch scratch (team 3417e1a).
+**Files:** sgl-amd-mono `sgl_amd_mono/kimi_k31/{wide.py, gfx950/layer.py, stages/moe_front.py, stages/route*}`.
+**Gate per item:** `results/pro_20261103/k31_gate_l6.sh <tag> 6` and `... 8` (cache off; no-t1 = fault check
+only); ISA diff of paths that should not change; eager ENTRY_CHECK; gsm8k200 TEMP 0 T48 / T16 >= 0.975;
+same-session A/B c4..c48 + c32 trace.
+**Repro (scripts: `/shared_nfs/kimi-k31/results/pro_20261103/scripts`, defaults = the settings above):**
+```bash
+FLYDSL_RUNTIME_ENABLE_CACHE=0 bash /shared_nfs/kimi-k31/results/pro_20261103/k31_gate_l6.sh mytag 6
+mv ~/.flydsl/cache ~/.flydsl/cache.bak_<tag>   # before any server after a kernel edit; never restore
+SGLANG_AMD_MONO_K31_WIDE=1 bash $S/launch_server.sh wide_x --enable-amd-monokernel
+AB_CONC="4 8 16 32 48" bash $S/ab_bench.sh wide_x_ab
+```
+Do not export FLYDSL_RUNTIME_ENABLE_CACHE=0 in a long-lived shell (servers inherit it and cold-compile).
+
+### Previous handoff (2026-11-02 22:00, superseded above): boundaries done, wide still ties / loses; launch body next
 
 **Status (22:00, paused by the user):** 10.31: column exit (<= 64 rows) + deferred routed cast in the sgl-amd-mono
 worktree on 83d8a77, NOT committed (`results/entry_20261102/colx_worktree.diff`). Column exit checked (eager exit
@@ -1804,3 +1833,70 @@ kernels at m32 / m256 (layer_bench + the chain kernels' trace times); (3) commit
 layer_bench-free re-check (eager ENTRY_CHECK + gsm8k on the final code); (4) optional kernel: the last launch writes
 its prefix into `pfull` (stride H) and T1 reads SGLang's prefix by stride (drop the `pout` / `pfull` copies, ~0.2
 ms/step at c4).
+
+### 10.32 K3.1-Pro weights, DFLASH step55000, AgentX settings; wide at L = 6; layer timeline (mi355-4, 2026-11-03)
+
+Full notes: `/shared_nfs/kimi-k31/results/pro_20261103/NOTES.md`. Paths below are under `/shared_nfs/kimi-k31/`.
+Code: sgl-amd-mono `k31/mono-s1` 981c9eb (10.31's wide.py, after the checks below), e23ba96 [Test] layer
+timeline, d094525 [Fix] partial-tile flags, 8fc10da [Feat] L=6 wide (pushed: fork kkHuang-amd `k31/mono-s1`). Scripts: `results/pro_20261103/scripts` (kimi-k31/scripts with
+the Pro weights, the step55000 draft, 6 draft tokens, SIM 3.399; seg_attr.py knows `gemm2_a4w4_port`).
+
+Weights and draft:
+- `/shared_nfs/Kimi-K3.1-Pro` = HF moonshotai/Kimi-K3.1-Pro @ 535833b1b6 (sha256 of all LFS files checked). Same
+  tensor names / dtypes / shapes / shard map as `/shared_nfs/Kimi-K3.1`, different values; config's quant `ignore`
+  adds the gate and routed_expert up / down (BF16 in both): no code change.
+- `/shared_nfs/RadixArk/K31-DFlash2-MLA5-Preview1027-Step55000-SWA1024` (HF branch step55000 @ 1e8f8811c6).
+  Off, SIM=0, gsm8k200 TEMP 0, T48 / T16 (accept req-weighted): step29301 8 tokens 0.995 / 0.99 (3.72 / 3.76);
+  step55000 8 tokens 0.99 / 0.985 (4.89 / 5.07); step55000 6 tokens 0.985 / 0.99 (4.34 / 4.35).
+- From 09:10 every test uses AgentX settings: step55000, 6 draft tokens, SIM 3.399. Earlier numbers (8 tokens,
+  SIM 3.84) are not comparable.
+- sglang-k31-amd: detached HEAD b588cf7952 -> origin/dev_amd 4b7f7b13e8 (3 commits, comment + cookbook only: runs
+  before and after compare). Team k31-mono ee15183f58 (+7: DSA indexer fusions, DFLASH draft SWA verify attention,
+  `_mono_pre`): not merged, to be evaluated separately.
+
+Pro weights, 8 tokens (before the AgentX switch): gsm8k200 off 0.995 / 0.99, wide 0.985 / 0.985. c1: S1 TPOT 4.67
+vs off 5.19 (-10.0%). Eager ENTRY_CHECK: entry n 484 median 3.70e-3 (max 1.05e-2 one near-tie step), exit n 506
+median 3.27e-3 -> 981c9eb. c32 (m256) traces `traces/pro_{wide,off}_c32_20261103`: VERIFY wide 62.11 vs off 59.56
+(+2.55): L +1.37 (launch 296 us vs off 271 a layer), Lfirst +1.26, Dafter_run -0.11.
+
+Layer timeline (`layer.py timeline=True`: 14 marks into scratch `tl`, no new argument, off = same build;
+`layer_bench --timeline`; logs `logs/pro_tl`, cache off, a3w/m4 t1 on). Stage end, last CTA, us:
+```text
+m32:  up 15.6 seam 23.2 in_proj 45.3 kda 60.3 oproj 71.8 rs 74.0 mseam 83.5 front 98.0 route 109.2 sdown 115.4
+m256: push 22.6 up 44.9 seam 60.6 in_proj 125.7 kda 162.0 oproj 186.9 rs 191.8 mseam 210.1 front 265.5
+      route 276.7 sdown 285.9
+```
+- Start -> kda = the pre half (`pre_attn_bench --kda`: 60.4 / 163.3): no gain, no loss.
+- kda -> front 37.7 / 103.5 vs `chain_bench` 31.9 / 79.7: +6 / +24 us, all in the front stage (mseam -> front
+  14.5 / 55.4 vs 8.7 / 30.2): finish_front's router / latent TP gather + sgu, and no front_top / prefetch while it
+  waits for the seam. +24 us x 68 launches ~ the whole m256 gap.
+- T6 tail (route + SiTU + sdown) 17 / 20 us; route 11 us at both sizes (one wave a row, 16 rescans of 14).
+
+Wide at L = 6 (8fc10da): `REQ_BUCKETS` (2, 4, 8, 16, 32, 48) x L, `SUPPORTED_L` (6, 8), L from
+`runtime_context.get_spec`, `cfg_rows(b, L) = CFGS[8 b / L]`, `wide_widths()` = union over L; spec.py raises on an
+unsupported L. L = 8 buckets / configs / keys unchanged.
+- Partial tiles (d094525): at L = 6 the first gate failed on `latent` only (rel 3-9e-2) at rows 12..96 and faulted
+  at m192 (0x0, wait deadline). finish_front masked data rows but not flags: a split-K piece with r0 >= m published
+  `fgf` / `smark` on the next rank's band (or past the region for rank 7). Guarded `r0 < m` in
+  `moe_front.finish_front`, `pre_attn._finish` (pdone), `gemm_coll._push_band_flag`. Gate after (logs/entry/
+  l6_gate_fix, l8_gate_fix): L = 6 rows 12..288 and L = 8 rows 16..384 all PASS, 0 faults (no-t1: fault check only).
+  a3w/m4 us L = 8 106.9 / 116.5 / 132.5 / 166.6 / 285.7 / 340.2 (= before); L = 6 103.4 / 111.0 / 123.5 / 152.7 /
+  252.9 / 299.5 (rows 12..288).
+- Eager (SIM=0, `server_l6_chk.log`): entry n 528 median 3.65e-3 max 5.81e-3, exit n 552 median 3.31e-3 max 3.91e-3,
+  no fault. wide_check layer 8 rows 24: latent 5.0-5.2e-3, core 5.9-7.8e-3 (= 10.28).
+- gsm8k200 TEMP 0 (CUDA graphs, `results/acc/l6_wide_t{48,16}`): wide 0.99 / 0.99 (accept 4.36 / 4.30), off 0.985 /
+  0.99.
+- A/B (SIM=1 3.399, same session, `results/ab/l6ab_{off,wide}_20261103`):
+```text
+TPOT ms          c4     c8     c16    c32    c48      (acc 3.38-3.44)
+off              8.29  11.09  15.77  23.21  30.75
+wide             8.35  11.05  15.41  23.81  30.27
+TPOT x acc diff  +1.0%  -0.7%  -1.4%  +1.7%  -1.3%
+```
+- c32 (m192) traces `traces/l6_{wide,off}_c32` (`results/pro_20261103/cmp_l6_c32.txt`): VERIFY wide 56.38 vs off
+  55.28 (+1.10): L +0.46, Lfirst +0.75 (launch +0.40, pout / bank copies +0.39), Dafter_run -0.12, D +0.01.
+- These servers ran with `FLYDSL_RUNTIME_ENABLE_CACHE=0` leaked from a probe shell: cold compile (~15-20 min wide
+  warmup), results unaffected.
+
+Decision: wide stays opt-in (c4 / c32 lose). Next: CONTINUE HERE items 1-4 (MoE front stage, stride reads of the
+prefix / bank, route sort + pop, uncached launch scratch).

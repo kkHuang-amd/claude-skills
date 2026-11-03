@@ -2,7 +2,27 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-03 19:10, mi355-4 -- wide beats off at c4..c48; KVV partly done; next session)
+## CONTINUE HERE (handoff 2026-11-03 21:55, mi355-4 -- 10.37 in_proj configs: gate + gsm8k pass, A/B rerun running)
+
+**Status:** 10.37 (in_proj config by bucket rows, `wide.INP_ROWS`): L=6 m192 (c32) layer 217 -> 201 us (-7.4%), L=8
+m256 254 -> 247 (-3.1%), L=6 m96 141 -> 138; kernel gate L=6 / L=8 all PASS, 0 faults; eager ENTRY_CHECK = 10.36;
+gsm8k200 TEMP 0 T48 / T16 0.98 / 0.98. Code in the sgl-amd-mono worktree on 5a73ec0, NOT committed (`wide.py`,
+`test/kernels/kimi_k31/layer_bench.py --inp`). The first A/B hung (off server, TP0 in `flush_cache` ->
+`torch.cuda.empty_cache` -> hipFree spin, 40 min; not mono) -> killed; rerun started 21:55 (+08):
+`scripts/k31pro_inp1ab2_pipeline.sh`, log `logs/inp_20261103/inp1ab2_pipeline.out`, tags `inp1ab2_{off,wide}_20261103`,
+c32 traces `traces/inp1b_{off,wide}_c32`. Expected c32 ~-2% more vs 10.36 (~16 us x 68 launches).
+**Next:**
+1. Read the rerun: `cat logs/inp_20261103/inp1ab2_pipeline.out`; TPOT x acc table off / wide c4..c48 into 10.37;
+   c32 `seg_attr.py` + `cmp_seg.py` (as 10.36). If it hung again in flush_cache (reproducible): py-spy TP0, then
+   drop the flush in `ab_bench.sh` or restart the server between concurrencies.
+2. If wide <= off beyond 1% at every bucket (as 10.36): commit sgl-amd-mono (plumbing, no Co-authored-by), ask
+   the user before pushing to the kkHuang-amd fork.
+3. Then the rest of the launch body at m192 (timeline 10.37): KDA 31 us, front 29 us, o_proj + RS 27 us; up and
+   o_proj configs by the same tasks / row-fill rule (L=6 buckets all inherit 8-token bm: 25% padded rows).
+4. Later (user's choice): c56 bucket (64 requests, 384 rows at L=6) for AgentX cc56; DSA layers into the launch
+   (design first); KVV MMMU-Pro off / wide.
+
+### Previous handoff (2026-11-03 19:10, superseded above): wide beats off at c4..c48; KVV partly done
 
 **Status:** the launch-body round is done (10.33-10.36, sgl-amd-mono `k31/mono-s1` @ 5a73ec0, pushed to the
 kkHuang-amd fork). K3.1-Pro, DFLASH step55000, 6 draft tokens, SIM 3.399 (AgentX), same-session A/B TPOT x acc,
@@ -2087,3 +2107,35 @@ TPOT x acc diff  -2.9%  -3.2%  -3.0%  -1.7%  -2.7%    (10.35: -2.8 / -3.1 / -3.4
 c32 (`results/unc_20261103/cmp_c32.txt`): VERIFY wide 53.58 vs off 55.15 (-1.57; 10.35 -1.59), L launch 10.31 ms/step
 (10.35 10.28). -> serving gain below the run-to-run noise (~68 x 1 us = ~0.07 ms/step); kept as the default (the
 team's, consistent in the bench, no accuracy change).
+
+### 10.37 in_proj configs by bucket rows (mi355-4, 2026-11-03, A/B pending)
+
+Why: c32 step 53.58 ms = wide launches 15.70 (29%), routed MoE between launches 16.86, DSA layers 13.20 + their MoE
+5.74 (`results/unc_20261103/seg_wide_c32.txt`). In the m192 launch (L=6 timeline, 222 us) in_proj was the largest
+stage, 56.5 us (seam end -> in_proj end, last CTA). Its config `128:128:2:4:4` (from the 8-token bucket 256) gives 2 x
+50 x 4 = 400 tasks on 256 CTAs (two rounds, the 10.33 front pattern) and pads 192 rows to 256; L=8 m256 also 400 tasks.
+Every L=6 bucket inherits the 8-token bm: 25% padded rows in every GEMM stage.
+Sweep (`scripts/k31_inp_sweep.sh`, `layer_bench --inp <rows>=<cfg>` (new, test only), a3w/m4 --timeline, cache off;
+`logs/inp_20261103/inp1`), confirmed same session x2 (`k31_inp_confirm.sh`, `inp2`), layer us:
+```text
+L6 m192  128:128:2:4:4 (base) 218.4 / 217.2   192:128:4:2:4 201.6 / 200.8   96:128:2:4:2 206.0   192:64:4:2:2 209.4
+                                               128:128:2:4:2 214.2 / 213.2   192:128:4:2:2 (100 tasks) 221.8
+L6 m96   128:128:2:4:4 140.9 / 140.9           96:128:2:4:4 137.9 / 138.3
+L6 m48 / m288: no candidate better (48:128:1:8:4 tie; m288 144:128:1:8:2 tie, 288:128:2:4:4 +3, 288:64:2:4:2 +16)
+L8 m256  128:128:2:4:4 255.1 / 254.2           128:128:2:4:2 246.3 / 247.3   256:128:4:2:4 248.9   256:64:4:2:2 253.0
+```
+in_proj stage m192 56 -> 41 us, m256 60 -> 52, m96 30 -> 27. Kept: `wide.INP_ROWS = {96: 96:128:2:4:4, 192:
+192:128:4:2:4, 256: 128:128:2:4:2}`, applied in `cfg_rows` as FRONT_ROWS (rows 96 / 192 occur only at L=6, 256 only at
+L=8). No kernel change: KDA polls the tagged in_proj words per element, the tile shape is free.
+Kernel gate (`logs/entry/inp1_l{6,8}`, + 68 launches at L=6 m96 / m192 and L=8 m256, `logs/entry/inp1_l68`;
+`logs/inp_20261103/gate_inp1.txt`): all PASS, 0 faults (no-t1: fault check, 0). a3w/m4 us L=6 90.1 / 97.6 / 109.4 /
+136.1 / 201.3 / 277.9 (10.36: 89.8 / 97.7 / 109.4 / 138.5 / 217.2 / 277.9), L=8 93.3 / 102.4 / 118.1 / 152.4 / 242.2 /
+323.1 (93.0 / 102.4 / 118.0 / 152.5 / 252.7 / 322.6).
+Eager ENTRY_CHECK (`server_inp1_chk.log`): entry n 550 median 3.60e-3 max 5.30e-3, exit n 575 median 3.20e-3 max
+3.77e-3, 0 > 6e-3, no bank assert, no fault. gsm8k200 TEMP 0 (wide, CUDA graphs, SIM=0, `results/acc/inp1_wide_t{48,16}`):
+0.98 / 0.98, no fault.
+A/B, first try (`k31pro_inp1_pipeline.sh`): the OFF server hung after c4 (8.25 ms) in `/flush_cache`: TP0 in
+`torch.cuda.empty_cache` (hipFree spinning in libamdhip64, 100% CPU, 40 min), TP1-7 in `broadcast_pyobj` waiting for
+TP0 (`logs/inp_20261103/hang_off_tp0_native.txt`). No mono on that server; first time in any A/B -> killed, rerun
+`k31pro_inp1ab2_pipeline.sh` (tags `inp1ab2_*`, traces `inp1b_*_c32`) from 21:55.
+m192 timeline after the change (stages, last CTA): KDA 31 us, front 29, o_proj + RS 27, in_proj 41.

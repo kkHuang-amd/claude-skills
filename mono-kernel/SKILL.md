@@ -19,7 +19,7 @@ Node-local runs and numbers: `/shared_nfs/kimi-k31/results/<tag>/`.
 | Kernel | Rows a step | Status |
 |---|---|---|
 | Team K1 / K2 / mla_pre (`kevin-mii/sglang-k31-amd` branch `mono/kimi-k31`) | <= 8 total (`kimi_k3.MAX_ROWS = 8`): bs1 only (6 or 8 draft tokens) | bs1 latency path ("S1") |
-| Ours: `kimi_k31/wide.py` + `gfx950/layer.py` (`SGLANG_AMD_MONO_K31_WIDE=1`) | R x L, R 2..48, L = draft tokens (6 or 8) | opt-in; -1.7..-3.2% vs off at c4..c48 (10.36); default-on waits for KVV |
+| Ours: `kimi_k31/wide.py` + `gfx950/layer.py` (`SGLANG_AMD_MONO_K31_WIDE=1`) | R x L, R 2..48, L = draft tokens (6 or 8) | opt-in; -2.9..-3.6% vs off at c4..c48 (10.37); default-on waits for KVV |
 
 Team skill (bs1, worth reading for mechanisms): `git show ee15183f58:.agents/skills/amd-monokernel/SKILL.md`
 in `/sgl-workspace/sglang-k31-amd` (references: handoffs-and-memory.md, flydsl.md, measurement.md).
@@ -56,7 +56,9 @@ requests (slot -1); bucket rows = L x requests, configs from the 8-token bucket 
   from the repo root left 133 GB). `ulimit -c 0` before servers / torchrun.
 - **Count tasks against BLOCKS (256).** A stage with 257..512 tasks runs two rounds: the last CTA ends a whole task
   after the median. The front at 192 / 256 rows had 272 split-K tasks -> `wide.FRONT_ROWS` picks one-round configs
-  (10.33, -11% a launch at m192). Check `tiles x ks` for every new bucket / config.
+  (10.33, -11% a launch at m192); in_proj at m192 / m256 had 400 -> `wide.INP_ROWS` (10.37, -7% / -3%). Check
+  `tiles x ks` of every GEMM stage for every new bucket / config, and the row fill: L=6 buckets inherit the 8-token
+  bm (192 rows in a 256-row tile pair); `layer_bench --inp <rows>=<cfg>` sweeps in_proj.
 - **One 128 B line per counter / mailbox that many CTAs hit at once.** Split-K tile counters packed 32 to a line
   cost ~7.6 us a launch at every size (`layer.CNT_STRIDE = 32`, 10.33). Partial-line XGMI pushes and the `fgf` flag
   stride measured nothing (noise): stride where many writers and spinners share a line, not by default.

@@ -2,24 +2,19 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-03 21:55, mi355-4 -- 10.37 in_proj configs: gate + gsm8k pass, A/B rerun running)
+## CONTINUE HERE (handoff 2026-11-04 07:40, mi355-4 -- 10.37 done: wide beats off by 2.9-3.6% at c4..c48)
 
 **Status:** 10.37 (in_proj config by bucket rows, `wide.INP_ROWS`): L=6 m192 (c32) layer 217 -> 201 us (-7.4%), L=8
-m256 254 -> 247 (-3.1%), L=6 m96 141 -> 138; kernel gate L=6 / L=8 all PASS, 0 faults; eager ENTRY_CHECK = 10.36;
-gsm8k200 TEMP 0 T48 / T16 0.98 / 0.98. Code in the sgl-amd-mono worktree on 5a73ec0, NOT committed (`wide.py`,
-`test/kernels/kimi_k31/layer_bench.py --inp`). The first A/B hung (off server, TP0 in `flush_cache` ->
-`torch.cuda.empty_cache` -> hipFree spin, 40 min; not mono) -> killed; rerun started 21:55 (+08):
-`scripts/k31pro_inp1ab2_pipeline.sh`, log `logs/inp_20261103/inp1ab2_pipeline.out`, tags `inp1ab2_{off,wide}_20261103`,
-c32 traces `traces/inp1b_{off,wide}_c32`. Expected c32 ~-2% more vs 10.36 (~16 us x 68 launches).
-**Next:**
-1. Read the rerun: `cat logs/inp_20261103/inp1ab2_pipeline.out`; TPOT x acc table off / wide c4..c48 into 10.37;
-   c32 `seg_attr.py` + `cmp_seg.py` (as 10.36). If it hung again in flush_cache (reproducible): py-spy TP0, then
-   drop the flush in `ab_bench.sh` or restart the server between concurrencies.
-2. If wide <= off beyond 1% at every bucket (as 10.36): commit sgl-amd-mono (plumbing, no Co-authored-by), ask
-   the user before pushing to the kkHuang-amd fork.
-3. Then the rest of the launch body at m192 (timeline 10.37): KDA 31 us, front 29 us, o_proj + RS 27 us; up and
+m256 254 -> 247 (-3.1%), L=6 m96 141 -> 138; kernel gate all PASS, 0 faults; ENTRY_CHECK = 10.36; gsm8k200 T48 / T16
+0.98 / 0.98. Same-session A/B TPOT x acc wide vs off: c4 -2.9 / c8 -3.4 / c16 -3.6 / c32 -3.2 / c48 -3.1% (10.36: -2.9
+/ -3.2 / -3.0 / -1.7 / -2.7); c32 VERIFY -2.92 ms/step. sgl-amd-mono `k31/mono-s1` ce9e2a6, committed, NOT pushed
+(ask the user). Wide still opt-in until the KVV set. One A/B hung once in `/flush_cache` (off server, hipFree
+spin; 10.37); the rerun was clean -- if it recurs, drop the flush in `ab_bench.sh`. GPUs free, no server.
+**Next (pick with the user):**
+1. Push ce9e2a6 to the kkHuang-amd fork (user's OK).
+2. Then the rest of the launch body at m192 (timeline 10.37): KDA 31 us, front 29 us, o_proj + RS 27 us; up and
    o_proj configs by the same tasks / row-fill rule (L=6 buckets all inherit 8-token bm: 25% padded rows).
-4. Later (user's choice): c56 bucket (64 requests, 384 rows at L=6) for AgentX cc56; DSA layers into the launch
+3. Later (user's choice): c56 bucket (64 requests, 384 rows at L=6) for AgentX cc56; DSA layers into the launch
    (design first); KVV MMMU-Pro off / wide.
 
 ### Previous handoff (2026-11-03 19:10, superseded above): wide beats off at c4..c48; KVV partly done
@@ -2139,3 +2134,13 @@ A/B, first try (`k31pro_inp1_pipeline.sh`): the OFF server hung after c4 (8.25 m
 TP0 (`logs/inp_20261103/hang_off_tp0_native.txt`). No mono on that server; first time in any A/B -> killed, rerun
 `k31pro_inp1ab2_pipeline.sh` (tags `inp1ab2_*`, traces `inp1b_*_c32`) from 21:55.
 m192 timeline after the change (stages, last CTA): KDA 31 us, front 29, o_proj + RS 27, in_proj 41.
+A/B rerun (same session 21:53-22:18, `results/ab/inp1ab2_{off,wide}_20261103`), no hang, no fault:
+```text
+TPOT ms          c4     c8     c16    c32    c48      (acc 3.37-3.41)
+off              8.25  11.20  15.76  23.16  30.65
+wide             7.99  10.72  15.15  22.48  29.88
+TPOT x acc diff  -2.9%  -3.4%  -3.6%  -3.2%  -3.1%    (10.36: -2.9 / -3.2 / -3.0 / -1.7 / -2.7)
+```
+c32 (`results/inp_20261103/cmp_c32.txt`): VERIFY wide 52.25 vs off 55.17 (-2.92; 10.36 -1.57): L -2.09 (launch 10.31
+-> 9.49 ms/step), Lfirst -0.69 (launch 5.39 -> 4.93), Dafter_run -0.15. Launches -1.28 ms/step = ~16 us x 68 as the bench.
+Committed: sgl-amd-mono `k31/mono-s1` ce9e2a6 (not pushed).

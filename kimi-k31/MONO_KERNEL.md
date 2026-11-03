@@ -8,7 +8,8 @@ Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in se
 m256 254 -> 247 (-3.1%), L=6 m96 141 -> 138; kernel gate all PASS, 0 faults; ENTRY_CHECK = 10.36; gsm8k200 T48 / T16
 0.98 / 0.98. Same-session A/B TPOT x acc wide vs off: c4 -2.9 / c8 -3.4 / c16 -3.6 / c32 -3.2 / c48 -3.1% (10.36: -2.9
 / -3.2 / -3.0 / -1.7 / -2.7); c32 VERIFY -2.92 ms/step. sgl-amd-mono `k31/mono-s1` ce9e2a6, committed, NOT pushed
-(ask the user). Wide still opt-in until the KVV set. One A/B hung once in `/flush_cache` (off server, hipFree
+(ask the user). KVV OCRBench wide at ce9e2a6 0.872 (off 0.873, official 0.872; `KVV_ACCURACY.md`, 2026-11-04).
+Wide still opt-in until the rest of the KVV set. One A/B hung once in `/flush_cache` (off server, hipFree
 spin; 10.37); the rerun was clean -- if it recurs, drop the flush in `ab_bench.sh`. GPUs free, no server.
 **Next (pick with the user):**
 1. Push ce9e2a6 to the kkHuang-amd fork (user's OK).

@@ -7,7 +7,11 @@ Owner node: mi355-4 (2026-11-03). Results: `/shared_nfs/kimi-k31/results/kvv/<ta
 **Status (2026-11-03):** KVV set up on mi355-4, no score yet. kvv-k3 snapshot (user's zip
 `/sgl-workspace/kvv-k3-k3-20261103.zip`) unpacked to `/sgl-workspace/kvv-bench/kvv-k3-20261103`, `uv sync` done
 (inspect_ai 0.3.158), OCRBench (1000) / MMMU-Pro standard 10 options (1730) cached in `/shared_nfs/hf_cache`.
-**Next:** off server (`SIM=0 RADIX=1`), `preflight`, then `LIMIT=20 ocrbench` as a smoke run, then the four jobs.
+**15:25:** off server `server_kvv_off.log` (SIM=0, RADIX=1, context 1M, mi355-4) -> `run_kvv_k31.sh kvv_off_20261103
+ocrbench`: off 0.873, wide 0.869 (+- 0.011; official 0.872): tie. MMMU-Pro postponed (user, 15:34).
+**Blocked:** the zip's LFS files are pointers only (130-byte stubs): `toolcall_benchmark/
+toolcall_thinking_samples.stable2.jsonl` (30 MB), `beam/data/*`, `testdata/*` -> toolcall and BEAM need the real
+files (`git lfs pull` with repo access). eval.py has no `--limit` (toolcall: `SAMPLE=<id>` for one sample).
 **Blocked:** BEAM judge needs `JUDGE_BASE_URL` / `JUDGE_API_KEY` (official judge kimi-k2.6, external API).
 DeepSWE needs docker + Pier + kimi-code >= 0.29 (screenshot: 0.40.1); none in this container.
 
@@ -43,3 +47,5 @@ becomes default, and before a PR. Pass: within noise of off and of the official 
 
 | Date | Node | Tag | Path | toolcall | OCRBench | MMMU-Pro | BEAM 1M | Notes |
 |---|---|---|---|---|---|---|---|---|
+| 2026-11-03 | mi355-4 | kvv_off_20261103 | off | - | 0.873 +- 0.011 | - | - | DFLASH step55000 nd6, SIM=0 (accept ~3.35), radix on; 5:29, 1.43 M tokens |
+| 2026-11-03 | mi355-4 | kvv_wide_20261103 | wide (MONO_KERNEL 10.34 worktree) | - | 0.869 +- 0.011 | - | - | same server args + WIDE=1; 6:19, 1.47 M tokens; wide steps up to 288 rows; no fault |

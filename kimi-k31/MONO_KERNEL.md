@@ -10,6 +10,9 @@ timeline). L=6 same-session A/B (TPOT x acc vs off): c4 +1.0 / c8 -0.7 / c16 -1.
 stays opt-in. c32 (m192) trace: +1.10 ms/step = L +0.46, Lfirst +0.75 (launch +0.40, pout / bank copies +0.39),
 Dafter_run -0.12. sglang-k31-amd detached at origin/dev_amd 4b7f7b13e8 (team k31-mono's 7 commits not merged).
 **Goal:** wide <= off beyond 1% at every bucket c4..c48.
+**Update 15:10:** item 2 done (10.34: prefix / bank by stride, bank once a step; sgl-amd-mono 1da4ad5, pushed). A/B TPOT x
+acc vs off: c4 -1.9 / c8 -2.3 / c16 -2.4 / c32 -1.6 / c48 -2.1% -> every bucket beyond 1% (goal met). Next: KVV
+off vs wide, then items 3 (route sort + pop) and 4 (uncached launch scratch) for more margin.
 **Update 13:40:** item 1 done (10.33: one-round front configs + strided tile counters), full gate passed, committed
 on sgl-amd-mono `k31/mono-s1` 4f5290f (pushed). A/B TPOT x acc vs off: c4 -0.8 / c8 -2.1 / c16 -2.6 / c32 -0.4 / c48 -2.3% -> c4 / c32
 still inside 1%. Next: item 2. KVV accuracy setup: `kimi-k31/KVV_ACCURACY.md`.
@@ -1950,3 +1953,42 @@ c32 traces `traces/front1_{wide,off}_c32` (`results/front_20261103/cmp_c32.txt`)
 c32's step is -2.0% but TPOT x acc only -0.4%: wide's sampled acc 3.42 vs off 3.38 (SIM noise).
 Decision: wide wins every bucket for the first time; c8 / c16 / c48 beyond 1%, c4 / c32 not yet -> still opt-in.
 Next: item 2 (Lfirst pout / bank copies by stride reads), aimed at c4 / c32.
+
+### 10.34 Run boundaries without the prefix / bank copies (CONTINUE HERE item 2, mi355-4, 2026-11-03)
+
+Why: c32 trace 10.33, Lfirst rest elementwise 328 us/step (~14 us a run: the `pout` column copy of SGLang's prefix
+and the strided bank copy `[rows, 8, 896]` out of `[rows, nb, 7168]`), plus the exit's `pfull` copy at <= 64 rows.
+Code: sgl-amd-mono `k31/mono-s1` 1da4ad5 (pushed to the fork):
+- Kernel: `pout` (prefix / prefix_out of the layer launch) is this rank's columns of full-width rows (row stride H,
+  pointer at the rank's first column). Row strides threaded through `pre._finish` (`ldp`), `chain._rs_piece` /
+  `_seam_row` (`ldo`) and `attnres_row` (`ldp`), defaults = SL (chain / pre_attn builds: final ISA identical).
+  New kernel argument `pfx_bytes`: bytes readable from `prefix` -> its buffer descriptor's size, so rows past
+  SGLang's prefix (step rows < bucket rows, e.g. 18 -> 24) load 0 instead of reading past the tensor. Build name
+  `..._cs_pH`. SGPR spills (bundled, a3w/m4) m192 68 -> 63, m24 21 -> 24 (10.26 range), no scratch.
+- `wide.py`: the run's first launch reads SGLang's prefix directly (`_launch_args(prefix=)`, kept alive until
+  enqueued; copy fallback if its stride is not (H, 1)); `pout` [b, H] buffers; column exit hands `pout[ping][:rows]`
+  to SGLang's column tail (no `pfull`); the > 64-row exit adds `pout[:, cols]`. Bank: SGLang writes bank rows only
+  before the first run (layer 0); every later block is written by a launch into `bufs["bank"]` (then gathered into
+  SGLang's bank), so the bank is copied once a step (first run, valid blocks only). Eager checks assert
+  `bufs["bank"] == block_residual[..., cols]` at every later run.
+- layer_bench: prefix / pout full-width, a check that no column outside the rank's is written, `--pfx-short n` (the
+  last n rows NaN in memory, 0 in the reference: PASS only if the descriptor bound holds). wide_check: same layout.
+Kernel gate (`logs/entry/stride1_l6`, `stride1_l8`, cache off): all PASS, 0 faults; `--pfx-short 6 / 8` at every
+bucket PASS (`logs/stride_20261103/short_l{6,8}.log`). Launch us unchanged (a3w/m4 m192 223.4, m288 287.5, L=8 m256
+257.4): the saving is outside the launch.
+Eager ENTRY_CHECK (`server_stride1_chk.log`, rows 12 / 18 / 24 / 48 / 90 / 96): entry n 528 median 3.58e-3 max
+5.99e-3, exit n 552 median 3.24e-3 max 3.70e-3, 0 > 6e-3; bank asserts never fired; no fault.
+Server steps: `scripts/k31pro_stride1_pipeline.sh` (gsm8k200 T48 / T16, A/B c4..c48 + c32 trace), started 14:10.
+gsm8k200 TEMP 0 (wide, CUDA graphs, SIM=0, `results/acc/stride1_wide_t{48,16}`): 0.985 / 0.99. No fault in any server.
+A/B (SIM=1 3.399, same session 14:37-15:04, `results/ab/stride1ab_{off,wide}_20261103`):
+```text
+TPOT ms          c4     c8     c16    c32    c48      (acc 3.37-3.43)
+off              8.33  11.23  15.83  23.29  30.63
+wide             8.15  10.87  15.31  22.85  29.73
+TPOT x acc diff  -1.9%  -2.3%  -2.4%  -1.6%  -2.1%    (10.33: -0.8 / -2.1 / -2.6 / -0.4 / -2.3)
+```
+c32 traces `traces/stride1_{wide,off}_c32` (`results/stride_20261103/cmp_c32.txt`): VERIFY wide 53.84 vs off 55.19
+(-1.34 ms/step; 10.33 -1.13): L -1.13, Lfirst -0.15 (10.33 +0.04; its elementwise rest 328 -> 129 us/step),
+Dafter_run -0.07.
+Decision: wide beats off beyond 1% at every bucket c4..c48 (the goal of this round). Default-on needs the KVV set
+(`KVV_ACCURACY.md`: many paths changed in 10.33 / 10.34) and the user's call.

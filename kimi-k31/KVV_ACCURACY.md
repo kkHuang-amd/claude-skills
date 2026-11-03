@@ -9,9 +9,14 @@ Owner node: mi355-4 (2026-11-03). Results: `/shared_nfs/kimi-k31/results/kvv/<ta
 (inspect_ai 0.3.158), OCRBench (1000) / MMMU-Pro standard 10 options (1730) cached in `/shared_nfs/hf_cache`.
 **15:25:** off server `server_kvv_off.log` (SIM=0, RADIX=1, context 1M, mi355-4) -> `run_kvv_k31.sh kvv_off_20261103
 ocrbench`: off 0.873, wide 0.869 (+- 0.011; official 0.872): tie. MMMU-Pro postponed (user, 15:34).
-**Blocked:** the zip's LFS files are pointers only (130-byte stubs): `toolcall_benchmark/
-toolcall_thinking_samples.stable2.jsonl` (30 MB), `beam/data/*`, `testdata/*` -> toolcall and BEAM need the real
-files (`git lfs pull` with repo access). eval.py has no `--limit` (toolcall: `SAMPLE=<id>` for one sample).
+**Blocked:** the zip's LFS files are pointers only (130-byte stubs). Toolcall:
+`toolcall_benchmark/toolcall_thinking_samples.stable2.jsonl` (30,161,019 B, sha256 7db15a81c84952a0...) exists only
+in the kvv-k3 repo's LFS (needs repo access, or a copy; K3's checkout was `/sgl-workspace/kvv-bench/kvv-k3-0727-update`
+on the K3 node). eval.py has no `--limit` (toolcall: `SAMPLE=<id>` for one sample).
+BEAM 1M data rebuilt (16:30) from the public BEAM repo (`/shared_nfs/kimi-k31/kvv_data/BEAM`, github
+mohammadtavakoli78/BEAM @ b2da22e, `chats/1M`) with kvv's `beam/prepare_data.py` -> `kvv_data/beam_prepared`, copied
+into `beam/data/`: questions sha256 = the LFS oid (0882ca1e...); chats .gz same size to the byte (35,465,655),
+sha differs only by the gzip header. BEAM generate can run; its judge still needs JUDGE_BASE_URL / KEY.
 **Blocked:** BEAM judge needs `JUDGE_BASE_URL` / `JUDGE_API_KEY` (official judge kimi-k2.6, external API).
 DeepSWE needs docker + Pier + kimi-code >= 0.29 (screenshot: 0.40.1); none in this container.
 

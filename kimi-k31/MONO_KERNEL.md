@@ -10,6 +10,9 @@ timeline). L=6 same-session A/B (TPOT x acc vs off): c4 +1.0 / c8 -0.7 / c16 -1.
 stays opt-in. c32 (m192) trace: +1.10 ms/step = L +0.46, Lfirst +0.75 (launch +0.40, pout / bank copies +0.39),
 Dafter_run -0.12. sglang-k31-amd detached at origin/dev_amd 4b7f7b13e8 (team k31-mono's 7 commits not merged).
 **Goal:** wide <= off beyond 1% at every bucket c4..c48.
+**Update 18:00:** item 3 done (10.35: route by per-lane sort + pops, ~-5 us a launch; sgl-amd-mono 8efe0b8, pushed).
+A/B TPOT x acc vs off: c4 -2.8 / c8 -3.1 / c16 -3.4 / c32 -1.7 / c48 -2.5%. Next: item 4 (uncached launch scratch,
+team 3417e1a); KVV toolcall waits for the real LFS file, BEAM data rebuilt (`KVV_ACCURACY.md`).
 **Update 15:10:** item 2 done (10.34: prefix / bank by stride, bank once a step; sgl-amd-mono 1da4ad5, pushed). A/B TPOT x
 acc vs off: c4 -1.9 / c8 -2.3 / c16 -2.4 / c32 -1.6 / c48 -2.1% -> every bucket beyond 1% (goal met). Next: KVV
 off vs wide, then items 3 (route sort + pop) and 4 (uncached launch scratch) for more margin.
@@ -1992,3 +1995,32 @@ c32 traces `traces/stride1_{wide,off}_c32` (`results/stride_20261103/cmp_c32.txt
 Dafter_run -0.07.
 Decision: wide beats off beyond 1% at every bucket c4..c48 (the goal of this round). Default-on needs the KVV set
 (`KVV_ACCURACY.md`: many paths changed in 10.33 / 10.34) and the user's call.
+KVV OCRBench (16:00): off 0.873, wide 0.869 (+- 0.011; official 0.872): tie (`KVV_ACCURACY.md`).
+
+### 10.35 Route by per-lane sort + 16 wave-max pops (CONTINUE HERE item 3, mi355-4, 2026-11-03)
+
+Code: sgl-amd-mono `k31/mono-s1` 8efe0b8 (pushed): `moe_front.route_row`'s top-16 as the K3 K2 launch's
+(team mono/kimi-k31 05dfa48): a lane reads experts lane + 64 i (coalesced, was lane * 14 + i), sorts its 14
+candidates in a 16-slot Batcher network (order-preserving u32 key of sigmoid + bias descending, the lower expert
+first on a tie), then 16 unrolled rounds of `wave_umax` pop the heads; pick k lands in lane k (`write_lane_i32`);
+weights = the picked sigmoids summed in pick order, x rcp (as before). Build name `..._cs_pH_rp`.
+Checks: layer_bench "own logits" (the launch's picks vs torch.topk on its own gathered logits) 0 rows differing,
+w rel 9e-8 at every bucket. SGPR spills (bundled) m192 63 -> 73, m24 24, L=8 m384 106 -> 108; no scratch.
+Timeline (front end -> route end, last CTA): m192 10.2 -> 5.4 us, m288 16.3 -> 6.5, L=8 m256 10.3 -> 5.6.
+Kernel gate (`logs/entry/route1_l6`, `route1_l8`): all PASS, 0 faults; chain / pre_attn ISA identical.
+a3w/m4 us L=6 91.1 / 99.4 / 111.0 / 139.1 / 219.2 / 280.1 (10.34: 96.3 / 104.1 / 116.1 / 143.6 / 223.4 / 287.5),
+L=8 94.0 / 104.1 / 119.7 / 153.7 / 254.7 / 323.5 (99.3 / 109.1 / 124.8 / 159.2 / 257.4 / 334.5): ~-5 us a launch.
+Server steps: `scripts/k31pro_route1_pipeline.sh` (ENTRY_CHECK, gsm8k200, A/B c4..c48 + c32 trace), started 16:45.
+Eager ENTRY_CHECK (`server_route1_chk.log`): entry n 528 median 3.62e-3 max 5.82e-3, exit n 552 median 3.23e-3,
+0 > 6e-3, no bank assert, no fault. gsm8k200 TEMP 0 (`results/acc/route1_wide_t{48,16}`): 0.975 / 0.99; T48 at
+the threshold -> rerun on a fresh server (`route1b_wide_t{48,16}`): 0.995 / 0.99 (the 0.975 was batch noise: the
+picks are exact, see the own-logits check).
+A/B (SIM=1 3.399, same session 17:23-17:51, `results/ab/route1ab_{off,wide}_20261103`):
+```text
+TPOT ms          c4     c8     c16    c32    c48      (acc 3.38-3.43)
+off              8.36  11.15  15.62  23.22  30.67
+wide             8.08  10.74  15.27  22.89  29.73
+TPOT x acc diff  -2.8%  -3.1%  -3.4%  -1.7%  -2.5%    (10.34: -1.9 / -2.3 / -2.4 / -1.6 / -2.1)
+```
+c32 traces `traces/route1_{wide,off}_c32` (`results/route_20261103/cmp_c32.txt`): VERIFY wide 53.58 vs off 55.18
+(-1.59 ms/step; 10.34 -1.34): L -1.21 (launch 10.47 -> 10.28 ms/step), Lfirst -0.28, Dafter_run -0.12.

@@ -2,7 +2,41 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-03 12:00, mi355-4 -- wide L=6 works; still opt-in; launch-body optimizations next)
+## CONTINUE HERE (handoff 2026-11-03 19:10, mi355-4 -- wide beats off at c4..c48; KVV partly done; next session)
+
+**Status:** the launch-body round is done (10.33-10.36, sgl-amd-mono `k31/mono-s1` @ 5a73ec0, pushed to the
+kkHuang-amd fork). K3.1-Pro, DFLASH step55000, 6 draft tokens, SIM 3.399 (AgentX), same-session A/B TPOT x acc,
+wide vs off: c4 -2.9 / c8 -3.2 / c16 -3.0 / c32 -1.7 / c48 -2.7% (10.32 was +1.0 / -0.7 / -1.4 / +1.7 / -1.3).
+gsm8k200 TEMP 0 0.98-0.995. Wide is still opt-in (`SGLANG_AMD_MONO_K31_WIDE=1`): default-on waits for the full KVV
+set. KVV (`KVV_ACCURACY.md`): OCRBench off 0.873 / wide 0.869 (official 0.872).
+sglang-k31-amd stays detached at origin/dev_amd 4b7f7b13e8 (team k31-mono's 7 commits not merged; evaluate apart).
+GPUs free, no server (mi355-4, 19:10).
+**Next (pick with the user):**
+1. KVV before default-on (`KVV_ACCURACY.md`): MMMU-Pro off / wide (data cached; ~3-4 h each); toolcall needs the
+   real LFS file (`toolcall_thinking_samples.stable2.jsonl`, sha256 7db15a81...; the zip has a pointer only);
+   BEAM 1M data rebuilt from the public repo, the judge needs JUDGE_BASE_URL / KEY (kimi-k2.6); DeepSWE needs
+   docker + Pier + kimi-code (not in this container).
+2. More margin at c32 (m192, smallest win): c32 trace L launch 10.31 vs off 11.28 ms/step; per stage
+   (`k31_tl.sh`): front stage still > chain's; T6 tail (situ / sdown) after the faster route; weight prefetch
+   while front waits on the seam (untried, measure: vmcnt is in order).
+3. Merge / evaluate the team's sglang k31-mono commits (DSA indexer fusions, draft SWA attention) separately.
+**Files:** `sgl_amd_mono/kimi_k31/{wide.py, gfx950/layer.py, gfx950/pre_attn.py, gfx950/chain.py,
+gfx950/stages/{moe_front,attnres,gemm_coll}.py}`, `test/kernels/kimi_k31/layer_bench.py`.
+**Scripts** (`/shared_nfs/kimi-k31/results/pro_20261103/scripts`; launch_server.sh defaults = the settings above,
+`RADIX=1` for KVV): `k31_tl.sh <tag>` (layer_bench timeline, env LT=args), `k31_lb.sh <tag> <args>` (one
+layer_bench), `isa_pre.sh` / `isa_layer2.sh` (ISA dump + diff / spill counts), `k31pro_<tag>_pipeline.sh`
+(ENTRY_CHECK + gsm8k + A/B + c32 trace), `k31_gate_then_pipeline_example.sh`, `run_kvv_k31.sh`.
+**Repro / gate per change:**
+```bash
+bash /shared_nfs/kimi-k31/results/pro_20261103/k31_gate_l6.sh <tag> 6; bash .../k31_gate_l6.sh <tag> 8   # cache off inside
+S=/shared_nfs/kimi-k31/results/pro_20261103/scripts; sed 's/unc1/<tag>/g' $S/k31pro_unc1_pipeline.sh > $S/k31pro_<tag>_pipeline.sh
+bash $S/k31pro_<tag>_pipeline.sh     # moves ~/.flydsl/cache aside first; servers must NOT inherit FLYDSL_RUNTIME_ENABLE_CACHE=0
+bash $S/run_kvv_k31.sh <tag> ocrbench mmmu   # on a SIM=0 RADIX=1 server
+```
+**Pass:** gate all PASS, 0 faults (no-t1: faults only); untouched builds ISA identical; ENTRY_CHECK median ~3.6e-3 /
+3.2e-3, 0 > 6e-3; gsm8k200 T48 / T16 >= 0.975; A/B wide <= off beyond 1% at every bucket; KVV within noise of off.
+
+### Previous handoff (2026-11-03 12:00 .. 19:05, superseded above): items 1-4 of the launch-body round
 
 **Status:** 10.32: K3.1-Pro weights, DFLASH step55000, AgentX settings (6 draft tokens, SIM 3.399). Wide supports
 L = 6 (sgl-amd-mono `k31/mono-s1` @ 8fc10da, pushed to the kkHuang-amd fork: partial-tile flag fix + L=6 + layer
@@ -10,6 +44,10 @@ timeline). L=6 same-session A/B (TPOT x acc vs off): c4 +1.0 / c8 -0.7 / c16 -1.
 stays opt-in. c32 (m192) trace: +1.10 ms/step = L +0.46, Lfirst +0.75 (launch +0.40, pout / bank copies +0.39),
 Dafter_run -0.12. sglang-k31-amd detached at origin/dev_amd 4b7f7b13e8 (team k31-mono's 7 commits not merged).
 **Goal:** wide <= off beyond 1% at every bucket c4..c48.
+**Update 19:05:** item 4 done (10.36: uncached launch scratch, -1..-2 us a launch in the bench, serving within
+noise; sgl-amd-mono 5a73ec0, pushed). All four items done: wide vs off TPOT x acc c4 -2.9 / c8 -3.2 / c16 -3.0 / c32
+-1.7 / c48 -2.7%. Next (user's call): KVV MMMU-Pro + toolcall (needs the LFS file) + BEAM (needs a judge) off vs
+wide before wide becomes default; more margin at c32 (m192: L launch 10.3 vs off 11.3 ms/step; front / sdown).
 **Update 18:00:** item 3 done (10.35: route by per-lane sort + pops, ~-5 us a launch; sgl-amd-mono 8efe0b8, pushed).
 A/B TPOT x acc vs off: c4 -2.8 / c8 -3.1 / c16 -3.4 / c32 -1.7 / c48 -2.5%. Next: item 4 (uncached launch scratch,
 team 3417e1a); KVV toolcall waits for the real LFS file, BEAM data rebuilt (`KVV_ACCURACY.md`).
@@ -2024,3 +2062,28 @@ TPOT x acc diff  -2.8%  -3.1%  -3.4%  -1.7%  -2.5%    (10.34: -1.9 / -2.3 / -2.4
 ```
 c32 traces `traces/route1_{wide,off}_c32` (`results/route_20261103/cmp_c32.txt`): VERIFY wide 53.58 vs off 55.18
 (-1.59 ms/step; 10.34 -1.34): L -1.21 (launch 10.47 -> 10.28 ms/step), Lfirst -0.28, Dafter_run -0.12.
+
+### 10.36 Uncached launch scratch (CONTINUE HERE item 4, mi355-4, 2026-11-03)
+
+Team 3417e1a (K3 runner): the launch scratch (hand-off mailboxes / flags) in a one-rank uncached PeerBuffer
+(`hipExtMallocWithFlags` uncached, as GLM-5.3-Flash). Ours: `wide.py` allocates each bucket's `scratch` that way
+(`SGLANG_AMD_MONO_K31_WIDE_UNCACHED_SCRATCH`, default 1; 0 = torch.zeros; 5a73ec0). No kernel change (ISA identical).
+layer_bench `K31_UNCACHED` (comma list of scratch / cnt / acc_u / acc_o; default `scratch` as serving).
+Same session x2, L=6 a3w/m4 us (m24 / m192 / m288): cached 99.8-99.9 / 218.5-218.9 / 280.3-280.7; scratch uncached
+98.3 / 217.7-218.0 / 277.7-278.8 (-1.5 / -0.8 / -2.3); + cnt, + acc_u / acc_o: no further change -> scratch only.
+Gate + server pipeline: `/tmp/unc1_chain.sh` (k31_gate_l6.sh 6 / 8, then `scripts/k31pro_unc1_pipeline.sh`), 17:55.
+Kernel gate (`logs/entry/unc1_l{6,8}`): all PASS, 0 faults. a3w/m4 us L=6 89.8 / 97.7 / 109.4 / 138.5 / 217.2 / 277.9
+(10.35: 91.1 / 99.4 / 111.0 / 139.1 / 219.2 / 280.1), L=8 93.0 / 102.4 / 118.0 / 152.5 / 252.7 / 322.6 (94.0 / 104.1
+/ 119.7 / 153.7 / 254.7 / 323.5): -0.6 .. -2.2 us a launch.
+Eager ENTRY_CHECK (`server_unc1_chk.log`): entry n 528 median 3.58e-3 max 5.98e-3, exit n 552 median 3.24e-3, 0 >
+6e-3, no bank assert, no fault. gsm8k200 TEMP 0 (`results/acc/unc1_wide_t{48,16}`): 0.98 / 0.98.
+A/B (same session 18:37-18:58, `results/ab/unc1ab_{off,wide}_20261103`):
+```text
+TPOT ms          c4     c8     c16    c32    c48      (acc 3.38-3.41)
+off              8.32  11.07  15.69  23.13  30.50
+wide             8.03  10.75  15.31  22.80  29.76
+TPOT x acc diff  -2.9%  -3.2%  -3.0%  -1.7%  -2.7%    (10.35: -2.8 / -3.1 / -3.4 / -1.7 / -2.5)
+```
+c32 (`results/unc_20261103/cmp_c32.txt`): VERIFY wide 53.58 vs off 55.15 (-1.57; 10.35 -1.59), L launch 10.31 ms/step
+(10.35 10.28). -> serving gain below the run-to-run noise (~68 x 1 us = ~0.07 ms/step); kept as the default (the
+team's, consistent in the bench, no accuracy change).

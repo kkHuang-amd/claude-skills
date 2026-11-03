@@ -54,3 +54,4 @@ becomes default, and before a PR. Pass: within noise of off and of the official 
 |---|---|---|---|---|---|---|---|---|
 | 2026-11-03 | mi355-4 | kvv_off_20261103 | off | - | 0.873 +- 0.011 | - | - | DFLASH step55000 nd6, SIM=0 (accept ~3.35), radix on; 5:29, 1.43 M tokens |
 | 2026-11-03 | mi355-4 | kvv_wide_20261103 | wide (MONO_KERNEL 10.34 worktree) | - | 0.869 +- 0.011 | - | - | same server args + WIDE=1; 6:19, 1.47 M tokens; wide steps up to 288 rows; no fault |
+| 2026-11-04 | mi355-4 | kvv_wide_inp1_20261104 | wide (MONO_KERNEL 10.37, sgl-amd-mono ce9e2a6) | - | 0.872 +- 0.011 | - | - | same server args + WIDE=1 (`scripts/k31_kvv_inp1_ocr.sh`); 6:30, 1.48 M tokens; first wide step 288 rows, mostly 43-46 requests; no fault |

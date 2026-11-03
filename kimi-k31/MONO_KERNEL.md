@@ -7,15 +7,14 @@ Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in se
 **Status:** 10.37 (in_proj config by bucket rows, `wide.INP_ROWS`): L=6 m192 (c32) layer 217 -> 201 us (-7.4%), L=8
 m256 254 -> 247 (-3.1%), L=6 m96 141 -> 138; kernel gate all PASS, 0 faults; ENTRY_CHECK = 10.36; gsm8k200 T48 / T16
 0.98 / 0.98. Same-session A/B TPOT x acc wide vs off: c4 -2.9 / c8 -3.4 / c16 -3.6 / c32 -3.2 / c48 -3.1% (10.36: -2.9
-/ -3.2 / -3.0 / -1.7 / -2.7); c32 VERIFY -2.92 ms/step. sgl-amd-mono `k31/mono-s1` ce9e2a6, committed, NOT pushed
-(ask the user). KVV OCRBench wide at ce9e2a6 0.872 (off 0.873, official 0.872; `KVV_ACCURACY.md`, 2026-11-04).
+/ -3.2 / -3.0 / -1.7 / -2.7); c32 VERIFY -2.92 ms/step. sgl-amd-mono `k31/mono-s1` ce9e2a6, pushed to the
+kkHuang-amd fork (2026-11-04). KVV OCRBench wide at ce9e2a6 0.872 (off 0.873, official 0.872; `KVV_ACCURACY.md`, 2026-11-04).
 Wide still opt-in until the rest of the KVV set. One A/B hung once in `/flush_cache` (off server, hipFree
 spin; 10.37); the rerun was clean -- if it recurs, drop the flush in `ab_bench.sh`. GPUs free, no server.
 **Next (pick with the user):**
-1. Push ce9e2a6 to the kkHuang-amd fork (user's OK).
-2. Then the rest of the launch body at m192 (timeline 10.37): KDA 31 us, front 29 us, o_proj + RS 27 us; up and
-   o_proj configs by the same tasks / row-fill rule (L=6 buckets all inherit 8-token bm: 25% padded rows).
-3. Later (user's choice): c56 bucket (64 requests, 384 rows at L=6) for AgentX cc56; DSA layers into the launch
+1. The rest of the launch body at m192 (timeline 10.37): KDA 31 us, front 29 us, o_proj + RS 27 us; up, o_proj and
+   shared down configs by the same tasks / row-fill rule (L=6 buckets all inherit 8-token bm: 25% padded rows).
+2. Later (user's choice): c56 bucket (64 requests, 384 rows at L=6) for AgentX cc56; DSA layers into the launch
    (design first); KVV MMMU-Pro off / wide.
 
 ### Previous handoff (2026-11-03 19:10, superseded above): wide beats off at c4..c48; KVV partly done

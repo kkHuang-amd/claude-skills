@@ -10,6 +10,9 @@ timeline). L=6 same-session A/B (TPOT x acc vs off): c4 +1.0 / c8 -0.7 / c16 -1.
 stays opt-in. c32 (m192) trace: +1.10 ms/step = L +0.46, Lfirst +0.75 (launch +0.40, pout / bank copies +0.39),
 Dafter_run -0.12. sglang-k31-amd detached at origin/dev_amd 4b7f7b13e8 (team k31-mono's 7 commits not merged).
 **Goal:** wide <= off beyond 1% at every bucket c4..c48.
+**Update 13:40:** item 1 done (10.33: one-round front configs + strided tile counters), full gate passed, committed
+on sgl-amd-mono `k31/mono-s1` 4f5290f (pushed). A/B TPOT x acc vs off: c4 -0.8 / c8 -2.1 / c16 -2.6 / c32 -0.4 / c48 -2.3% -> c4 / c32
+still inside 1%. Next: item 2. KVV accuracy setup: `kimi-k31/KVV_ACCURACY.md`.
 **Next, in order (each through the full gate below):**
 1. MoE front stage (m192 / m288 at L=6; +24 us at m256 L=8, 10.32): `layer_bench --timeline` vs `chain_bench
    --timeline`; first finish_front's cross-XGMI latent push as whole 128 B lines, then FLAG_STRIDE on the
@@ -1900,3 +1903,50 @@ TPOT x acc diff  +1.0%  -0.7%  -1.4%  +1.7%  -1.3%
 
 Decision: wide stays opt-in (c4 / c32 lose). Next: CONTINUE HERE items 1-4 (MoE front stage, stride reads of the
 prefix / bank, route sort + pop, uncached launch scratch).
+
+### 10.33 MoE front stage: one-round front configs, strided tile counters (mi355-4, 2026-11-03, gate pending)
+
+Logs `/shared_nfs/kimi-k31/logs/front_20261103/<tag>/layer.log` (`/tmp/k31_tl.sh`: layer_bench a3w/m4 --timeline,
+cache off); every run below PASS, 0 faults. Run-to-run noise ~±2-3 us a launch. Code: sgl-amd-mono worktree on
+8fc10da, uncommitted; all experiments incl. the dropped ones: `results/front_20261103/experiments_all.diff`.
+Baseline (8fc10da): front stage (seam end -> front end, last CTA) m192 49.3 / m288 37.5 us vs chain_bench 28.1 / 23.0.
+Timing-only probes (m192 / m288): no `_arrive_all` -6.5 / -4.6; no peer data pushes -3.2 / -5.5; finish = flags
+only -6.9 / -9.1. With both off m192 still +13 us over the chain: its 272 front tasks (2 row tiles x 17 x ks 8) on
+256 CTAs run two rounds (last CTA 22 us after the median; one round at m288: 10 us).
+Kept:
+1. `wide.FRONT_ROWS` (front config by bucket rows, in `cfg_rows`): 192 -> 64:128:2:4:4, 256 -> 96:128:2:4:4, 288 ->
+   96:128:2:4:4 (<= 256 tasks, less padding). chain_bench: m192 75.2 -> 64.3, m256 84.2 -> 75.5, m288 85.6 -> 84.4;
+   m96 96:128:2:4:8 -1.1 chain but tie in the layer (dropped), m48 tie. Layer us: m192 256.6 -> 240.8-244.6,
+   m288 303.2 -> 294.5-295.3, L=8 m256 285.6 -> 274.1-275.5.
+2. `layer.CNT_STRIDE = 32`: every `_arrive_all` tile counter (up / in_proj / o_proj / front) in its own 128 B line
+   (`counters()` x 32, `_arrive_all(..., stride)`). Same session, x2: m192 244.6 / 243.0 -> 228.1 / 226.9, m288
+   294.5 -> 287.1 / 287.1, L=8 m256 274.2 -> 265.0; stride 16 / 64 the same as 32. The gain is spread over every
+   split-K stage, not only the front.
+Together m192 256.6 -> ~227 (-11.5%), m288 303.2 -> ~287 (-5%), L=8 m256 285.6 -> 265.0 (-7%).
+Measured, no gain, dropped: latent-first front rows (latent tiles push whole 128 B lines to every peer) m192 243.3-
+244.6 / m288 294.5-295.2 = noise; + router gather padded to 128 a rank (aligned f32 lines) 243.3 / 294.4 = noise;
+`fgf` flags strided 16 pairs (+ CNT_STRIDE) 227.5 / 287.6 vs 227.4-227.8 / 287.5-287.7. So the push cost the probes
+show is bytes / instructions, not partial lines. Weight prefetch while front waits on the seam: not tried yet.
+Kernel gate (`logs/entry/front1_l6`, `front1_l8`; cache off): every variant PASS at L=6 rows 12..288 and L=8 rows
+16..384, 0 faults (no-t1 = fault check, 0). a3w/m4 us L=6 95.8 / 104.0 / 115.9 / 144.0 / 225.0 / 288.2 (10.32:
+103.4 / 111.0 / 123.5 / 152.7 / 252.9 / 299.5), L=8 99.3 / 108.9 / 124.6 / 158.9 / 257.4 / 334.9 (10.32: 106.9 /
+116.5 / 132.5 / 166.6 / 285.7 / 340.2): the counter stride gives ~-7.6 us at every size.
+ISA: `_arrive_all`'s new `stride` defaults to 1; pre_attn (m96 kda 6) and chain (m192) final ISA identical to 8fc10da.
+Server steps: `scripts/k31pro_front1_pipeline.sh` (ENTRY_CHECK, gsm8k200 T48 / T16 >= 0.975, A/B c4..c48 + c32
+trace; tags `front1_*`), started 13:20 on mi355-4.
+Eager ENTRY_CHECK (`server_front1_chk.log`, rows 24 / 60 / 90 / 96): entry n 506 median 3.66e-3 max 5.35e-3, exit
+n 529 median 3.30e-3 max 3.83e-3, 0 > 6e-3, no fault (= 10.32).
+gsm8k200 TEMP 0 (wide on, CUDA graphs, SIM=0, `results/acc/front1_wide_t{48,16}`): 0.985 / 0.99. No fault in any
+server of the pipeline.
+A/B (SIM=1 3.399, same session 13:00-13:31, `results/ab/front1ab_{off,wide}_20261103`):
+```text
+TPOT ms          c4     c8     c16    c32    c48      (acc 3.38-3.43)
+off              8.28  11.18  15.78  23.31  30.66
+wide             8.19  10.95  15.41  22.95  30.04
+TPOT x acc diff  -0.8%  -2.1%  -2.6%  -0.4%  -2.3%    (10.32: +1.0 / -0.7 / -1.4 / +1.7 / -1.3)
+```
+c32 traces `traces/front1_{wide,off}_c32` (`results/front_20261103/cmp_c32.txt`): VERIFY wide 54.20 vs off 55.33
+(-1.13 ms/step; 10.32 +1.10): L -1.01 (10.32 +0.46), Lfirst +0.04 (+0.75; launch 6.17 -> 5.49), Dafter_run -0.17.
+c32's step is -2.0% but TPOT x acc only -0.4%: wide's sampled acc 3.42 vs off 3.38 (SIM noise).
+Decision: wide wins every bucket for the first time; c8 / c16 / c48 beyond 1%, c4 / c32 not yet -> still opt-in.
+Next: item 2 (Lfirst pout / bank copies by stride reads), aimed at c4 / c32.

@@ -70,6 +70,8 @@ requests (slot -1); bucket rows = L x requests, configs from the 8-token bucket 
 4. gsm8k200 TEMP 0, CUDA graphs, SIM=0, THREADS 48 and 16 (`gsm8k_gate.sh`): >= 0.975 and within
    ~1 pt of off on the same weights / draft. Check real accept length too (draft vs target mismatch
    shows there first: K3.1-Pro + step29301 draft 3.7, + step55000 4.9).
+4b. KVV (toolcall / OCRBench / MMMU-Pro / BEAM 1M, effort max; `kimi-k31/KVV_ACCURACY.md`): off and the
+   changed path, when a round changes many paths, before wide becomes default, before a PR.
 5. Serving A/B, same session, off then wide, `ab_bench.sh` with `AB_CONC="4 8 16 32 48"`, SIM=1 at the
    AgentX accept (3.399, 6 draft tokens). Decision rule: wide on only if <= off beyond ~1% at every
    bucket that matters.

@@ -19,7 +19,7 @@ Node-local runs and numbers: `/shared_nfs/kimi-k31/results/<tag>/`.
 | Kernel | Rows a step | Status |
 |---|---|---|
 | Team K1 / K2 / mla_pre (`kevin-mii/sglang-k31-amd` branch `mono/kimi-k31`) | <= 8 total (`kimi_k3.MAX_ROWS = 8`): bs1 only (6 or 8 draft tokens) | bs1 latency path ("S1") |
-| Ours: `kimi_k31/wide.py` + `gfx950/layer.py` (`SGLANG_AMD_MONO_K31_WIDE=1`) | R x L, R 2..48, L = draft tokens (6 or 8) | opt-in; ties / loses to off at c4..c48 so far |
+| Ours: `kimi_k31/wide.py` + `gfx950/layer.py` (`SGLANG_AMD_MONO_K31_WIDE=1`) | R x L, R 2..48, L = draft tokens (6 or 8) | opt-in; -1.7..-3.2% vs off at c4..c48 (10.36); default-on waits for KVV |
 
 Team skill (bs1, worth reading for mechanisms): `git show ee15183f58:.agents/skills/amd-monokernel/SKILL.md`
 in `/sgl-workspace/sglang-k31-amd` (references: handoffs-and-memory.md, flydsl.md, measurement.md).
@@ -54,6 +54,15 @@ requests (slot -1); bucket rows = L x requests, configs from the 8-token bucket 
   L=8 rows 16..384; partial tiles only appear at L=6 (all L=8 buckets are tile multiples).
 - **After a GPU fault:** `rm -f /tmp/gpucore*` and core files in the crashed process's cwd (one torchrun
   from the repo root left 133 GB). `ulimit -c 0` before servers / torchrun.
+- **Count tasks against BLOCKS (256).** A stage with 257..512 tasks runs two rounds: the last CTA ends a whole task
+  after the median. The front at 192 / 256 rows had 272 split-K tasks -> `wide.FRONT_ROWS` picks one-round configs
+  (10.33, -11% a launch at m192). Check `tiles x ks` for every new bucket / config.
+- **One 128 B line per counter / mailbox that many CTAs hit at once.** Split-K tile counters packed 32 to a line
+  cost ~7.6 us a launch at every size (`layer.CNT_STRIDE = 32`, 10.33). Partial-line XGMI pushes and the `fgf` flag
+  stride measured nothing (noise): stride where many writers and spinners share a line, not by default.
+- **Reading SGLang tensors in place:** they hold the step's rows, the bucket may hold more -> bound the buffer
+  descriptor (`rsrc(ptr, nbytes)`, OOB loads return 0; `pfx_bytes`, 10.34) and test it with NaN rows past the bound
+  (`layer_bench --pfx-short`; `rel` maps NaN to inf, plain `max()` would hide it).
 - **Bundled LLVM** (default). `SGLANG_AMD_MONO_ROCM_LLVM=/opt/rocm/llvm` faulted at m128 t1-off (10.24-10.26).
 
 ## 3. Gate ladder (every kernel edit)
@@ -85,6 +94,8 @@ requests (slot -1); bucket rows = L x requests, configs from the 8-token bucket 
 - Stage timeline: `layer_bench.py --timeline` (layer.py `timeline=True`: 14 marks into scratch `tl`,
   no new kernel argument, off = unchanged build). Read the LAST CTA per mark; compare with the halves:
   `pre_attn_bench --kda L` and `chain_bench --timeline` at the same configs.
+- 10.33-10.36 (2026-11-03): one-round front + counter stride, prefix / bank by stride, sort + pop route, uncached
+  scratch -> wide beats off by 1.7-3.2% at c4..c48 (6 draft tokens). Before that:
 - 2026-11-03 finding (K3.1-Pro, m256 = c32): wide - off +2.55 ms/step, all in the launch body; pre part
   (T1..KDA) = the pre half; post part +24 us, all in the MoE front stage (finish_front's 8-peer
   gather); T6 tail 20 us (route 11 us at every size).
@@ -110,7 +121,7 @@ requests (slot -1); bucket rows = L x requests, configs from the 8-token bucket 
 ## 6. Repro snippets
 
 ```bash
-S=/tmp/k31pro_scripts   # mi355-4 copy of kimi-k31/scripts: K3.1-Pro, DFLASH step55000, 6 tokens, SIM 3.399
+S=/shared_nfs/kimi-k31/results/pro_20261103/scripts   # K3.1-Pro, DFLASH step55000, 6 tokens, SIM 3.399; RADIX=1 for KVV
 bash /shared_nfs/kimi-k31/results/pro_20261103/k31_gate_l6.sh mytag 6     # kernel gate, L=6
 SGLANG_AMD_MONO_K31_WIDE=1 bash $S/launch_server.sh wide_x --enable-amd-monokernel
 AB_CONC="4 8 16 32 48" bash $S/ab_bench.sh wide_x_ab

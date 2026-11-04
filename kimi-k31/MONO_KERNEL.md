@@ -2,15 +2,19 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-04 16:00, mi355-4 -- 10.38 / 10.39 done; wide still wins after the SkyOpt branches)
+## CONTINUE HERE (handoff 2026-11-04 18:00, mi355-4 -- 10.38 / 10.39 done and pushed; wide still wins after the SkyOpt branches)
 
 **Status:** 10.38 (latent up / shared down configs by bucket rows, sgl-amd-mono c3ed440, local): A/B TPOT x acc wide vs
 off c4 -3.1 / c8 -3.6 / c16 -3.5 / c32 -3.6 / c48 -3.8%. Wide passes at pure TP8 (DCP1). 10.39 (wide reads SGLang's
 front / up weights in place: mono's own weight copies 3.45 GB -> 0.48 GiB a rank): on the colleagues' SkyOpt config
 (pure TP8, mem 0.90, context 32K, row-sharded front / o_proj / stream, InferenceX fixed-seq 8k1k) wide vs off tput/GPU
 c4 +4.1 / c16 +3.8 / c32 +3.2 / c48 +1.6% (before 10.39: c32 -4.5 / c48 -12.1%, KV-starved). Gate all PASS, ENTRY_CHECK
-median 3.59e-3, gsm8k200 0.98-0.995. sglang eval tree: `/sgl-workspace/sglang-k31-skyopt` (local branch
-`k31/skyopt4-eval` = 4b7f7b13e8 + the 4 kevin-mii `skyopt/*` branches, not pushed). Nothing pushed today.
+median 3.59e-3, gsm8k200 0.98-0.995; our DCP8 A/B TPOT x acc -2.9 / -3.4 / -3.5 / -3.3 / -3.0% (= 10.38).
+sgl-amd-mono `k31/mono-s1` @ 601a423 (10.39) on c3ed440 (10.38), pushed to the kkHuang-amd fork 2026-11-04 18:00.
+sglang eval tree: `/sgl-workspace/sglang-k31-skyopt` (local branch `k31/skyopt4-eval` = 4b7f7b13e8 + the 4 kevin-mii
+`skyopt/*` branches, local only: its merge commit has a placeholder identity). The image's aiter
+(`/sgl-workspace/aiter`, 285579b62) runs the current stack at the same speed (10.39, `AITER_TREE=`).
+GPUs free, no server (18:00).
 **Open items:**
 1. **c48 KV gap under the SkyOpt config (10.39, parked by the user 2026-11-04):** wide's KV 378,688 tokens vs off
    402,048 (94%): at c48 wide runs 44-46 requests with 2-4 queued (TTFT 1975 vs 716 ms, tput only +1.6%). The rest
@@ -2238,4 +2242,13 @@ wide         555.6  1131.6  1449.2  1556.6      7.59 / 15.22 / 24.00 / 31.65   3
 diff         +4.1%   +3.8%   +3.2%   +1.6%
 ```
 c48 still KV-limited (44-46 running, 2-4 queued): open item 1 in CONTINUE HERE (parked by the user).
-DCP8 A/B of 10.39 (`k31pro_wd1ab_pipeline.sh`): running at 16:00.
+DCP8 A/B of 10.39 (`k31pro_wd1ab_pipeline.sh`, `results/ab/wd1ab_{off,wide}_20261104`): TPOT x acc wide vs off c4
+-2.9 / c8 -3.4 / c16 -3.5 / c32 -3.3 / c48 -3.0% (10.38: -3.1 / -3.6 / -3.5 / -3.6 / -3.8): no regression.
+Committed: sgl-amd-mono `k31/mono-s1` 601a423; 601a423 and c3ed440 pushed to the kkHuang-amd fork (2026-11-04).
+The image's aiter (`/sgl-workspace/aiter`, 285579b62, 2026-10-17, 290 commits before aiter-k31 f0b96f49e, 3 local edits
+in that tree) under the same stack (`AITER_TREE=/sgl-workspace/aiter launch_server.sh`, `scripts/k31pro_imga_pipeline.sh`,
+`results/ab/imgab_{img,k31}_{off,wide}_20261104`, one session, DCP8): runs, gsm8k200 off 0.98 / 0.99, wide 0.985 / 0.99,
+no fault; TPOT x acc image vs aiter-k31 off +0.2..+0.8%, wide -0.1..+0.8% (noise); prefill 8k TTFT 459-461 ms on all
+four; wide vs off image -3.3 / -3.9 / -3.5 / -4.4 / -3.3%, aiter-k31 -3.9 / -3.8 / -3.6 / -3.6 / -3.2%. The K3 tuning
+commits it lacks (#6820, #6410, #6177) show nothing at this config. Switching aiter recompiles mono's FlyDSL builds once
+(~13 min warmup on the first wide server). Not run on the SkyOpt config.

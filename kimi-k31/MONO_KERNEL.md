@@ -2,7 +2,28 @@
 
 Owner node: mi355-4. Created 2026-10-31. P0 + P1a/P1b step 1 done; history in sections 6, 8, 9.
 
-## CONTINUE HERE (handoff 2026-11-04 07:40, mi355-4 -- 10.37 done: wide beats off by 2.9-3.6% at c4..c48)
+## CONTINUE HERE (handoff 2026-11-04 16:00, mi355-4 -- 10.38 / 10.39 done; wide still wins after the SkyOpt branches)
+
+**Status:** 10.38 (latent up / shared down configs by bucket rows, sgl-amd-mono c3ed440, local): A/B TPOT x acc wide vs
+off c4 -3.1 / c8 -3.6 / c16 -3.5 / c32 -3.6 / c48 -3.8%. Wide passes at pure TP8 (DCP1). 10.39 (wide reads SGLang's
+front / up weights in place: mono's own weight copies 3.45 GB -> 0.48 GiB a rank): on the colleagues' SkyOpt config
+(pure TP8, mem 0.90, context 32K, row-sharded front / o_proj / stream, InferenceX fixed-seq 8k1k) wide vs off tput/GPU
+c4 +4.1 / c16 +3.8 / c32 +3.2 / c48 +1.6% (before 10.39: c32 -4.5 / c48 -12.1%, KV-starved). Gate all PASS, ENTRY_CHECK
+median 3.59e-3, gsm8k200 0.98-0.995. sglang eval tree: `/sgl-workspace/sglang-k31-skyopt` (local branch
+`k31/skyopt4-eval` = 4b7f7b13e8 + the 4 kevin-mii `skyopt/*` branches, not pushed). Nothing pushed today.
+**Open items:**
+1. **c48 KV gap under the SkyOpt config (10.39, parked by the user 2026-11-04):** wide's KV 378,688 tokens vs off
+   402,048 (94%): at c48 wide runs 44-46 requests with 2-4 queued (TTFT 1975 vs 716 ms, tput only +1.6%). The rest
+   of mono's memory is warmup's 0.41 GiB (non-torch): every bucket's own peer buffer (137 MB) + uncached scratch
+   (61 MB) + code objects. Candidate: one peer buffer / scratch sized for the largest bucket shared by every bucket
+   (~0.15-0.2 GiB; check that one bucket's stale flags cannot satisfy another bucket's polls), then rerun
+   `SKYTAG=<tag> scripts/k31pro_skyx_pipeline.sh`.
+2. KDA 31 us at m192 (2 rounds of (request, head) tasks): two heads a CTA (10.38) measured no gain -- a task is
+   compute-bound in its CTA; less work a head is the lever.
+3. Later (user's choice): c56 bucket; DSA layers into the launch (design first); KVV MMMU-Pro off / wide; front
+   weight prefetch at the seam (10.12 found W not the front's bound; untried in the layer).
+
+### Previous handoff (2026-11-04 07:40, superseded above): 10.37 done: wide beats off by 2.9-3.6% at c4..c48
 
 **Status:** 10.37 (in_proj config by bucket rows, `wide.INP_ROWS`): L=6 m192 (c32) layer 217 -> 201 us (-7.4%), L=8
 m256 254 -> 247 (-3.1%), L=6 m96 141 -> 138; kernel gate all PASS, 0 faults; ENTRY_CHECK = 10.36; gsm8k200 T48 / T16
@@ -2144,3 +2165,77 @@ TPOT x acc diff  -2.9%  -3.4%  -3.6%  -3.2%  -3.1%    (10.36: -2.9 / -3.2 / -3.0
 c32 (`results/inp_20261103/cmp_c32.txt`): VERIFY wide 52.25 vs off 55.17 (-2.92; 10.36 -1.57): L -2.09 (launch 10.31
 -> 9.49 ms/step), Lfirst -0.69 (launch 5.39 -> 4.93), Dafter_run -0.15. Launches -1.28 ms/step = ~16 us x 68 as the bench.
 Committed: sgl-amd-mono `k31/mono-s1` ce9e2a6 (not pushed).
+(Correction 2026-11-04: ce9e2a6 was on the kkHuang-amd fork by the morning, `git ls-remote fork`.)
+
+### 10.38 Latent up / shared down configs by bucket rows; KDA pair; DCP1 (mi355-4, 2026-11-04)
+
+Tasks / row fill of every GEMM stage per bucket: `scripts/k31_tasks.py [--cand]` (legal one-round candidates without a
+padded row tile). Two-round stages left after 10.37: up at L=6 m192 / L=8 m256 (2 x 28 x 8 = 448 tasks) and m288 / m384
+(336); shared down at m288 / m384 (336). o_proj / shared down at L=6 m48..m288 fill 75% of their rows.
+Sweep (`scripts/k31_cfg_sweep.sh`, `layer_bench --up / --oproj / --front / --sdown rows=cfg`, new, as `--inp`;
+`logs/cfg_20261104/cfg1`), confirmed same session x2 (`k31_cfg_confirm.sh`, `cfg2`), layer us a3w/m4:
+```text
+L6 m192  base 203.2 / 204.5   up 96:64:2:4:8 199.2 / 201.0
+L6 m288  base 279.1 / 278.8   up 96:64:2:4:4 + sdown 96:128:2:4:1 270.6 / 271.0
+L8 m256  base 246.8 / 247.4   up 128:64:4:2:8 242.2 / 241.4
+L8 m384  base 325.2 / 325.5   up 96:128:2:4:8 + sdown 192:64:4:2:1 317.6 / 317.9
+o_proj: every one-round no-padding candidate tied or lost (bm 192 +5..8 us): its padded rows cost nothing (it waits on KDA)
+front bm 192 at m192 (W read once): +11 / +14 us -> dropped (W is not the front's bound, as 10.12)
+```
+Kept: `wide.UP_ROWS`, `wide.SDOWN_ROWS` (applied in `cfg_rows`); layer_bench takes every config from `cfg_rows` (its own
+`CFGS` copy hid the rows tables at L=8). Gate (`logs/cfg_20261104/gate_ud1.txt`): all PASS, 0 faults; 68 launches m192
+196.2 / m288 269.4 / L=8 m256 235.0 / m384 313.4 us. ENTRY_CHECK entry median 3.62e-3 (one 7.18e-3, layer 19 -> 20 rows
+96), exit 3.25e-3. gsm8k200 T48 / T16 0.98 / 0.99. A/B (`results/ab/ud1ab_{off,wide}_20261104`):
+```text
+TPOT ms          c4     c8     c16    c32    c48      (acc 3.36-3.42)
+off              8.33  11.14  15.77  23.24  30.71
+wide             8.07  10.68  15.22  22.27  29.80
+TPOT x acc diff  -3.1%  -3.6%  -3.5%  -3.6%  -3.8%    (10.37: -2.9 / -3.4 / -3.6 / -3.2 / -3.1)
+```
+Committed: sgl-amd-mono `k31/mono-s1` c3ed440 (local).
+KDA timeline: the stage is 14.6-15.7 us after in_proj at one round of (request, head) tasks (m48 / m96), 32 us at m192 /
+L=8 m256 (384 tasks, 2 rounds), 43 / 55 us at m288 / m384 (576, 3 rounds). Two tasks a CTA (256 threads a head,
+`kda_wide.kda_heads(pair=True)`, worktree `/tmp/k31_kda2`, `scripts/k31_kda_pair.sh`, `logs/kda_20261104/kp1`):
+m192 -0.6..-1.6 us (noise), m288 +3..4, L=8 worse; a CTA's two heads take ~28 us = 2 x one head -> a task is
+compute-bound in its CTA, not latency-bound. Dropped (not committed).
+DCP1 (pure TP8, `DCP=1 launch_server.sh`, `scripts/k31pro_dcp1_pipeline.sh`): wide eager ENTRY_CHECK entry median
+3.60e-3 max 5.57e-3, exit 3.29e-3, 0 > 6e-3, no fault; gsm8k200 wide 0.995 / 0.995, off 0.99 / 0.99. First wide run at
+DCP1.
+
+### 10.39 SkyOpt branches; wide reads SGLang's front / up weights in place (mi355-4, 2026-11-04)
+
+Colleagues' branches (kevin-mii/sglang-k31-amd `skyopt/k3-sparse-mla-splitk-verify`, `k3-moe-small-sort-1024`,
+`dflash-fc-row-shard-prefill`, `k3-row-sharded-front`, each one commit + the dev_amd PD checksum fix on 4b7f7b13e8) merged
+without conflict into `/sgl-workspace/sglang-k31-skyopt` (local branch `k31/skyopt4-eval`). None replaces what wide does:
+sparse MLA split-K is the DSA layers' attention (non-DCP only), small sort is the routed experts both paths call, the
+row-sharded front / o_proj / stream and the DFlash fc shard take batches >= 4096 tokens (prefill; o_proj eager only).
+The 7 SGLang functions mono calls are untouched by the diff.
+Their run config (pure TP8, mem 0.90, context 32768, the 3 row-sharded switches, mamba 0.65 / 64, `--min-free-slots-delay
+1` at c16 / c48; InferenceX fixed-seq client 8k1k ratio 0.8, 10 x c prompts, 2 x c warmups, flush between points):
+`scripts/k31pro_skyx_pipeline.sh` (`SKYTAG=<tag>`; local client `/workspace/InferenceX-ci37423/inferencex-e2e`,
+tokenizer `/shared_nfs/Kimi-K3.1-Pro`). Our off reproduces their "new + opt" within 1-4% (c4 536 vs 561, c16 1090 vs
+1101, c48 1535 vs 1554 tok/s/GPU).
+First A/B (`results/skyx_20261104`, sgl-amd-mono c3ed440): wide c4 +3.2%, c16 +4.2%, c32 -4.5%, c48 -12.1% tput/GPU
+(TTFT 3.3 / 17.3 s): wide's KV 230,592 tokens vs off 402,048 -> 27-28 requests running. Mono's own copies took 3.45 GB
+a rank (invisible at DCP8: 1.33M KV tokens a rank). KV-parity what-if (wide at mem 0.911, KV 381,760): c32 +3.1%,
+c48 +1.3% (45-46 running).
+Fix (sgl-amd-mono, uncommitted at 16:00): (1) `wf` (front [router | latent down | shared gate_up] rows, 30 MB x 68):
+the front GEMM reads SGLang's merged `_front_w` (`_merge_front_weights`, views of one bf16 buffer) through a row map
+(`tile_mma.mma_tile(wrow=)`, `layer.kda_layer(front_rows=(router, latent, sgu row offsets))`, compile-time per rank, no
+new kernel argument); (2) `w_up` (`pre.fold_up` copy + its f32 temporaries): SGLang's up rows as is, `_lred` scales the
+gathered latent by the norm weight (f32, appended to the layer's `bias` buffer: no new argument;
+`kda_layer(up_norm=True)`); fallbacks `SGLANG_AMD_MONO_K31_WIDE_FRONT_COPY=1` / `_UP_COPY=1`. Build logs memory
+(`[k31 wide] memory: ...`, `weight copies: ...`) and empty_caches. Mono a rank: 3.45 GB -> 0.48 GiB (Kimi-K3 launches
+0.07, wide layers 0.00, warmup 0.41: peer buffers + uncached scratch + code); wide KV 378,688 tokens.
+Gate (`LB_EXTRA="--front-map --up-norm" k31_gate_l6.sh`, `logs/cfg_20261104/gate_wd1.txt`): all PASS, 0 faults; launch us
+unchanged (68 launches m192 196.5 / m288 269.9 / L=8 m256 234.9 / m384 314.6). ENTRY_CHECK (DCP8) entry median 3.59e-3
+max 5.15e-3, exit 3.22e-3. gsm8k200 DCP8 0.98 / 0.99, SkyOpt config 0.985 / 0.995.
+A/B on the SkyOpt config (`results/skyx2_20261104`, same session):
+```text
+tok/s/GPU     c4      c16     c32     c48        TPOT p50 ms off -> wide       TTFT p50 ms off -> wide
+off          533.5  1090.5  1404.5  1532.4      7.93 / 15.80 / 24.78 / 34.07   362 / 402 / 548 / 716
+wide         555.6  1131.6  1449.2  1556.6      7.59 / 15.22 / 24.00 / 31.65   360 / 396 / 536 / 1975
+diff         +4.1%   +3.8%   +3.2%   +1.6%
+```
+c48 still KV-limited (44-46 running, 2-4 queued): open item 1 in CONTINUE HERE (parked by the user).
+DCP8 A/B of 10.39 (`k31pro_wd1ab_pipeline.sh`): running at 16:00.

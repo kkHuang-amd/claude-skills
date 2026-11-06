@@ -30,6 +30,17 @@ Owner node: crsuse2-m2m-v3-131. Started 2026-11-05.
   `presort.py` wraps `aiter.fused_moe._moe_sorting_impl`, which the new a8w4 path no longer calls. So PR #111's
   sort lever is a no-op once aiter is bumped -> needs a hook for the new path (and block_m 16) before/when SGLang
   moves to aiter >= #6464. With that, upstream row - sort_quant ~= 57 us ~= c6.
+  **Feasibility of feeding upstream mxmoe (2026-11-06, crsuse2-m2m-v3-131): yes, via aiter's official presort API**
+  `aiter/presorted_moe.py` `register_presorted_moe(aux)` (d4defd456, 2026-11-06): BM=16 only; keys sorted_token_ids,
+  sorted_weights, sorted_expert_ids (1 per 16 rows), num_valid_ids[2], m_indices (sorted row -> token, pad = M),
+  reverse_sorted (M*topk: (token,slot) -> sorted row) + topk_ids_ptr/topk_weights_ptr/M/block_m/num_experts/topk;
+  `moe_buf_zeroed` + `moe_buf_ptr` skip fused_moe's zeroing (graph-safe if our zeroing is in the captured launch).
+  Launch changes: `sort_rows` block 32 -> 16 (SORT_BM param), emit m_indices (ids & 0xffffff) and reverse_sorted
+  (= our `dest`), drop `_quant8` for this path (stage 1 `iq_sep_native_scale` quantizes inline); wide.py registers
+  instead of presort.py's wrapper; keep `out` 4-byte aligned. Upstream seg kernels: stage1 31.8 + stage2 16.7 +
+  sort_quant 5.3 + copyBuffer 4.1 (x1.11/layer; presumed atomic-GEMM2 misaligned-output copy, not verified).
+  Estimate 61.4 -> ~52 us/layer (-5.5 vs c6, ~-0.37 ms/bs2 step). Blocker: SGLang must move to aiter >= d4defd456
+  (+ flydsl 0.4.2). Posted on PR #111 (issuecomment-6688843616).
 - Next: optimization candidates (i)/(ii) in the 14:00 Status paragraph below.
 
 **[DONE] NEXT SESSION TASK (set 2026-11-06 14:05 by the user): commit + push the lever-(a) work below, then continue

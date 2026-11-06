@@ -4,6 +4,45 @@ Owner node: crsuse2-m2m-v3-131. Started 2026-11-05.
 
 ## CONTINUE HERE
 
+**RESULT (2026-11-06 19:09 UTC, crsuse2-m2m-v3-131; GPUs free, nothing running): launch BM=16 presort works on
+upstream aiter once the gate layout is right.** All on aiter 0fa23206b + flydsl 0.4.2 + the gate-mode overlay
+below, point c1-base, same decode mix every trace (7 x bs2, 2 x bs3); `presort16-20261106/status.txt`:
+```text
+per KDA layer, bs2                          routed seg us   VERIFY ms/step   gsm8k1319 greedy (graphs)
+base: upstream mxmoe row, aiter's own sort  65.3, 65.5      18.29, 18.38     knobs off: 0.9735, trunc 0
+p16:  + launch BM16 presort (aux16)         55.9, 56.0      17.95, 17.71     0.9773, trunc 0, 68 x aux16 on
+c6 (BM32 pair, no launch sort on new aiter) 63.1, 62.1      18.10, 18.10     -
+```
+p16 vs base: -9.5 us/layer (-14.5 %), -0.5 ms/bs2 step (-2.8 %); vs c6 -6.6 us/layer. Kernels with the right layout:
+stage1 `..._iq_il_...` 33.8 + stage2 18.6 us; the separate `moe_sort_quant` (5.3) and the per-layer copy are gone.
+quick.py (8 questions): overlay off-knobs 8/8, p16 8/8 (same token counts as the old env).
+**Next (needs the user):** (1) SGLang fix: pass GateMode.INTERLEAVE for situ when w13 is GU-interleaved (else any
+aiter >= #6464 table with mxmoe rows breaks K3) -- upstream PR or ask SGLang owners; (2) commit `k31/wide-launch-
+presort16` (5 files, uncommitted) and add it to #111 or a follow-up PR once SGLang moves to aiter >= d4defd456;
+(3) optional aiter issue: fused_moe should reject mxmoe a8w4 rows under gate_mode SEPARATED instead of computing
+garbage. c6 csv row is now moot (p16 beats it on upstream aiter).
+
+**Status (2026-11-06 ~18:20 UTC, crsuse2-m2m-v3-131; superseded by RESULT above; driver `drive2.sh`):** launch BM=16 presort
+("aux16") for upstream aiter's mxmoe row implemented on sgl-amd-mono branch `k31/wide-launch-presort16` (local,
+UNCOMMITTED, on top of k31/wide-launch-topk): `moe_front.sort_layout/sort_init/sort_rows(kind)` (bm 16, pad m,
+m_indices, dest = reverse_sorted, no quant), `route_row` quant decoupled from zeroing, `kda_layer(sort=None|"sgl"|
+"aux16")`, `presort.registered()` -> `aiter.presorted_moe.register_presorted_moe` (+ moe_buf_zeroed), auto kind =
+"aux16" iff `aiter.presorted_moe` exists, `presort.ref_aux16/check_aux16`, `layer_bench --sort [sgl|aux16]`.
+- Verified: layer_bench `--sort aux16` (new aiter env) all PASS incl. vs aiter's own BM16 sort (nv, eids, rows per
+  expert, reverse_sorted); `--sort` (sgl, old env) PASS; launch time unchanged (93.8 / 100.4 us). Eager SORT_CHECK
+  on served data: 68 x `launch sort aux16 on`, 1000 calls 0 bad, out_rel 5.01e-3 = own-sort self spread 4.98e-3.
+- **BLOCKER FOUND: upstream aiter's kimik3 a8w4 mxmoe row is WRONG under SGLang 380ee3f** (gsm8k 0 %, all
+  truncated; quick 8-question check `quick.py` 0/8; old 285579b62 table on the same new aiter 8/8; old table + only
+  the new token-16 row 1/8). Root cause: SGLang loads K3 situ a8w4 w13 GU-interleaved (`mxfp4.py`
+  shuffle_weight_a16w4(.., True)) but passes `gate_mode=SEPARATED` (moe_runner/aiter.py situ branch). Old "gui"
+  kernels ignore gate_mode; the mxmoe stage1 honors it (`interleave=(gate_mode == INTERLEAVE)`). aiter's own test of
+  that row: INTERLEAVE logits_diff 1.6e-5, forced SEPARATED 0.979. Fix belongs in SGLang (pass INTERLEAVE when w13
+  is GU-interleaved) and/or aiter (reject SEPARATED for mxmoe a8w4). => all earlier upstream-row numbers (c6 vs
+  upstream 57-64 us, presort16 54.1 us) were measured on a WRONG-layout kernel; redo them.
+- Overnight rerun uses an experiment-only overlay `/sgl-workspace/k31-gu-overlay/sitecustomize.py` (PYTHONPATH +
+  K31_GU_ITLV_OVERLAY=1; rewrites Situv2 gate_mode SEPARATED -> INTERLEAVE in aiter.fused_moe.fused_moe; nothing
+  installed or modified): quick checks off / p16, bs2 traces base(top-k)/p16/c6 x2, gsm8k1319 p16 / off.
+
 **Status (2026-11-06 ~15:00, crsuse2-m2m-v3-131): the commit/push task below is DONE.**
 - sgl-amd-mono: branch `k31/wide-launch-topk` pushed to fork, 2 commits on fc61d69: 53339e2 (launch top-k bit-exact,
   `..._WIDE_LAUNCH_TOPK`) + a818fe2 (launch sort/quant/zero + `presort.py`, `..._WIDE_LAUNCH_SORT`). User's call:

@@ -15,8 +15,21 @@ Owner node: crsuse2-m2m-v3-131. Started 2026-11-05.
 - aiter: tuner patch reverted (`gemm_moe_tune.py`), other pre-existing dirty files untouched. c6 row committed on
   fork branch kkHuang-amd/aiter `kimik3-a8w4-m16-inter384-c6` (473fbea98, base 285579b62 = what was tested; no PR).
   CAUTION: upstream main 0fa23206b retuned that row to `flydsl_mxmoe_g1_a8w4_16x256x256_f16in_nt_fp8out_situv2_xcd4`
-  (block_m 16, fused). c6 vs that new kernel is NOT measured -- do it (bs2 trace, `agentx-k31/run_moe_cands.sh`)
-  before any upstream PR.
+  (block_m 16, fused). **Measured 2026-11-06 15:33 (crsuse2-m2m-v3-131), both on upstream aiter 0fa23206b
+  (worktree `/sgl-workspace/aiter-main` + flydsl 0.4.2 in `/sgl-workspace/pydeps-flydsl042`, PYTHONPATH only; the
+  installed aiter/flydsl untouched), c1-base + launch top-k/sort, bs2 trace each; results + `run.sh`/`run2.sh` in
+  `/shared_nfs/kk/results/Kimi-K3.1-Pro/moetune-m12-upstream-20261106/`:**
+  ```text
+  per KDA layer, bs2      routed seg us   VERIFY ms/step   stage1 / stage2 / sort us
+  c6   (2 runs)           57.0, 58.3      17.78, 17.80     35.1-36.1 / 18.3-18.6 / (no separate kernel seen)
+  upstream (2 runs)       64.3, 61.4      18.44, 18.11     31.8-33.2 / 16.7-17.8 / sort_quant 5.3-5.5
+  ```
+  (run `up` discarded: its trace window had 10 bs1 steps.) c6 wins by ~5 us/layer, ~0.5 ms/step (-2.6 %), but the
+  upstream GEMMs themselves are faster; it loses on aiter's separate `moe_sort_quant` (block_m 16).
+  NEW FINDING: on upstream aiter the launch sort is NOT used for either row (`launch sort NOT used` x68):
+  `presort.py` wraps `aiter.fused_moe._moe_sorting_impl`, which the new a8w4 path no longer calls. So PR #111's
+  sort lever is a no-op once aiter is bumped -> needs a hook for the new path (and block_m 16) before/when SGLang
+  moves to aiter >= #6464. With that, upstream row - sort_quant ~= 57 us ~= c6.
 - Next: optimization candidates (i)/(ii) in the 14:00 Status paragraph below.
 
 **[DONE] NEXT SESSION TASK (set 2026-11-06 14:05 by the user): commit + push the lever-(a) work below, then continue

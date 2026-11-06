@@ -4,27 +4,349 @@ Owner node: crsuse2-m2m-v3-131. Started 2026-11-05.
 
 ## CONTINUE HERE
 
-**Status (2026-11-05 17:00, crsuse2-m2m-v3-131): matrix DONE, GPUs free.** Keep mamba150 (c4 +9.8 %), drop
-draft8 (c1 -7.2 %, c4 -2.8 %); see "Summary of the gap matrix" at the end. Next candidates: replicate mamba150,
-mamba 200+, c1 without `--prefill-decode-interval 16` / lpm (B300 sets neither).
-(Earlier, 12:20:) gap-closing matrix ran, `driver_matrix.frozen.sh` pid 130425,
-OUT=`/shared_nfs/kk/results/Kimi-K3.1-Pro/agentx-gap-20261105` (`status.txt`), points in order:
-c4-mamba150 (`--max-mamba-cache-size 150`; KV 1.44 M tokens, ready 12:17) -> c1-base -> c1-draft8 -> c4-draft8
-(draft8 = `--speculative-num-draft-tokens 8` + SIM 3.68 as B300). Each one variable vs c4-base (run above) / c1-base.
-Done before: c4 base reproduces CI; SkyOpt opt arm invalid (KV 474 k tokens, 400s on >474 k inputs); mono cannot
-take HiCache (spec lacks KV_OFFLOAD); PR's c8-c48 HiCache recipe exceeds this node's GTT (1375 GB = RAM/2).
-**Next:** read each END line; compare hit / tok/s/GPU / P90 intvty / ITL; one 3600 s arm resolves ~5-6 % only.
-**Files (node-local, /shared_nfs/kk/agentx-k31/):** `points/c4-{base,opt}/{server_env,server_args,client_env}`,
-`run_point_k31.sh` (copy of `agentx/e2e/run_point.sh`: Kimi model, InferenceX-latest, runtime dir
-`/workspace/agentx-runtime-latest`), `driver_c4.sh`; CI log / artifacts under `ci/`.
-**Repro:**
-```bash
-B=/shared_nfs/kk/agentx-k31; cd /workspace
-setsid nohup bash $B/driver_c4.frozen.sh < /dev/null > $OUT/driver.log 2>&1 &
-# OUT=/shared_nfs/kk/results/Kimi-K3.1-Pro/agentx-pr4808-c4-20261105
+**Status (2026-11-06 ~15:00, crsuse2-m2m-v3-131): the commit/push task below is DONE.**
+- sgl-amd-mono: branch `k31/wide-launch-topk` pushed to fork, 2 commits on fc61d69: 53339e2 (launch top-k bit-exact,
+  `..._WIDE_LAUNCH_TOPK`) + a818fe2 (launch sort/quant/zero + `presort.py`, `..._WIDE_LAUNCH_SORT`). User's call:
+  kept `..._WIDE_TOPK_CHECK` / `..._WIDE_SORT_CHECK`; removed `..._WIDE_DUMP_IDS` and `layer_bench --sort-cut`
+  (`kda_layer(sort=)` is a bool again, `sort_rows` has no `cut`). Formatted with ruff 0.15.1 / isort (pre-commit pins).
+  Re-check after the edits: layer_bench `--rows 12,24 ... --sort` 6/6 sort checks PASS, layers PASS (93.4 / 99.5 us);
+  commit-1 tree alone (no --sort) PASS too. **PR: sgl-project/sgl-amd-mono#111** (base main, stacked on #108 which is
+  still OPEN -> its 2 commits show in #111 until #108 merges; then rebase/retarget if needed).
+- aiter: tuner patch reverted (`gemm_moe_tune.py`), other pre-existing dirty files untouched. c6 row committed on
+  fork branch kkHuang-amd/aiter `kimik3-a8w4-m16-inter384-c6` (473fbea98, base 285579b62 = what was tested; no PR).
+  CAUTION: upstream main 0fa23206b retuned that row to `flydsl_mxmoe_g1_a8w4_16x256x256_f16in_nt_fp8out_situv2_xcd4`
+  (block_m 16, fused). c6 vs that new kernel is NOT measured -- do it (bs2 trace, `agentx-k31/run_moe_cands.sh`)
+  before any upstream PR.
+- Next: optimization candidates (i)/(ii) in the 14:00 Status paragraph below.
+
+**[DONE] NEXT SESSION TASK (set 2026-11-06 14:05 by the user): commit + push the lever-(a) work below, then continue
+optimizing (candidates in the Status paragraph). Owner node crsuse2-m2m-v3-131; re-check `hostname` first.**
+1. sgl-amd-mono (`/sgl-workspace/sgl-amd-mono`, editable install = this tree), branch `k31/wide-launch-topk`, on top of
+   fc61d69 = the PR #108 branch `k31/fix-warmup-bank-oob` (base e52803f). Remote `fork` = github.com/kkHuang-amd/sgl-amd-mono.
+   Uncommitted: M `kimi_k31/gfx950/layer.py`, `kimi_k31/gfx950/stages/moe_front.py`, `kimi_k31/wide.py`,
+   `test/kernels/kimi_k31/layer_bench.py`; new `kimi_k31/presort.py`. Suggested 2 commits:
+   (a) launch top-k bit-exact to SGLang + routed experts on the launch's ids/w (`_tie_rank`, `_sigmoid_aiter`, div_rn
+       weights in route_row; `_routed` / `_experts` / `_launch_topk_ok`; knob `SGLANG_AMD_MONO_K31_WIDE_LAUNCH_TOPK`);
+   (b) launch sort + mxfp8 quant + output zeroing (`sort_layout`/`_quant8`/`sort_rows`/`place_codes`/`sort_init`,
+       `kda_layer(sort=)`, `sort_buf` arg, `presort.py`, `layer_bench --sort`; knob `..._WIDE_LAUNCH_SORT`).
+   Debug knobs inside (default off): `..._WIDE_TOPK_CHECK`, `..._WIDE_SORT_CHECK`, `..._WIDE_DUMP_IDS`,
+   `layer_bench --sort-cut` -- ask the user whether to keep them in the PR. Before committing: quick re-check
+   `torchrun --nproc-per-node 8 layer_bench.py --rows 12,24 --L 6 --nvb-a 4 --nvb-m 4 --up-norm --front-map --sort`
+   (in test/kernels/kimi_k31; expect every "sort check ... PASS", no FAIL).
+   Rules (NEW_WORKSPACE_PROMPT): NO "Co-authored-by" or any AI trailer (if injected, build with
+   `git write-tree` / `git commit-tree` / `git update-ref`; check `git log -1 --format=%B`); `git fetch` before push;
+   never force-push; ask before opening a PR (title `[AMD][K3.1][k/N] ...`, template sections only).
+2. aiter (`/sgl-workspace/aiter`, detached 285579b62): ONLY local change of this work is the unused tuner patch in
+   `csrc/ck_gemm_moe_2stages_codegen/gemm_moe_tune.py` (TUNE_MOE_TOPK_FILE) -> revert (`git checkout -- <file>`);
+   the tree had other unrelated dirty files before this work -- do not touch them.
+   Optional upstream: the c6 kernel pair for the kimik3 a8w4 token-16 Situv2/inter-384 row (ask the user); today it
+   is served from `agentx-k31/points/c1-wide-opt/kimik3_a8w4_tuned_fmoe_m12c6.csv` via AITER_CONFIG_FMOE.
+3. claude-skills: commit this doc (main is ahead 2 of origin and `git pull --rebase` refused with this file dirty):
+   commit -> `git pull --rebase` -> push. Other untracked agentx/ files are not from this work.
+Resume prompt: "讀 /workspace/claude-skills/NEW_WORKSPACE_PROMPT.txt 並遵守，用中文回答。讀
+/workspace/claude-skills/kimi-k31/AGENTX_PR4808_C4.md 的 CONTINUE HERE，做 NEXT SESSION TASK。"
+
+**Status (2026-11-06 14:00, crsuse2-m2m-v3-131): GPUs free, nothing running. Lever (a) done and measured, NOT
+committed** (sgl-amd-mono branch `k31/wide-launch-topk`, 4 files + new `presort.py`; aiter local tuner patch only):
+launch top-k made bit-exact to SGLang (`..._WIDE_LAUNCH_TOPK=1`), launch sort/quant/zero (`..._WIDE_LAUNCH_SORT=1`),
+both default off, plus the M=12 kernel pair c6 via `AITER_CONFIG_FMOE` (point `c1-wide-opt`). AgentX c1: P90 intvty
+171.2 -> 189.4, ITL p90 5.84 -> 5.28 ms, bs2 step 20.5 -> 19.0 ms mean; gsm8k1319 0.9765 vs 0.9788 (noise).
+B300 is 241 / 4.15 ms: bs2 is still +31 % over bs1 (wide launch ~96 us/layer with ~45 % latency stages: KDA
+recurrence 11.6, MoE tail 13.2, seams/RS/route ~18 us; stage-1 MoE ~34 us at ~4.7 TB/s). Next candidates:
+(i) shrink the wide launch's latency stages (AttnRes seam prefetch, KDA recurrence CTA parallelism);
+(ii) bs1 step 13.9 ms itself (the B300 gap is also ~8 % at bs1);
+(iii) upstream: c6 row for aiter's kimik3 table (tuned on served routing), launch top-k/sort PR to sgl-amd-mono.**
+
+**Status (2026-11-06 04:40, crsuse2-m2m-v3-131): GPUs free, nothing running.** Mono warmup-bank fix found,
+verified and upstreamed (sgl-project/sgl-amd-mono PR #108; fork branch kkHuang-amd `k31/fix-warmup-bank-oob`,
+checked out in `/sgl-workspace/sgl-amd-mono`, editable install = the fixed code). c1 after the fix:
+6 tok 2186.4 / 8 tok 2222.7 tok/s/GPU (tie). c4: `--max-mamba-cache-size 150` +9.8 % (n=1).
+**NEXT TASK (new session): close the c1 decode per-step gap to B300 SGLang.**
+```text
+c1 (AgentX, CI-simulated acceptance)  tok/s/GPU  P90 intvty  ITL mean/p90 ms  SIM acc  step = ITL mean x acc
+MI355X 6 tok, fixed (this node)       2186.4     171.2       4.32 / 5.84      3.43     14.8 ms
+MI355X 8 tok, fixed (this node)       2222.7     170.3       4.23 / 5.87      3.68     15.6 ms
+B300 SGLang c1 (CI 41932307764)       2370.0     241         3.71 / 4.15      3.68     13.7 ms
 ```
+- Cache hit is already equal (0.971 vs 0.974): the gap is decode. Per step ~+8 % (6 tok) / +14 % (8 tok) vs
+  B300 at mean, and much worse in the tail: ITL p90 +41 %, P90 intvty -29 %. The tail is the bigger lever.
+- Known per-step breakdown at 6 tok, c1, 196 k ctx (trace, TP0, section "Why 8 draft tokens cost more"):
+  DRAFT 1.17 ms + VERIFY 12.27 ms; VERIFY = mono k2 launches 7.53 (MoE) + KDA 2.33 + sparse MLA 1.27 +
+  DSA indexer 0.52 + gemm 0.33 + rest. Ruled out for the tail: `--prefill-decode-interval 16` / lpm (null).
+- B300 c1 flags that differ (CI job log `/shared_nfs/kk/agentx-k31/ci/b300_job_*.log`): no pdi / lpm,
+  `--mamba-radix-cache-strategy extra_buffer`, `--mamba-track-interval 256`, `--mamba-ssm-dtype float32`,
+  `--mamba-max-states-per-path 1`, HiCache 230 GB, max-running 2, cuda-graph-max-bs-decode 2.
+- Suggested first steps: (1) split ITL into steady decode vs steps that share a GPU slot with prefill chunks
+  (per-request ITL series from `aiperf_artifacts/profile_export.jsonl` of `agentx-fix-20261106/c1-base`, and
+  server.log batch timestamps) to see what the p90 tail is; (2) per-step roofline of the 7.5 ms mono MoE part
+  (weight bytes / HBM BW) to see how far from bound it is; (3) apply skill perf-bottleneck-attribution before
+  calling anything "bound".
+**ITL p90 tail = concurrent decode, not prefill (2026-11-06, crsuse2-m2m-v3-131, c1-base 6 tok, aiperf per-chunk
+series `aiperf_artifacts/profile_export.jsonl`, 248 profiling reqs):** "c1" is not bs1 -- 43/249 requests are
+subagents (`agent_depth=1`), so 40 requests overlap another. ITL p90 is per-request; the >=p90 bucket (25 reqs)
+has 22 overlapping requests, chunk median 20-21.5 ms vs 13.8 ms (<p90). Chunk intervals (1 chunk = 1 spec step,
+~3.45 tok) split by what else is active:
+```text
+solo (bs1 decode)        n=123737  sum 1728 s  med 13.86  p90 14.34  mean 13.96 ms
+2 requests decoding      n= 11904  sum  244 s  med 20.06  p90 21.70  mean 20.53 ms   (+47 % per step)
+other request prefilling n=   529  sum   34 s  med 19.22  p90 184    mean 63.4 ms
+```
+=> lever #1 for the tail is the **bs2 decode step (20.5 ms vs 14.0 ms bs1)**; prefill stalls are only 34 s of 2006 s.
+bs2 is inside the captured decode graphs (`--cuda-graph-max-bs-decode 4`; B300 uses 2 / max-running 2), so it is
+not an eager fallback. B300 p90/mean ITL = 1.12 vs ours 1.35 -> their bs2 penalty is much smaller. Likely suspect: MoE
+at 12 vs 6 tokens touches ~2x distinct experts (weight-bytes bound), plus the KDA/MLA kernels not scaling with bs.
+**intvty p90 target feasibility** (intvty p90 = 1/ITL p90; replay of the measured chunk series with per-class
+step scaling, "now" reproduces 5.86 ms): bs2 17 ms -> 206; bs2 15.5 ms -> 226; bs2 = bs1 13.96 ms -> 240;
+bs1 -7 % and bs2 = bs1 -> 259. Prefill stalls do not matter (capping them at 30 ms changes nothing).
+B300 (acc 3.68): mean step 3.71x3.68 = 13.7 ms, p90 4.15x3.68 = ~15.3 ms -> their concurrency penalty is ~+10-25 %, ours +47 %.
+So 241 at 6 tok needs bs2 ~= bs1, which is unlikely for a weight-bound MoE (12 vs 6 tokens). A realistic target is
+bs2 ~15.5 ms -> ~225, and the rest has to come from a cheaper bs1 step.
+**bs2 trace DONE (2026-11-06 04:58, crsuse2-m2m-v3-131; TP0 summary in `trace-bs2-20261106/summary.txt`):**
+bs2 step = DRAFT 1.22 + VERIFY 19.20 = 20.4 ms (matches AgentX 20.5). At R>=2 requests mono does NOT run the
+fused narrow path: `kimi_k31/spec.py` sends `rows > wide.NARROW` to `wide.Wide.backbone` (persistent
+`k31_kda_layer_m12` per KDA layer + SGLang routed experts `mfma_moe1_*` / `opus_moe_stage2_a8w4` / `moe_sorting`).
+```text
+VERIFY ms/step         bs1 (narrow mono)   bs2 (wide)   delta
+KDA                    2.33                6.57         +4.24  <- biggest (2.8x for 2x rows)
+MoE + o_proj layer     ~6.6 (k2 launches)  ~9.1 (moe 6.11 + gemm 1.53 + comm/attn_res/norm ~1.2 + other)  +2.5
+DSA indexer            0.52 (+logits 0.49) 1.25 (+0.86) +1.1  (2 contexts, expected ~2x)
+sparse MLA             1.27                0.72         -0.55 (category split differs, check)
+```
+CORRECTION: the table above compares different scopes. The wide `k31_kda_layer` is a WHOLE-layer launch (MoE tail ->
+AttnRes -> in_proj -> KDA ring -> o_proj -> RS -> MoE front/shared/latent up; only routed experts are SGLang),
+while narrow `k3_mono_kda_pre` is in_proj+conv+KDA only (o_proj..MoE is in `k3_mono_k2`).
+**KDA-layer roofline (2026-11-06, crsuse2-m2m-v3-131; bytes/rank from safetensors headers, TP8, MI355X HBM peak
+8 TB/s; per-call times from TP0 traces, script `/shared_nfs/kk/agentx-k31/kfam.py <trace.gz> <n_verify_steps>`):**
+```text
+per KDA layer, per rank            bytes (MB)                         us/call   achieved   % of 8 TB/s
+bs1 kda_pre (in_proj q,k,v,g,f,b)  ~89                                34.5      2.6 TB/s   32 %
+bs1 k3_mono_k2 (o_proj..MoE)       ~270 (22 o_proj + 47.5 shared/latent/gate + ~201 routed*)  75.0  3.6 TB/s  45 %
+bs2 k31_kda_layer (whole layer)    ~145 (94 attn + 47.5 non-routed + ~3 KDA state x2 req)     96.5  1.5 TB/s  19 %
+bs2 routed MoE (moe1+stage2+sort)  ~383 (~175 experts* x 2.19 MB)     66.4      5.8 TB/s   72 %
+* distinct experts = uniform-routing estimate 896*(1-(1-16/896)^n), n = 6 / 12 tokens -> 92 / 175; correlated
+  draft tokens give fewer, so the MoE % is an upper bound. Not measured.
+```
+Per layer bytes: KDA attn bf16 751.6 MB/8, shared experts 264 + latent up/down 103 + gate 13 MB /8, one routed
+expert 17.5 MB/8. KDA state per rank 12 heads x 128 x 128 x fp32 = 786 KB per request (read+write; more if the
+L verify intermediates are written).
+=> The wide KDA launch moves ~145 MB in 96.5 us = 19 % of peak HBM. It is NOT bandwidth-bound and the KDA state is
+too small to matter, so "state-bound" is ruled out. Cause not measured yet (candidates: in-launch cross-rank sync
+(RS / seam / push stages), GEMV tiling at 12 rows). The routed MoE is already close to the limit.
+[SUPERSEDED by the stage timeline below: narrow is not faster for this work] Target: at the narrow path's efficiency (~3.3 TB/s) the launch would take ~45 us -> -51 us x 68 = -3.5 ms/bs2 step
+-> bs2 ~16.9 ms -> intvty p90 ~210 (replay table above). At ~6 TB/s (~25 us) -> -4.9 ms -> bs2 ~15.5 -> ~226.
+**Wide-launch stage timeline (2026-11-06, crsuse2-m2m-v3-131; logs `/shared_nfs/kk/results/Kimi-K3.1-Pro/
+wide-timeline-20261106/nvb{1,4,8}.log`):** standalone bench matches production (bench 86.7 / 93.6 / 104.1 us at
+nvb 1/4/8 vs trace 89 / ~96 / 106). Repro (in `sgl-amd-mono/test/kernels/kimi_k31`, 8 GPUs, no server):
+`torchrun --nproc-per-node 8 layer_bench.py --rows 12 --L 6 --nvb-a 1 --nvb-m 1 --up-norm --front-map --timeline`.
+Critical path = "last" CTA column deltas, nvb 1 (nvb 8 in brackets); bytes/rank estimated:
+```text
+stage            us (nvb8)    bytes       note
+t1 push + up     13.2         ~6 MB       previous layer's MoE tail (latent down + push to peers)
+t2 seam           5.6 (13.5)  ~0          AttnRes block reads: +~1.1 us per block -> latency, not bytes
+t3 in_proj       16.7 (18.3)  ~90 MB      ~5.4 TB/s = efficient
+kda recurrence   11.6         ~3 MB       L=6 serial recurrence, latency
+t4 o_proj         7.1         ~22 MB      ~3.1 TB/s
+t5 rs + seam      7.4 (15.1)  ~0          cross-rank reduce-scatter + MLP AttnRes
+t6 front         10.8         ~35 MB      ~3.2 TB/s (shared gate_up + latent up + gate)
+route + sdown    11.1         ~11 MB      routing, shared down
+total            83.5 (102)   ~145 MB
+```
+=> Only in_proj runs near HBM speed. About 45 % of the path is latency-type stages with almost no bytes:
+KDA recurrence 11.6, MoE tail 13.2, seams/RS/route ~18 us (nvb 8: ~33). The small GEMVs reach ~3 TB/s.
+**Re-attribution of the bs2 penalty (per KDA layer):** bs1 narrow = kda_pre 34.5 + k2 75.0 = ~110 us, and that
+INCLUDES routed experts (fused into k2). bs2 = wide launch ~96 + routed MoE 66.4 (moe1 39.6 + stage2 19.4 +
+sorting 7.4) = ~162 us. The wide launch is NOT slower than narrow for the same non-routed work. The +52 us/layer
+(x68 = 3.5 ms/step, matches) is mostly the routed experts running serially as separate kernels after the
+launch, with nothing overlapping them.
+Levers, roughly ordered by payoff/effort:
+  (a) overlap or fuse routed experts with the wide launch (prefetch next in_proj weights during MoE, or a fused
+      wide routed stage as narrow k2 does): up to ~-50 us/layer -> bs2 ~17 ms -> intvty p90 ~206-215; big job.
+  (b) drop `_moe_sorting` (7.4 us x 92 = 0.68 ms/step) if the launch's own `route` stage output can feed moe1.
+  (c) AttnRes seams scale +1.1 us/block (latency): prefetch blocks earlier -> up to ~-8 us/layer at avg nvb ~4.5.
+  (d) KDA recurrence 11.6 us on 12 heads x 2 req: check CTA parallelism (latency-bound, few CTAs?).
+**User chose (a); plan `/root/.claude/plans/a-vivid-wreath.md` (gated: measure ceiling -> step 1 -> step 2 fusion).**
+**Step 0 MEASURED (2026-11-06, crsuse2-m2m-v3-131): distinct routed experts per layer, real prompts.** Eager server
+(`--disable-cuda-graph`) + env-gated hook `/shared_nfs/kk/agentx-k31/moehook/sitecustomize.py` (wraps
+`KimiK3MoE._forward_routed`, re-runs `self.topk`, skips while a stream is capturing: the prefill breakable graph
+still captures with --disable-cuda-graph). Runner `moehook/run_count.sh`, client `moehook/client.py`: 2 concurrent
+chat requests over sglang source files, 1024 out. Data `/shared_nfs/kk/results/Kimi-K3.1-Pro/moe-distinct-20261106/count.csv`.
+```text
+rows 12 (bs2 verify), 88136 calls, 92 layers: distinct mean 114.2 (p10 86, p90 139); per 6-row request 62.2
+uniform-routing estimate was 175 / 92 -> draft tokens share experts heavily
+```
+Corrected routed MoE roofline per KDA layer at bs2 (whole segment between adjacent wide launches = 72.9 us, all
+kernel time, zero idle under graph):
+```text
+aiter topk_reg_kernel   6.5 us   duplicate of the launch's own route stage
+_moe_sorting            7.4 us
+mfma_moe1 (w13 + fp8q) 39.6 us   ~166 MB -> 4.2 TB/s
+opus stage2 (w2)       19.4 us   ~83 MB  -> 4.3 TB/s     (bytes = 114 experts x 2.19 MB/rank, split 2:1)
+```
+=> Routed MoE is at ~47 % of peak HBM, not 72 %. Ceiling of the routed segment ~28 us/layer (topk 6.5 + sort 7.4 +
+MoE kernels to ~5.5 TB/s ~14) -> x68 ~1.9 ms/bs2 step -> intvty p90 ~171 -> ~190. Full fusion (step 2) cannot beat
+that floor: the routed inputs need the route and the next launch needs the output, so nothing overlaps. Step 2
+DOWNGRADED in favour of: step 1 (launch topk), sort from the launch (or aiter PR 6484, NOT in aiter 285579b62:
+`fused_moe` has no precomputed-sort arg), aiter MoE M=12 kernel tuning (moe1 uses a 32-row tile).
+**Step 1 (launch top-k) IMPLEMENTED, not committed (2026-11-06, crsuse2-m2m-v3-131):** sgl-amd-mono branch
+`k31/wide-launch-topk` (off `k31/fix-warmup-bank-oob`), `kimi_k31/wide.py`: `_routed()` replaces
+`pk.moe._forward_routed(...)` in the backbone loop; with `SGLANG_AMD_MONO_K31_WIDE_LAUNCH_TOPK=1` (default 0) it feeds
+the launch's `bufs["ids"]/["w"]` through `build_precomputed_topk_output` to `moe.experts` (same a8w4 / route-quant
+handoff / zero-copy steps as `_forward_routed`). Eligibility `_launch_topk_ok()` logs `launch top-k on|off (layer N)`
+once per layer with the failing checks.
+PITFALL hit: SGLang's `precomputed_topk_postprocess_is_noop` starts with `_is_cuda` -> always False on ROCm, so the
+first A/B ran the knob as a silent no-op (gsm8k "on" was really off). Replaced by explicit HIP checks (no shared
+slots, no EPLB remap, no megamoe, no routing sim, STANDARD/None format); on HIP `_post_process_topk_ids` is a no-op
+for K3's call (num_token_non_padded None). ALWAYS grep `launch top-k on` (expect 68 lines) before reading an A/B.
+Results `/shared_nfs/kk/results/Kimi-K3.1-Pro/step1-launch-topk-20261106/` (runner `agentx-k31/run_step1.sh`,
+KNOBS / NUM / TAGSUF / NOTRACE env; segment tool `agentx-k31/kda_seg.py <trace>`):
+```text
+                         knob 0 (baseline trace)   knob 1
+KDA->KDA routed segment  76.2 us                   68.7 us   (-7.5; aiter topk_reg_kernel 6.4 us gone)
+VERIFY GPU span (bs2)    19.20 ms                  18.91 ms  (-0.29, one trace each)
+gsm8k200 greedy          0.99                      0.98 (knob verified on: 68 lines)
+gsm8k1319 greedy         0.9788 (max out 3049)     0.9742, 1 req hit 32768 max_tokens (truncated 0.00076),
+                                                   out tokens 290k vs 219k; knob verified (68 lines)
+```
+OPEN RISK: -0.46 pt (~0.8 sigma, 2 runs) + one runaway gen with knob on; not proven equal. Proposed check (deferred by
+the user 2026-11-06, go straight to sort removal): eager hook comparing launch ids/w vs `self.topk` on the same logits
+at bs2 (expect 0 mismatched rows, w diff <~1e-6). Sort removal also consumes the launch's routing, so do it before
+trusting any accuracy number of the sort work.
+**Sort removal, investigated (read-only, 2026-11-06):** the 7.4 us `_moe_sorting_small_kernel_sorted` is SGLang's
+Triton kernel (`sglang/kernels/ops/moe/moe_sorting_small.py:384`, installed into aiter by
+`apply_aiter_small_moe_sort_patch` in `moe_runner/aiter.py:172`). For this shape it does THREE jobs:
+  (1) the BM=32 sort: experts ascending, pair order kept, each expert padded to x32. `sorted_ids` (slot<<24)|token,
+      pad (16<<24)|M; `sorted_weights` (pad 0); `sorted_expert_ids` per block; `num_valid_ids` = [blocks*32, M];
+      max_padded = M*16 + 896*32 - 16;
+  (2) EMIT_MX: the stage-1 mxfp8 quant of `lat` (fp8 [M,3584] + swizzled e8m0 scales per sorted row, :309, :366-369);
+  (3) zeroing the MoE output (stage2 `opus_moe_stage2_a8w4` accumulates with atomics).
+Stage1 (FlyDSL `mixed_moe_gemm_2stage_common.py`) does no sorting ("_fp8q_sort" = it writes its fp8 output and
+scales in sorted-row layout). aiter `fused_moe` has no presorted arg; `fused_moe_2stages` (:4552) takes the sort
+tensors + `prequantized_a1` directly. PR 6484 not local (and it is BM=16). Cheapest hook: a ContextVar in SGLang's
+`sorting_impl_wrapper` (it already short-circuits the quant via `_emitted_quant`) that returns launch-made buffers.
+Replacing it means the wide launch, after `route`, must: grid-sync, count per expert, write the 4 sort tensors,
+the fp8 latent + swizzled scales, and zero `out`. Ceiling 7.4 us/layer (~0.5 ms/bs2 step); net ~5-6 us after the
+moved work. This is a FlyDSL kernel + integration change whose bugs show as accuracy loss.
+**Step 2 (launch sort) IMPLEMENTED, not committed (2026-11-06, crsuse2-m2m-v3-131; plan
+`/root/.claude/plans/a-vivid-wreath.md`):** knob `SGLANG_AMD_MONO_K31_WIDE_LAUNCH_SORT=1` (needs `_LAUNCH_TOPK=1`,
+default 0), buckets m <= 64 only (SGLang small-sort range), used only when the step fills its bucket (rows == b;
+else SGLang's sort runs, correct either way). Same branch `k31/wide-launch-topk`. Pieces:
+- `gfx950/stages/moe_front.py`: `route_row` (sort builds) also mxfp8-quantizes its row (`_quant8`, bit-exact copy
+  of SGLang `_sorted_mx_quant`), writes token-major codes, zeroes the row of the MoE output (= `sh_out - m*3584*2`,
+  wide's flat ping layout), stores ids/w at device scope, counts the row in a `cnt` word. `sort_rows` (one CTA,
+  bid BLOCKS-m-1): resets the previous launch's pair rows to pad, waits for m rows, 64-bit token mask an expert
+  (LDS atomic_or) -> counts -> block scan -> expert ids, real pairs (stable rank = popcount of lower tokens),
+  publishes `dest`, puts mailbox `srtmk`. `place_codes` (32 idle CTAs below it): scatter the e8m0 codes.
+  Buffer resting state = all pad (`sort_init`), so no pad pass.
+- `gfx950/layer.py`: `kda_layer(sort=...)` (key + name `_srt`), new kernel arg `sort_buf`, counters +2 words,
+  plan region `srtmk`. `sort` int: 7 = full, 1..5 = debug cut points (`layer_bench --sort-cut`).
+- `wide.py`: `_launch_sort(b)`, `bufs["sort"]/["sortv"]`, `_routed(..., sortv)`; `presort.py` wraps
+  `aiter.fused_moe._moe_sorting_impl` (re-wraps if SGLang re-applies its patch), checks shapes / output / ids
+  pointer, else falls back and logs `launch sort skipped: <why>`. Debug `SGLANG_AMD_MONO_K31_WIDE_TOPK_CHECK=1`
+  (eager): launch ids/w vs `self.topk`, summary every 2000 calls.
+PITFALLS: (1) one CTA issuing ~20 K scattered byte stores cost +11 us (and the pad pass +8 us): moved the codes to
+32 helper CTAs and replaced the pad pass by the reset invariant; (2) an LDS storage object cannot enter a dynamic
+`if` (peek outside); (3) qout's i32 element index is byte/4.
+Unit check `layer_bench.py --sort` (bit for bit vs SGLang `_run_small_sort` on the launch's own ids/w/latent:
+num_valid, sorted ids/w/expert ids, every fp8 byte, real rows' codes, output zeroed; plus a 2nd pass with rotated
+buffers = the reset path): ALL PASS at m 12/24/48 (L6) and 16/32/64 (L8). Launch cost (nvb 4, us):
+```text
+L6  m12 92.1 -> 93.1   m24 98.5 -> 99.1   m48 111.1 -> 112.7
+L8  m16 95.6 -> 96.5   m32 104.0 -> 104.5 m64 120.7 -> 122.4   (vs ~7.4 us SGLang sort kernel removed)
+```
+Logs `/shared_nfs/kk/results/Kimi-K3.1-Pro/step2-launch-sort-20261106/` (mat_L*_*.log, cut*.log, tl_*.log).
+Server checks (`agentx-k31/run_step2.sh`, SKIP_A / SKIP_B):
+- A (eager, `SGLANG_AMD_MONO_K31_WIDE_TOPK_CHECK=1`): launch top-16 vs `self.topk` on the same logits over 49.6 M rows:
+  **1513 rows (0.003 %) pick different experts**, w diff <= 1.8e-7 elsewhere -> the step-1 launch top-k is NOT
+  exactly SGLang's (likely near-tie order; explains its small gsm8k delta). Open item. Eager gsm8k is far too slow
+  (33 q in 79 min): stopped A by hand.
+- First B (graphs, gsm8k1319): **acc 37 %, 56 % truncated (runaway gens, accept 6.00)**. Cause: `int(True) == 1`: wide
+  passed sort=True and the debug cut level made the stage stop after its wait -> sort buffers never written. The
+  bench never hit it (it passed `--sort-cut 7`). Fixed: `kda_layer` normalizes `sort is True -> 7` before the build
+  key; layer_bench now passes True like wide.
+- Production A/B (`SGLANG_AMD_MONO_K31_WIDE_SORT_CHECK=1`, eager, `agentx-k31/run_sortcheck.sh`): on served data the
+  launch's sort / quant / codes are bit-identical to SGLang's kernel, output zeroed, and the experts' output with the
+  launch sort vs SGLang's: out_rel 5.07e-3 == SGLang vs itself 5.06e-3 (stage-2 atomics), 200 calls, 0 bad.
+- LESSON: the unit test compared buffers only; the bug was in how production builds the kernel. Always run the
+  production-path A/B check (same call path, both outputs) before an accuracy gate.
+- B rerun (graphs, knobs on, gsm8k1319 greedy): **0.9742**, truncated 0, max out 5859, 68 x `launch sort on`, 0 skipped
+  -- identical to the step-1 (launch top-k only) score 0.9742; baseline (both off) 0.9788. The sort adds nothing; the
+  -0.46 pt sits with the launch top-k's 0.003 % routing mismatches (open item above).
+- C bs2 trace (`step2-launch-sort-20261106/trace`, `kda_seg.txt`): `_moe_sorting` / `topk_reg_kernel` gone from the
+  68 KDA layers (24/step left = the DSA layers' MoE, SGLang path).
+```text
+bs2, per KDA layer / step        baseline   + launch top-k   + launch sort
+KDA->KDA routed segment (us)     76.2       68.7             64.3   (moe1 41.7, stage2 19.0)
+wide launch (us/call)            96.5       97.2             95.5   (one trace each: ~1 us noise)
+VERIFY GPU span (ms)             19.20      18.91            18.65  (-0.55 ms, -2.9 %); DRAFT 1.24 unchanged
+```
+  bs2 step ~20.4 -> ~19.9 ms -> intvty p90 ~171 -> ~177 by the replay table (not an AgentX run).
+- Debug knobs left in on purpose (default off): `..._WIDE_TOPK_CHECK`, `..._WIDE_SORT_CHECK`, `layer_bench --sort-cut`.
+**Launch top-k made EXACT (2026-11-06 ~11:50, crsuse2-m2m-v3-131; `moe_front.route_row`).** Three differences vs
+SGLang's aiter `topk_reg_kernel<float,14,true,false,true>` (csrc/kernels/topk_softmax_kernels_group.cu, module_moe_asm:
+no fast-math, denormals flushed):
+  (1) exact-score ties: aiter picks the lower `legacy_topk_tie_rank(id)` (an old DPP-table order), the launch picked the
+      lower id -> `_tie_rank()` now used in the per-lane sort and in the pop (rank + id packed in one wave_umax word);
+  (2) `C_LOG2E` is a DOUBLE literal: aiter's exp2 argument is an fp64 product rounded once -> `_sigmoid_aiter()`
+      (fx.Float64 multiply); the f32 product of the rounded constant was off by an ulp now and then;
+  (3) weights use an IEEE 1/sum (`ops.div_rn`), not hw_rcp.
+Eager check (`agentx-k31/run_topkcheck.sh`, 4 conc x 8 x 1024 tokens): after (1)+(3) 10 / 4.25 M rows still differed,
+w diff 2.2e-7; after (2) **0 / 4.40 M rows, w diff 0**. layer_bench: launch time unchanged, sort check PASS.
+gsm8k1319 greedy, graphs, both knobs on: **0.9773** (baseline 0.9788 = 2 questions; before the fix 0.9742 = 6).
+bs2 trace: routed segment 64.4 us, launch 95.7 us (unchanged); VERIFY mean 20.17 ms is ONE 128.7 ms
+cross_device_reduce stall in that trace (medians equal) -> ~18.76 ms without it, same as 18.65.
+**Routed MoE kernels at M=12, tuned on the SERVED path (2026-11-06 12:00-12:50, crsuse2-m2m-v3-131).** M=12 looks up
+the token-16 row (get_padded_M) of `aiter/configs/model_configs/kimik3_a8w4_tuned_fmoe.csv`, tuned on uniform random
+routing (~173 experts at 12 tokens); served bs2 routing touches ~110 (dump: `SGLANG_AMD_MONO_K31_WIDE_DUMP_IDS`,
+`step2-launch-sort-20261106/ids_bs2.pt`). aiter's `gemm_moe_tune.py` is NOT usable for this as is: its a8w4 path draws
+its own random routing (:4954, my `TUNE_MOE_TOPK_FILE` patch at :1722 never reached) and adds the activation quant to
+us1; its pick (75.8 us) was slower than the current pair. Instead: one bs2 trace per kernel pair
+(`agentx-k31/run_moe_cands.sh`: a copy of the kimik3 csv with the token-16 Situv2/inter-384 row swapped, served with
+`AITER_CONFIG_FMOE=<aiter>/configs/tuned_fmoe.csv:<copy>` -- a set env var reads ONLY its files, so the default
+table goes first). Results `/shared_nfs/kk/results/Kimi-K3.1-Pro/moetune-m12-20261106/` (cands.txt, seg_*.txt):
+```text
+pair (stage1 + stage2)                                             s1 us  s2 us  routed seg us
+current: t32x128x256_w4_gui_xcd4 + opus atomic b3_ws2              41.9   19.0   64.4
+c1 t32x64x256_w3_gui_xcd4_kw2 + opus b2_ws2                        44.8   19.4   67.8
+c2 t32x64x256_w2_gui_kw2 + moe2_layout t32x128x128_atomic_nt       37.6   17.7   58.8
+c3 t32x128x256_w3_gui + moe2_layout t32x128x128_atomic             34.5   19.0   57.1
+c4 t32x64x256_gui_kw2 + moe2_layout t32x128x256_atomic             FAILS: stage2 BK 256 must divide inter 384
+c5 t32x128x256_w4_gui + opus b3_ws2                                34.2   18.9   56.6
+c6 t32x128x256_w4_gui + moe2_layout t32x128x128_atomic_nt          33.6   17.7   54.9   <- best (-9.5 us/layer)
+c7 t32x128x256_w3_gui + moe2_layout t32x128x128_atomic_nt          34.2   17.8   55.6
+```
+The xcd4 stage-1 variant is the slow part at real expert counts. c6 gsm8k1319 greedy (graphs, launch top-k + sort on):
+**0.9765** (baseline 0.9788, exact top-k with the old pair 0.9773: within 1-3 questions); log 32 x `using 2stage
+... w4_gui_fp8`, sort-on 68, skipped 0; trace routed segment 55.2 us. All candidates kept the launch sort (accumulate
+mode). Point `agentx-k31/points/c1-wide-opt` = c1-base + both knobs + c6 csv (copied into the point dir).
+**AgentX c1-wide-opt (2026-11-06 12:50-13:57, crsuse2-m2m-v3-131; `/shared_nfs/kk/results/Kimi-K3.1-Pro/agentx-wideopt-20261106`),
+0/249 errors, hit 0.971 (= base):**
+```text
+                     tok/s/GPU  ITL mean/p90 ms  P90 intvty  TTFT p90 s | step by concurrency (med / mean ms, ~12 K bs2 steps)
+c1-base (fix-1106)   2186.4     4.32 / 5.84      171.2       1.28       | bs1 13.86/13.96   bs2 20.06/20.53
+c1-wide-opt          2188.7     4.25 / 5.28      189.4       1.01       | bs1 13.84/14.04   bs2 18.21/19.01 (-9.2 % / -7.4 %)
+```
+The single-arm P90 gain (+10.6 %) is at the edge of the 5-10 % arm noise, but the per-step split is not noise:
+bs1 unchanged (narrow path untouched), bs2 -1.5 ms mean, as predicted (~19.2 ms).
+Scripts: `trace_bs2.sh` +
+`capture_trace_bs2.sh` (in `/shared_nfs/kk/agentx-k31/`), out `/shared_nfs/kk/results/Kimi-K3.1-Pro/trace-bs2-20261106/`
+(status.txt, summary.txt). Compare per kernel with `trace-tok68-20261105/summary.txt` (c1-base = bs1).
+**Next:** roofline `k31_kda_layer_m12` (KDA state bytes x 2 req / HBM BW) vs 6.57 ms, then wide MoE path; old note: and diff it per kernel against the bs1
+breakdown above (`trace_breakdown.py`); also count the distinct experts per layer at bs1 vs bs2 to get the MoE
+byte roofline. No B300 per-request series locally (only `ci/b300_job_*.log`), so the B300 bs2 cost is inferred.
+**Files (node-local):** `/shared_nfs/kk/agentx-k31/` (points/, `run_point_k31.sh`, `driver_matrix.frozen.sh`
+<point...> with `OUT=`, `watch_matrix.sh <driver pid from status.txt>`, `trace_tok68.sh`, `topk_*.sh`, ci/);
+`/tmp/k31v/` (env.sh, capture_trace_k31.sh, bench_kscatter.py, replay_topk.py, eval deps; env-gated debug hook
+`dumphook/sitecustomize.py`). /tmp is lost on restart.
+**Repro (one AgentX arm, ~65 min):**
+```bash
+OUT=/shared_nfs/kk/results/Kimi-K3.1-Pro/<run-tag>; mkdir -p $OUT; cd /workspace
+OUT=$OUT setsid nohup bash /shared_nfs/kk/agentx-k31/driver_matrix.frozen.sh c1-base < /dev/null > $OUT/driver.log 2>&1 &
+```
+Trace: `bash /shared_nfs/kk/agentx-k31/trace_tok68.frozen.sh <pid to wait for>` then
+`python3 /workspace/claude-skills/kimi-k31/scripts/trace_breakdown.py <TP0 trace>`.
 **Pass / read:** single 3600 s arm resolves ~5-10 % only (agentx skill: replicate spread 5.67 %); quote
-total tok/s/GPU and P90 interactivity; overall cache hit, not device-tier.
+total tok/s/GPU and P90 interactivity; overall cache hit, not device-tier. Scripts must use `grep`, not `rg`
+(or `export -f rg`); keep `AIPERF_RUNTIME_DIR` on /shared_nfs (the /workspace quota breaks the venv rebuild).
 
 ## Setup
 
@@ -172,3 +494,82 @@ total                  13.44    15.32    +1.88 (+14 %)
 - AgentX c1 bs1 (no profiler) measured +3.3 ms/step; GPU explains ~1.9 ms, ~1.4 ms unexplained (host?).
   The synthetic bench's TPOT (8 tok 7.52 ms) is inflated by the profiler; do not use its wall clock.
 - Next: microbench `sglang::dsa_gfx950::topk::k_scatter` at ctx ~196 k, rows 6 vs 8 (launch config / occupancy).
+
+#### CORRECTION (2026-11-06): k_scatter is NOT super-linear in rows -- one call per step takes a slow path
+
+- Isolated microbench (`/tmp/k31v/bench_kscatter.py`, logits_hist -> topk_transform, ctx 196608, table 16384 pages
+  so the server's `k_scatter<0,true,16>` variant runs, random data): 6 rows 11.6 us, 8 rows 11.6 us, 16 rows
+  12.2 us at G=64 (G=48 / 32 no better). Flat in rows.
+- In the traces the per-call MEDIAN is equal (6 tok 17.1 us, 8 tok 16.8 us, p90 22.7 / 22.8), no other-stream
+  overlap. The 8-token mean (61.9 us) comes from exactly 35 calls of 1.1-1.5 ms = one per verify step, always the
+  22nd DSA layer of the step (index 21 of 24), preceded by a normal 19.6 us logits_hist. 38.5 ms of the 52.0 ms
+  total. 6 tokens: max 47 us, none slow.
+- Likely a data-dependent fallback in topk_transform.cuh: refinement over > REF_CAP (2048) candidates in the
+  threshold bin (radix fallback, one block per row from global) or HIER_BAD -> flat histogram rescan. Not yet
+  confirmed: needs the layer-21 inputs of an 8-token verify step dumped and replayed in the microbench.
+- So of the +1.88 ms/step: ~1.1 ms is this one call (fixable in principle), +0.69 ms mono k2 (rows 6 -> 8).
+
+#### ROOT SYMPTOM (2026-11-06 01:00-01:15): with mono + 8 draft tokens, layer 87's DSA index-K cache is garbage
+
+Debug hook (node-local `/tmp/k31v/dumphook/sitecustomize.py`, env-gated `K31_TOPK_DUMP` / `K31_TOPK_STATS`, put on
+the server's PYTHONPATH only; wraps `dsa_indexer_hip.hist_topk_paged` and the loader's `topk_transform`), eager
+server (`--disable-cuda-graph`, point `c1-draft8-dump`), one 196608-token request:
+- The slow call is reproduced eagerly (79 of 82 steps, always DSA index 21 = model layer 87, ~1.1 ms) and offline
+  from the dump (`/tmp/k31v/replay_topk.py`: 1125 us).
+- Layer 87's indexer logits are EXACTLY 0 for every position of every row (196,522 equal values, 0 above the
+  threshold) -> all candidates in one bin -> the > REF_CAP single-block fallback. Layers 83 / 92: ~195 k distinct.
+  Top-k over all-equal logits is arbitrary (two replays pick different slots): layer 87's sparse attention reads
+  ~random tokens. A CORRECTNESS bug, found through its latency.
+- Inputs at layer 87 (8-row verify, seqlen 364-372): q absmax 448 and gate weights normal; the index-K pages the
+  request reads have absmax 0.75 (layers 83 / 91: 448), all 6 pages including prompt pages written by prefill.
+  -> layer 87's index-K region is overwritten (or never written) on the mono 8-token path.
+- 6 draft tokens: no slow call in the trace (layer 87 fine). Mono off: the fused indexer path is not used at all
+  (`_mono_k31` gates `hist_topk_paged` and the index-K store), so it is not a clean control.
+- gsm8k cannot see this: with <= 2048 context tokens DSA top-k keeps every token, so the indexer is moot. Earlier
+  "8 tokens gsm8k 0.985 with wide" (MONO_KERNEL 10.32) does not clear long-context accuracy at 8 tokens.
+- Class of bug seen before: MONO_KERNEL 10.23 (mono K1 overran its scratch into the KV free list under DFLASH).
+
+#### ROOT CAUSE + FIX (2026-11-06 01:40-02:15, crsuse2-m2m-v3-131): mono K1 warmup bank one block short
+
+Localization (all eager, 8 tokens, env-gated hook `/tmp/k31v/dumphook/sitecustomize.py`):
+1. No torch tensor overlaps layer 87's index-K storage (own 222 MiB segment; neighbours = layers 83 / 91 index-K).
+2. Raw pages: layer 87 keys are ALL ZERO, scales 2^-22 (the writer's floor for amax 0); layer 83 normal. The
+   legitimate writer wrote zero keys, in prefill and verify -> the indexer INPUT was wrong before any request.
+3. Layer 87 `indexer.k_norm.weight` and `.bias` (fp32 [128]) are all zero (layer 83 normal) -> LayerNorm output 0.
+4. Bisect: `SGLANG_AMD_MONO_K3_K1=0` restores k_norm and index-K; MLA_PRE=0 and K31_WIDE=0 do not.
+5. `sgl_amd_mono/kimi_k3/spec.py` `_warmup`: the throwaway bank was `torch.zeros(rows, nb, HIDDEN)` with
+   nb = key.nblocks = prev_valid_blocks, but a block-write layer's K1 (and mla_pre) has write_idx = nb and stores
+   its row at `t*stride0 + write_idx*stride1` (`stages/seam.py:163`): for the last token that is one HIDDEN row
+   (14 KiB) past the allocation, written with zeros. At 8 draft tokens the allocator had placed layer 87's k_norm
+   there; at 6 it landed somewhere harmless. Bug is config-independent (same lesson as MONO_KERNEL 10.23).
+   Served banks are `(T, block_num, H)` with write_idx <= block_num - 1: not affected.
+
+Fix (sgl-amd-mono branch `k31/fix-warmup-bank-oob` off e52803f, uncommitted, +20/-1): warmup bank gets nb + 1
+rows; asserts `write_idx < blocks.shape[1]` in `k1.warmup` and `mla_pre_launch`.
+Check (8 tokens, eager, 196 k request): layer 87 k_norm 1.078 / 0.087, all 24 DSA layers index-K absmax 352-448,
+no slow topk_transform call, no assertion. Pending: kernel tests, gsm8k 6 / 8 tokens with CUDA graphs, c1 trace,
+AgentX c1-draft8 rerun.
+Fix checks (2026-11-06 02:20-02:50): mono kernel tests `test_kimi_k3_k1.py`, `test_kimi_k3_mla_pre.py`,
+`test_kimi_k31_k1_ring.py`: 19 passed (+8 subtests). gsm8k200 greedy, CUDA graphs on, REAL acceptance
+(`gsm_check.sh`): 8 tokens 0.985, accept 5.080 req-weighted; 6 tokens 0.99, accept 4.458. Real acceptance gains
++14 % at 8 tokens (CI's simulated values 3.68 / 3.43 assume +7.3 %). No assertion fired.
+Upstream: sgl-project/sgl-amd-mono PR #108 "[Fix] [MI355X] kimi_k3: Size the warmup bank for the block-write row",
+from kkHuang-amd fork branch `k31/fix-warmup-bank-oob` (fa79409 fix + fc61d69 test, base e52803f), opened 2026-11-06.
+
+### AgentX c1 after the fix (crsuse2-m2m-v3-131, 2026-11-06, OUT=/shared_nfs/kk/results/Kimi-K3.1-Pro/agentx-fix-20261106)
+
+```text
+c1                      tok/s/GPU  P90 intvty  ITL mean/p90 ms  ISL     hit    errors
+draft8, before fix      2028.2     165.7       4.76 / 6.03      242287  0.969  0/240
+draft8, after fix       2222.7     170.3       4.23 / 5.87      253910  0.971  1/251   (02:24-03:30)
+base (6 tok), before    2186.0     174.7       4.30 / 5.72      251408  0.971  0/249
+B300 c1 (CI)            2370.0     241         3.71 / 4.15      260660  0.974
+```
+Fix: draft8 +9.6 %. Fixed draft8 vs pre-fix 6 tok: +1.7 % tok/s, -2.5 % P90 intvty: a tie within noise (CI's
+simulated acceptance only grows 7.3 %; real gsm8k acceptance grows 14 %). Gap to B300 c1: -6.2 % tok/s (6 tok:
+-7.8 %), P90 intvty -29 %, ITL p90 +41 %. c1-base after the fix running (03:30).
+c1-base after the fix (03:30-04:36): 2186.4 tok/s/GPU, P90 intvty 171.2, ITL 4.32 / 5.84 ms, hit 0.971, 0/249
+errors = the pre-fix 2186.0 (fix has no effect at 6 tokens). Same session 8 vs 6 tokens: +1.7 % tok/s, P90 intvty
+170.3 vs 171.2, ITL mean -2.1 %, ITL p90 +0.5 %: a tie at CI's simulated acceptance. Gap to B300 c1: -6.2 % tok/s,
+-29 % P90 intvty (decode per-step time). If CI's golden acceptance for 8 tokens tracked the real +14 %, 8 tokens
+should win. GPUs free 04:37.

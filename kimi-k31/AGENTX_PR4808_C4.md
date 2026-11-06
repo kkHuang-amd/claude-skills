@@ -141,3 +141,34 @@ draft8 loses at c4 too: per step 19.8 -> 22.6 ms (+14 %). Driver done 17:00, GPU
 - DROP 8 draft tokens: c1 -7.2 %, c4 -2.8 % tok/s/GPU at CI-simulated acceptance (3.68 vs 3.43).
 - c1: hit already equals B300; remaining gap is decode per-step time (ITL p90 5.72 vs 4.15 ms). Not yet tried:
   B300 runs without `--prefill-decode-interval 16` / `--schedule-policy lpm`.
+
+```text
+c1                tok/s/GPU  P90 intvty  TTFT p50/mean s  ITL mean/p90 ms  ISL     hit    errors
+base (13:22)      2186.0     174.7       0.49 / 0.70      4.30 / 5.72      251408  0.971  0/249
+no pdi, no lpm    2189.5     172.8       0.48 / 0.66      4.31 / 5.79      251407  0.971  0/249   (11-06 00:41)
+```
+Null (+0.2 % / -1.1 %): `--prefill-decode-interval 16` and `--schedule-policy lpm` are not the c1 ITL-tail gap to B300.
+
+InferenceX PR 4846 (2026-11-05, zijiecode) independently sets `max-mamba-cache-size 150` at c1 / c4 (same as our
+c4 finding), adds `SGLANG_ROCM_SPARSE_MLA_DECODE_HIP=1` (already default-on in our sglang) and bumps the image to
+`lmsysorg/sglang-rocm:dev-kimi-k31-pro-mi35x-1105` (split-K sparse MLA decode/verify, DFLASH fc row-shard in
+prefill, MoE small sort to 1024; the last two not found in our sglang build).
+
+### Why 8 draft tokens cost more: c1 decode trace (crsuse2-m2m-v3-131, 2026-11-06 00:41-00:48)
+
+`/shared_nfs/kk/results/Kimi-K3.1-Pro/trace-tok68-20261105` (points c1-base / c1-draft8 + SGLANG_PROFILE_* env,
+bench_serving random ISL 196608 / OSL 512 c1, profile 2 s from the last prefill chunk; `trace_breakdown.py` TP0):
+```text
+per step GPU ms        6 tok    8 tok    delta
+DRAFT                  1.174    1.217    +0.04
+VERIFY                 12.268   14.104   +1.84
+  dsa_indexer          0.517    1.586    +1.07   k_scatter<0,true,16> x24/step: 17.4 -> 61.9 us/call (x3.6 for x1.33 rows)
+  other (mono k2)      7.528    8.215    +0.69   k3_mono_k2_s6_* -> k3_mono_k2_s8_* (+9 %)
+  kda / sparse_mla     3.604    3.682    +0.08
+total                  13.44    15.32    +1.88 (+14 %)
+```
+- The DSA indexer top-k scatter scales super-linearly 6 -> 8 rows: the main lever. Linear (~23 us/call) would
+  save ~1 ms/step -> 8-token step ~+7 % = break-even with the +7.3 % simulated acceptance.
+- AgentX c1 bs1 (no profiler) measured +3.3 ms/step; GPU explains ~1.9 ms, ~1.4 ms unexplained (host?).
+  The synthetic bench's TPOT (8 tok 7.52 ms) is inflated by the profiler; do not use its wall clock.
+- Next: microbench `sglang::dsa_gfx950::topk::k_scatter` at ctx ~196 k, rows 6 vs 8 (launch config / occupancy).

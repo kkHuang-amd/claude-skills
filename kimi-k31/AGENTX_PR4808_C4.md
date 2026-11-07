@@ -4,6 +4,20 @@ Owner node: crsuse2-m2m-v3-131. Started 2026-11-05.
 
 ## CONTINUE HERE
 
+**c1 gap mxmoe vs c1-wide-opt is REAL (2026-11-07 05:20 UTC, crsuse2-m2m-v3-131; GPUs free):** AgentX c1 x2 each
+(`agentx-rerun-20261107/`): wide-opt P90 intvty 189.4 / 191.4, ITL p90 5.28 / 5.22; mxmoe-p16 186.3 / 186.0, 5.37 / 5.38.
+Per-step classes (`agentx-k31/itl_classes.py <profile_export.jsonl>`): solo steps equal (med 13.90 vs 13.92 ms);
+concurrent-decode steps med 18.25 / 18.24 (old) vs 18.59 / 18.65 (new) = +0.37 ms -> the p90 gap.
+Synthetic bs2/bs3 traces at ISL 300k (`bsN-300k-20261107/`, random tokens) show NO gap (bs2 VERIFY 18.08/18.04 vs
+18.10/18.06, bs3 21.27/21.11 vs 21.05/21.10). Traces inside real AgentX load (`agentx-prof-20261107/`, points
+`c1-*-prof`, 2 s windows at a bs2 step; `agentx-k31/verify_diff.py old new`): VERIFY 16.22 -> 16.61 (cap1),
+15.36 -> 15.59 (cap3). cap1 per step, new - old: (A) routed MoE BM16 under real routing +157 us (stage1 +1.0,
+stage2 +0.7 us/layer vs c6 BM32); (B) `__amd_rocclr_copyBuffer` 29 -> 128 us (+100; presumed DSA-layer fused_moe
+copying a misaligned atomic output, NOT verified); (C) many non-MoE kernels +5-15 % (Cijk hipBLASLt +26/+19,
+sparse_mla +19, hgemm +15, quantize_k +14 ...; also in synthetic traces) ~ +150 us; allreduce lamport -60;
+DSA-layer sort/topk -60; GPU idle +0.08 ms. Next: (1) verify/fix B (aligned MoE output for DSA layers),
+(2) find why C (new aiter tuned-GEMM table picks?), (3) retune the token-16 mxmoe BM16 row on real routing.
+
 **c1 on upstream aiter (2026-11-07 00:53 UTC, crsuse2-m2m-v3-131; GPUs free):** point `agentx-k31/points/c1-mxmoe-p16`
 = c1-base + aiter-main/flydsl 0.4.2/gate-mode overlay PYTHONPATH + `K31_GU_ITLV_OVERLAY=1` + launch top-k + sort
 (aux16), default upstream table. bs1 trace (`bs1-mxmoe-20261106/`, same mix): old c1-wide-opt 13.339 ms/step

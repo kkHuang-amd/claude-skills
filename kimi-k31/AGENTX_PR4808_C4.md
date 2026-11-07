@@ -4,6 +4,34 @@ Owner node: crsuse2-m2m-v3-131. Started 2026-11-05.
 
 ## CONTINUE HERE
 
+**NEXT SESSION TASK (set 2026-11-07 12:05 UTC by the user; owner node crsuse2-m2m-v3-131, re-check `hostname`,
+GPUs free):** continue optimizing K3.1 c1 on upstream aiter (mxmoe). State as of now:
+- Result: on aiter main 0fa23206b + flydsl 0.4.2 + gate-mode overlay, point `agentx-k31/points/c1-mxmoe-p16-fix`
+  (presort16 + fix B + fix C) reaches AgentX c1 P90 intvty 191.7 / 191.5 (old c1-wide-opt 189.4 / 191.4), gsm8k
+  within noise (same-config spread ~12/1319; use >= 3 runs). Details: blocks below dated 2026-11-07.
+- UNCOMMITTED local work (nothing pushed; ask the user before commit/push/PR):
+  (1) sgl-amd-mono `/sgl-workspace/sgl-amd-mono` branch `k31/wide-launch-presort16` (5 files, on top of #111's
+      k31/wide-launch-topk): launch BM16 presort "aux16" -> `aiter.presorted_moe.register_presorted_moe`.
+  (2) aiter worktree `/sgl-workspace/aiter-main` branch `k31/adaptive-sort-output` (fix B, `aiter/fused_moe.py`
+      +21/-6: adaptive aux sort uses a 4-byte-aligned caller output). Local test copies in op_tests/
+      (`test_moe_2stage_k31out.py`, `_k31numeric.py`) are scratch, not for commit.
+  (3) fix C = kimik3 a8w4 token-16/inter-384 row stage2 -> `flydsl_moe2_layout_afp8_wfp4_bf16_t16x128x128_atomic_nt_sbm16`
+      (csv in the point dir; not in aiter yet).
+  (4) SGLang bug (not fixed in tree): K3 situ a8w4 w13 is GU-interleaved but moe_runner/aiter.py passes
+      gate_mode=SEPARATED -> wrong output with aiter >= #6464 mxmoe rows. Worked around only by the PYTHONPATH
+      overlay `/sgl-workspace/k31-gu-overlay/sitecustomize.py` (K31_GU_ITLV_OVERLAY=1; K31_NO_ADAPTIVE_OUTPUT=1
+      turns fix B off).
+  Pending user decisions: where (1)-(4) go (PRs to fork/upstream, #111 or new PR).
+- Next optimization: (A) mxmoe BM16 stage1 under real routing is +1.8 us/call vs c6 (~+0.1 ms/bs2 step, the last
+  gap). Must be measured on REAL AgentX load (synthetic random-token traces do not show A): capture with
+  `fixBC-20261107/prof.sh`-style runs (points `*-prof`), compare with `agentx-k31/verify_diff.py`; candidates are
+  BM16 mxmoe g1 names (tile 16x128/16x256 x256, flags f16in/hpf/nt/fp8out/situv2, xcd0/2/4). Then the earlier
+  list: shrink the wide launch's latency stages, bs1 step (B300 gap).
+- Tools (all in `/shared_nfs/kk/agentx-k31/`): itl_classes.py (AgentX per-step classes), verify_diff.py,
+  copy_ctx.py, prev_kernel.py, stream_overlap.py, gaps.py (one-off 14-29 ms host stalls exist in every trace: compare
+  kernel busy, not span), capture_trace_bsN.sh, driver_matrix.sh (AgentX). Never `pkill -f` a pattern that appears
+  in your own command line; kill by PID.
+
 **gsm8k1319 noise study: B and C cost no accuracy (2026-11-07 12:00 UTC, crsuse2-m2m-v3-131; GPUs free;
 `gsm-recheck-20261107/`; overlay switch K31_NO_ADAPTIVE_OUTPUT=1 turns fix B off):**
 ```text

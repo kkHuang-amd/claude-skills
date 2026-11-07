@@ -4,6 +4,21 @@ Owner node: crsuse2-m2m-v3-131. Started 2026-11-05.
 
 ## CONTINUE HERE
 
+**B and C root-caused (2026-11-07 07:40 UTC, crsuse2-m2m-v3-131; GPUs free):**
+- B (copyBuffer +100 us/step): 24 x ~4.2 us per step, one after every DSA layer's routed gemm2
+  (`agentx-k31/copy_ctx.py <trace>`). aiter `_moe_sorting_impl` takes the BM16 adaptive (aux) sort with
+  "`output` not threaded here" -> `_adaptive_moe_sort` allocates its own moe_buf and `_return_output` copies it
+  into the caller's output. KDA layers (presort16, in-place output) do not copy. Fix = aiter: let the adaptive
+  sort use a suitable caller `output` (shape/dtype/contiguous/4-byte aligned), as the presort path already does.
+- C (non-MoE kernels +5-15 %, ~+150 us/step): same kernels/counts/predecessors, no stream overlap, NOT lamport
+  (AITER_CUSTOM_AR_DISABLE_LAMPORT=1 same), NOT xcd4 (stage1 xcd4/none/xcd2/16x128 all same), NOT env (new env +
+  c6 row = normal). Cause: the token-16/inter-384 row's stage2 `flydsl_moe2_layout_afp8_wfp4_bf16_t16x128x128_
+  atomic_sbm16` lacks `nt` -> expert weights evict L2/MALL and the following DSA-layer attention kernels slow
+  down. With `..._t16x128x128_atomic_nt_sbm16` (`xcd-cands-20261107/`, bs2 196k synthetic): DSA kernels back
+  to old (Cijk MT128 8.70 -> 8.10, sparse_mla 17.38 -> 16.64 us), stage2 18.56 -> 17.66 us, VERIFY 17.72 ->
+  17.44 ms (old c6 env 17.81). Stage1 xcd2 + nt: 17.57 (worse). Only tok 2 and tok 16 inter-384 rows lack nt
+  in aiter main's kimik3 a8w4 table. Next: AgentX c1 with token-16 stage2 = atomic_nt (+ quick/gsm check).
+
 **c1 gap mxmoe vs c1-wide-opt is REAL (2026-11-07 05:20 UTC, crsuse2-m2m-v3-131; GPUs free):** AgentX c1 x2 each
 (`agentx-rerun-20261107/`): wide-opt P90 intvty 189.4 / 191.4, ITL p90 5.28 / 5.22; mxmoe-p16 186.3 / 186.0, 5.37 / 5.38.
 Per-step classes (`agentx-k31/itl_classes.py <profile_export.jsonl>`): solo steps equal (med 13.90 vs 13.92 ms);

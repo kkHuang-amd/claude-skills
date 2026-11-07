@@ -4,6 +4,22 @@ Owner node: crsuse2-m2m-v3-131. Started 2026-11-05.
 
 ## CONTINUE HERE
 
+**B fixed + B+C validated (2026-11-07 08:25 UTC, crsuse2-m2m-v3-131; GPUs free):** B = aiter-main branch
+`k31/adaptive-sort-output` (local worktree `/sgl-workspace/aiter-main`, uncommitted; `aiter/fused_moe.py` +21/-6:
+`_adaptive_moe_sort(output=)` uses a caller output as moe_buf when shape/dtype/device/contiguous/4-byte aligned,
+`_moe_sorting_impl` passes it). aiter op test with every test_fmoe call given a -7.0-filled output= buffer
+(`op_tests/test_moe_2stage_k31out.py`, local only): kimik3 a8w4 tok16/32 rows 144/144 in-place, 0 copy-back,
+logits_diff 1.55e-5 / 1.57e-5 (= before); a4w4 mxmoe row 128/128 in-place, strict accuracy pass; original test
+incl. 7 presort contracts pass. Point `agentx-k31/points/c1-mxmoe-p16-fix` (+`-prof`) = c1-mxmoe-p16 + token-16
+stage2 atomic_nt csv (C) + B (via PYTHONPATH aiter-main) (`fixBC-20261107/`): quick 8/8 (token counts differ
+slightly from before: greedy text changes, answers right); synthetic bs2 196k: copy-after-gemm2 0, VERIFY kernel
+busy 17.36 ms (C only 17.44, old c6 17.81). NOTE: every trace has ~1 one-off 14-29 ms host stall (old env too,
+e.g. old cap1 14 ms at set_mla_kv_buffer -> sparse_mla); compare kernel busy, not span (`agentx-k31/gaps.py`).
+Real AgentX load cap1 (same step mix): kernel busy old 16.09 / mxmoe 16.40 / B+C 16.19 ms -> gap 0.31 -> 0.10 ms;
+what is left is A = stage1 mxmoe BM16 under real routing (+163 us/step, +1.8 us/call x 92); stage2 nt now equal
+(1455 vs 1447 us). Est. AgentX p90 ~189-190. Next (user to choose): AgentX c1 x2 + gsm8k on c1-mxmoe-p16-fix, or
+first real-load stage1 BM16 candidates.
+
 **B and C root-caused (2026-11-07 07:40 UTC, crsuse2-m2m-v3-131; GPUs free):**
 - B (copyBuffer +100 us/step): 24 x ~4.2 us per step, one after every DSA layer's routed gemm2
   (`agentx-k31/copy_ctx.py <trace>`). aiter `_moe_sorting_impl` takes the BM16 adaptive (aux) sort with

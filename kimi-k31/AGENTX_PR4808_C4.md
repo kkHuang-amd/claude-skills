@@ -4,6 +4,20 @@ Owner node: crsuse2-m2m-v3-131. Started 2026-11-05.
 
 ## CONTINUE HERE
 
+**gsm8k1319 noise study: B and C cost no accuracy (2026-11-07 12:00 UTC, crsuse2-m2m-v3-131; GPUs free;
+`gsm-recheck-20261107/`; overlay switch K31_NO_ADAPTIVE_OUTPUT=1 turns fix B off):**
+```text
+config (all new env + overlay + presort16)     correct / 1319 per run      mean
+p16 (no B, no C)                               1289, 1281, 1277            1282.3
+p16 + B                                        1281                        -
+C only (B off)                                 1282                        -
+B + C                                          1279, 1274                  -
+```
+Same-config spread is ~12 questions (p16: 1289..1277), so B and C are within noise. C (nt stage2) is the one kernel
+that differs in the server logs and changes greedy paths (answer-text overlap clusters with/without C), but the
+aiter op test gives token-16 logits_diff 1.48e-5 with nt vs 1.56e-5 without. Use >=3 runs per config for gsm8k
+comparisons at this level.
+
 **AgentX c1 with B+C = c1-wide-opt level (2026-11-07 10:50 UTC, crsuse2-m2m-v3-131; GPUs free;
 `agentx-fixBC-20261107/`, point c1-mxmoe-p16-fix):**
 ```text

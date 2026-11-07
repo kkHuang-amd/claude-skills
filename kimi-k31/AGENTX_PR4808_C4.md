@@ -4,6 +4,22 @@ Owner node: crsuse2-m2m-v3-131. Started 2026-11-05.
 
 ## CONTINUE HERE
 
+**AgentX c1 with B+C = c1-wide-opt level (2026-11-07 10:50 UTC, crsuse2-m2m-v3-131; GPUs free;
+`agentx-fixBC-20261107/`, point c1-mxmoe-p16-fix):**
+```text
+                       P90 intvty     ITL p90 ms   concurrent-decode med / mean ms     solo med   tok/s/GPU
+c1-wide-opt (old)      189.4 / 191.4  5.28 / 5.22  18.25/20.94, 18.24/20.80            13.91/13.90 2188.7/2193.3
+mxmoe before fixes     186.3 / 186.0  5.37 / 5.38  18.59/21.05, 18.65/21.03            13.92/13.93 2187.7/2189.8
+mxmoe + B + C          191.7 / 191.5  5.22 / 5.22  18.38/20.65, 18.32/20.62            13.91/13.86 2185.5/2194.3
+```
+r1 had 1/249 InvalidInferenceResultError (session 91 turn 16: a request whose normal output is 9 reasoning-only
+tokens; the same request also fails in old-env c1-draft8; numerically fragile, not a bug); r2 0/249.
+gsm8k1319 (graphs) on B+C: 0.9697, trunc 0 (new-env off 0.9735, p16 before fixes 0.9773, old baseline 0.9788).
+Per-question (sgl_eval outputs under /root/.sgl_eval/sglang_run_eval/): off->B+C lost 17 gained 12; p16->B+C lost
+18 gained 8 (sign test p~0.08); wrong answers are normal `stop` + boxed numbers (reasoning slips, no garbage /
+truncation); identical answer text vs off 988/1319 (p16: 1087) -> C's different stage2 kernel changes greedy paths.
+Not significant yet; next: rerun gsm8k1319 on B+C (and C-only if it stays ~0.970).
+
 **B fixed + B+C validated (2026-11-07 08:25 UTC, crsuse2-m2m-v3-131; GPUs free):** B = aiter-main branch
 `k31/adaptive-sort-output` (local worktree `/sgl-workspace/aiter-main`, uncommitted; `aiter/fused_moe.py` +21/-6:
 `_adaptive_moe_sort(output=)` uses a caller output as moe_buf when shape/dtype/device/contiguous/4-byte aligned,

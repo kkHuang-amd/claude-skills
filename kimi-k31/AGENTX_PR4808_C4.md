@@ -4,6 +4,19 @@ Owner node: crsuse2-m2m-v3-131. Started 2026-11-05.
 
 ## CONTINUE HERE
 
+**c1 on upstream aiter (2026-11-07 00:53 UTC, crsuse2-m2m-v3-131; GPUs free):** point `agentx-k31/points/c1-mxmoe-p16`
+= c1-base + aiter-main/flydsl 0.4.2/gate-mode overlay PYTHONPATH + `K31_GU_ITLV_OVERLAY=1` + launch top-k + sort
+(aux16), default upstream table. bs1 trace (`bs1-mxmoe-20261106/`, same mix): old c1-wide-opt 13.339 ms/step
+(DRAFT 1.172 + VERIFY 12.167) vs new 13.407 (1.166 + 12.241), +0.5 %. AgentX c1 (`agentx-mxmoe-p16-20261107/`):
+```text
+                     tok/s/GPU  ITL mean/p90 ms  P90 intvty  TTFT p50/mean s  hit    errors
+c1-wide-opt (old)    2188.7     4.25 / 5.28      189.4       0.49 / 0.69      0.971  0/249
+c1-mxmoe-p16 (new)   2187.7     4.24 / 5.37      186.3       0.50 / 0.70      0.971  0/249
+```
+=> moving to upstream aiter (mxmoe + launch presort) is performance-neutral for c1 (n=1 each; p90 -1.6 % is within
+run-to-run spread, bs1 +0.5 %, bs2 step equal 17.8 ms). No c1 gain from the aiter upgrade itself; the value of the
+presort16 code is that it keeps c1-wide-opt's level once SGLang moves to aiter >= #6464 (without it: +9.5 us/layer).
+
 **RESULT (2026-11-06 19:09 UTC, crsuse2-m2m-v3-131; GPUs free, nothing running): launch BM=16 presort works on
 upstream aiter once the gate layout is right.** All on aiter 0fa23206b + flydsl 0.4.2 + the gate-mode overlay
 below, point c1-base, same decode mix every trace (7 x bs2, 2 x bs3); `presort16-20261106/status.txt`:
